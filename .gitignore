@@ -1,0 +1,32 @@
+# Build artifacts
+build/
+classes/
+out/
+target/
+sources.txt
+*.class
+*.jar
+*.war
+*.ear
+*.jsa
+
+# Logs & temp
+*.log
+*.tmp
+hs_err_pid*
+
+# IDEs & Editors
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+.nrepl-port
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
