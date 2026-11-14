@@ -1,9 +1,10 @@
 (ns cljl.core-test
-  (:require [clojure.test :refer [deftest is testing run-tests]]
+  (:require [clojure.test :refer [deftest is are testing run-tests]]
             [clojure.string :as str]
             [clojure.set :as set]
             [clojure.walk :as walk]
-            [clojure.edn :as edn]))
+            [clojure.edn :as edn]
+            [clojure.core.async :as async]))
 
 (deftest arithmetic-and-numbers-test
   (testing "basic arithmetic and ratios"
@@ -348,6 +349,267 @@
              (with-out-str (doc if))))
       (require '[clojure.repl :as repl])
       (is (some? (resolve 'repl/doc))))))
+
+(defrecord P2Rec [a b])
+
+(deftest phase2-test
+  (testing "Transients (HAMT, Vector, Set)"
+    (let [t (transient {})
+          t (reduce (fn [m i] (assoc! m i (* i i))) t (range 1500))
+          _ (is (= 1500 (count t)))
+          _ (is (= 100 (t 10)))
+          t (dissoc! t 0 1 2 500 1000)
+          _ (is (= 1495 (count t)))
+          m (persistent! t)]
+      (is (= 1495 (count m)))
+      (is (= 9 (get m 3)))
+      (is (nil? (get m 500)))
+      (is (= :err (try (assoc! t :x 1) :no-err (catch IllegalAccessError _ :err)))))
+    (let [tv (assoc! (transient [1 2 3]) 0 10 2 30)
+          _ (is (= 10 (tv 0)))
+          _ (is (= 30 (get tv 2)))
+          pv (persistent! (pop! (conj! tv 40)))]
+      (is (= [10 2 30] pv)))
+    (let [ts (disj! (conj! (conj! (transient #{1 2}) 3) 4) 1 3)]
+      (is (= #{2 4} (persistent! ts))))
+    (let [tm (conj! (conj! (transient {:a 1}) (subvec [:b 2] 0 2)) nil)]
+      (is (= {:a 1 :b 2} (persistent! tm))))
+    (let [tm (transient {:a 1})
+          res (deref (future (try (assoc! tm :b 2) :no-err (catch IllegalAccessError _ :thread-err))))]
+      (is (= :thread-err res))
+      (is (= {:a 1} (persistent! tm)))))
+
+  (testing "Equivalence and hashing"
+    (is (= (hash {:a 1 :b 2}) (hash (P2Rec. 1 2))))
+    (is (= (hash {:a 1 :b 2}) (hash (sorted-map :a 1 :b 2))))
+    (is (= (hash #{1 2 3}) (hash (sorted-set 1 2 3))))
+    (is (false? (= (sorted-map 1 :a) (sorted-map :x :a))))
+    (is (false? (= (sorted-set 1) (sorted-set :x))))
+    (is (true? (distinct? 1 2 3)))
+    (is (false? (distinct? 1 (Integer/valueOf 1))))
+    (is (= [1 [1 2]] (distinct [1 (Integer/valueOf 1) [1 2] '(1 2)])))
+    (is (= [1 [1 2]] (into [] (distinct) [1 (Integer/valueOf 1) [1 2] '(1 2)])))
+    (is (= {1 2} (frequencies [1 (Integer/valueOf 1)])))
+    (is (= {[1 2] [[1 2] '(1 2)]} (group-by identity [[1 2] '(1 2)]))))
+
+  (testing "Java interop, proxy, and reify"
+    (let [sb (StringBuilder.)]
+      (.append sb 123)
+      (.append sb "abc")
+      (is (= "123abc" (.toString sb))))
+    (let [ul (java.util.List/of 1 2 3)]
+      (is (= 3 (.size ul)))
+      (is (= [1 2 3] (vec ul))))
+    (let [arr (into-array Object [3 1 4 1 5])]
+      (java.util.Arrays/sort arr (fn [a b] (- b a)))
+      (is (= [5 4 3 1 1] (vec arr))))
+    (let [p (reify java.util.function.Predicate
+              (test [_ x] (when (> x 5) :yes)))
+          neg (.negate p)]
+      (is (true? (.test p 10)))
+      (is (false? (.test p 3)))
+      (is (true? (.test neg 3)))
+      (is (false? (.test neg 10))))
+    (let [o (proxy [Object] [] (toString [] "custom-proxy"))]
+      (is (= "custom-proxy" (.toString o)))))
+
+  (testing "Reader, streaming eval, destructuring, case"
+    (is (= :err (try (read-string "08") :no-err (catch Exception _ :err))))
+    (is (= 123M (read-string "123M")))
+    (is (= 0.015M (read-string "1.5e-2M")))
+    (is (= [:clojure.string/x "a-b"]
+           (try
+             (load-string "(ns cljl.stream-test (:require [clojure.string :as s])) [::s/x (s/join \"-\" [\"a\" \"b\"])]")
+             (finally
+               (in-ns 'cljl.core-test)))))
+    (let [f (fn [& {:keys [a b] :or {b false}}] [a b])]
+      (is (= [1 false] (f :a 1)))
+      (is (= [1 2] (f :a 1 {:b 2}))))
+    (let [{:my.ns/keys [x] :keys [:a/y]} {:my.ns/x 10 :a/y 20}]
+      (is (= [10 20] [x y])))
+    (is (= :matched (case (Integer/valueOf 2) 1 :one 2 :matched :other)))
+    (is (= :vec (case '(1 2) [1 2] :vec :other))))
+
+  (testing "core.async alts!! with put port and :default"
+    (let [c (async/chan 1)]
+      (is (= [true c] (async/alts!! [[c :hello]])))
+      (is (= :hello (async/<!! c)))
+      (is (= [:fallback :default] (async/alts!! [c] :default :fallback)))
+      (async/close! c)
+      (is (false? (async/put! c :x))))))
+
+(defmacro p3-mac "p3 macro" [x] `(+ 1 ~x))
+
+(deftest phase3-test
+  (testing "Source :file and :line metadata and clojure.repl/source-fn"
+    (let [m (meta #'doc-test-foo)
+          mm (meta #'p3-mac)]
+      (is (string? (:file m)))
+      (is (pos? (:line m)))
+      (is (string? (:file mm)))
+      (is (pos? (:line mm))))
+    (let [tmp (java.io.File/createTempFile "cljl-src" ".clj")
+          path (.getAbsolutePath tmp)]
+      (try
+        (spit tmp "(ns cljl.src-tmp)\n\n(defn tmp-adder\n  \"adds two\"\n  [a b]\n  (+ a b))\n")
+        (load-file path)
+        (let [v (find-var 'cljl.src-tmp/tmp-adder)
+              vm (meta v)]
+          (is (= path (:file vm)))
+          (is (= 3 (:line vm)))
+          (let [src (in-ns 'cljl.src-tmp)]
+            (try
+              (is (= "(defn tmp-adder\n  \"adds two\"\n  [a b]\n  (+ a b))"
+                     ((resolve 'clojure.repl/source-fn) 'tmp-adder)))
+              (finally
+                (in-ns 'cljl.core-test)))))
+        (finally
+          (.delete tmp)))))
+
+  (testing "Compile error messages include file and line context"
+    (let [msg (try
+                (load-string "\n\n(+ 1 nonexistent-var-xyz)")
+                nil
+                (catch Exception e (.getMessage e)))]
+      (is (some? msg))
+      (is (clojure.string/includes? msg "<load-string>:3"))))
+
+  (testing "BytecodeJIT compiles case, locking, monitor, set!, and numeric constants"
+    (let [f-case (fn [x]
+                   (case x
+                     1 :one
+                     (2 3) :two-or-three
+                     [4 5] :vec
+                     :default))
+          f-case-no-def (fn [x]
+                          (case x
+                            :a 10
+                            :b 20))
+          f-lock (fn [lk a]
+                   (locking lk
+                     (locking lk
+                       (swap! a inc))))
+          f-lock-ex (fn [lk]
+                      (locking lk
+                        (throw (IllegalStateException. "boom"))))
+          f-mon (fn [obj]
+                  (monitor-enter obj)
+                  (try
+                    :entered
+                    (finally
+                      (monitor-exit obj))))
+          f-mon-plain (fn [obj]
+                        (monitor-enter obj)
+                        (monitor-exit obj)
+                        :ok)
+          f-arith (fn [x] (+ 1000000 (* 3 x) 1.5))]
+      (is (true? (cljl.BytecodeJIT/canCompile f-case)))
+      (is (some? (cljl.BytecodeJIT/compile f-case)))
+      (is (true? (cljl.BytecodeJIT/canCompile f-case-no-def)))
+      (is (some? (cljl.BytecodeJIT/compile f-case-no-def)))
+      (is (true? (cljl.BytecodeJIT/canCompile f-lock)))
+      (is (some? (cljl.BytecodeJIT/compile f-lock)))
+      (is (true? (cljl.BytecodeJIT/canCompile f-lock-ex)))
+      (is (some? (cljl.BytecodeJIT/compile f-lock-ex)))
+      (is (true? (cljl.BytecodeJIT/canCompile f-mon-plain)))
+      (is (some? (cljl.BytecodeJIT/compile f-mon-plain)))
+      (is (true? (cljl.BytecodeJIT/canCompile f-arith)))
+      (is (some? (cljl.BytecodeJIT/compile f-arith)))
+
+      (let [lk (Object.)
+            a (atom 0)]
+        (dotimes [_ 25]
+          (is (= :one (f-case 1)))
+          (is (= :two-or-three (f-case 2)))
+          (is (= :two-or-three (f-case (Integer/valueOf 3))))
+          (is (= :vec (f-case '(4 5))))
+          (is (= :default (f-case :missing)))
+          (is (= 10 (f-case-no-def :a)))
+          (is (= :err (try (f-case-no-def :z) :no (catch IllegalArgumentException _ :err))))
+          (f-lock lk a)
+          (is (= :boom (try (f-lock-ex lk) :no (catch IllegalStateException _ :boom))))
+          (is (= :entered (f-mon lk)))
+          (is (= :ok (f-mon-plain lk)))
+          (is (= 1000013.5 (f-arith 4))))
+        (is (= 25 @a))))))
+
+(defprotocol P4Proto
+  (p4-a [this])
+  (p4-b [this]))
+
+(definterface P4Counter
+  (incAndGet [])
+  (getVal []))
+
+(deftype P4MutCell [^:volatile-mutable cnt]
+  P4Counter
+  (incAndGet [this]
+    (set! cnt (inc cnt))
+    cnt)
+  (getVal [this]
+    (let [cnt-local (+ cnt 0)]
+      cnt-local)))
+
+(deftest phase4-test
+  (testing "clojure.test thrown?, thrown-with-msg?, and are"
+    (is (thrown? IllegalArgumentException (throw (IllegalArgumentException. "bad"))))
+    (is (thrown-with-msg? IllegalStateException #"state-\d+" (throw (IllegalStateException. "bad state-42"))))
+    (are [x y] (= x y)
+      2 (+ 1 1)
+      9 (* 3 3)
+      6 (+ 1 2 3)))
+
+  (testing "condp with :>> ternary clauses and default"
+    (is (= "123" (condp re-find "abc123def" #"(\d+)" :>> second :none)))
+    (is (= 11 (condp #(%2 %1) {:a 10} :b :five :a :>> inc :other)))
+    (is (= :other (condp #(%2 %1) {:a 10} :b :five :c :>> inc :other)))
+    (is (thrown-with-msg? IllegalArgumentException #"No matching clause"
+          (condp = 99 1 :one 2 :two))))
+
+  (testing "Protocol per-method hierarchy fallback, caching, and invalidation"
+    (extend-type CharSequence
+      P4Proto
+      (p4-a [cs] (str "cs:" (.length cs))))
+    (extend-type String
+      P4Proto
+      (p4-b [s] (str "str:" s)))
+    (is (satisfies? P4Proto "hi"))
+    (is (extends? P4Proto String))
+    (dotimes [_ 5]
+      (is (= "cs:2" (p4-a "hi")))
+      (is (= "str:hi" (p4-b "hi"))))
+    (extend-type String
+      P4Proto
+      (p4-a [s] (str "override:" s)))
+    (is (= "override:hi" (p4-a "hi")))
+    (is (= "str:hi" (p4-b "hi"))))
+
+  (testing "ns metadata, :refer-clojure, prefix require with :rename, and loaded-libs"
+    (is (contains? (loaded-libs) 'clojure.string))
+    (try
+      (let [res (load-string
+                  "(ns cljl.p4-ns \"p4 doc\" {:author \"cljl\"}
+                     (:refer-clojure :exclude [get])
+                     (:require (clojure [string :refer [join] :rename {join my-join}])))
+                   (defn get [x] [:custom x])
+                   [(:doc (meta (the-ns 'cljl.p4-ns)))
+                    (:author (meta (the-ns 'cljl.p4-ns)))
+                    (get 7)
+                    (my-join \"-\" [\"a\" \"b\"])]")]
+        (is (= ["p4 doc" "cljl" [:custom 7] "a-b"] res)))
+      (finally
+        (in-ns 'cljl.core-test))))
+
+  (testing "clojure.string/replace-first with Fn and Character"
+    (is (= "a24b34" (str/replace-first "a12b34" #"\d+" #(str (* 2 (parse-long %))))))
+    (is (= "a:b-c" (str/replace-first "a-b-c" \- \:))))
+
+  (testing "deftype mutable fields with set!"
+    (let [c (->P4MutCell 0)]
+      (is (= 0 (.getVal c)))
+      (is (= 1 (.incAndGet c)))
+      (is (= 2 (.incAndGet c)))
+      (is (= 2 (.getVal c))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

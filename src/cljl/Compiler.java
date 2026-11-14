@@ -1,7 +1,11 @@
 package cljl;
 
 import cljl.lang.*;
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Optimizing Analyzer, Macroexpander, Destructuring Compiler, and Specialized AST
@@ -40,7 +44,8 @@ public final class Compiler {
             Symbol.intern("set!"),
             Symbol.intern("case*"),
             Symbol.intern("monitor-enter"),
-            Symbol.intern("monitor-exit")
+            Symbol.intern("monitor-exit"),
+            Symbol.intern("locking*")
     );
 
     public static boolean isSpecial(Symbol sym) {
@@ -57,17 +62,35 @@ public final class Compiler {
     }
 
     public static Object load(String src, String filename) {
+        return loadReader(new Reader(src, filename), filename);
+    }
+
+    public static Object load(java.io.Reader rdr, String filename) {
+        return loadReader(new Reader(rdr, filename, null), filename);
+    }
+
+    private static Object loadReader(Reader reader, String filename) {
         Var.pushThreadBindings(Map.of(RT.FILE, filename != null ? filename : "NO_SOURCE_PATH"));
         try {
-            List<Object> forms = Reader.readAll(src, filename);
-            Object last = null;
-            for (Object form : forms) {
-                last = eval(form);
-            }
-            return last;
+            Object[] last = new Object[]{null};
+            reader.consumeForms(form -> last[0] = eval(form));
+            return last[0];
         } finally {
             Var.popThreadBindings();
         }
+    }
+
+    private static final ThreadLocal<Integer> CURRENT_LINE = new ThreadLocal<>();
+    private static final Keyword LINE_KW = Keyword.intern("line");
+    private static final Keyword FILE_KW = Keyword.intern("file");
+
+    private static String locSuffix() {
+        Object f = RT.FILE.get();
+        Integer l = CURRENT_LINE.get();
+        if (f != null && l != null) return " (" + f + ":" + l + ")";
+        if (l != null) return " (line " + l + ")";
+        if (f != null) return " (" + f + ")";
+        return "";
     }
 
     // ========================================================================
@@ -76,6 +99,19 @@ public final class Compiler {
 
     public static Object macroexpand1(Object form) {
         return macroexpand1(form, null);
+    }
+
+    private static Object preserveLine(Object orig, Object expanded) {
+        if (expanded != orig && orig instanceof IMeta fm && fm.meta() != null && expanded instanceof IObj eo) {
+            Object lineObj = fm.meta().valAt(LINE_KW);
+            if (lineObj != null) {
+                PersistentHashMap em = eo.meta();
+                if (em == null || !em.containsKey(LINE_KW)) {
+                    return eo.withMeta((em != null ? em : PersistentHashMap.EMPTY).assoc(LINE_KW, lineObj));
+                }
+            }
+        }
+        return expanded;
     }
 
     private static Object macroexpand1(Object form, Scope scope) {
@@ -95,22 +131,22 @@ public final class Compiler {
             Fn macroFn = (Fn) v.deref();
             ISeq args = s.next();
             Object[] argArr = RT.toArray(args);
-            return macroFn.applyTo(argArr);
+            return preserveLine(form, macroFn.applyTo(argArr));
         }
 
         // Interop sugar macroexpansion:
         // 1. (ClassName. arg1 arg2) -> (new ClassName arg1 arg2)
         if (sym.ns == null && sym.name.endsWith(".") && sym.name.length() > 1 && !sym.name.startsWith(".")) {
             Symbol classSym = Symbol.intern(sym.name.substring(0, sym.name.length() - 1));
-            return RT.cons(Symbol.intern("new"), RT.cons(classSym, s.next()));
+            return preserveLine(form, RT.cons(Symbol.intern("new"), RT.cons(classSym, s.next())));
         }
         // 2. (.method target arg1 arg2) -> (. target method arg1 arg2)
         if (sym.ns == null && sym.name.startsWith(".") && sym.name.length() > 1 && !sym.name.equals("..")) {
             ISeq rest = s.next();
-            if (rest == null) throw new IllegalArgumentException("Malformed member expression: " + form);
+            if (rest == null) throw new IllegalArgumentException("Malformed member expression: " + form + locSuffix());
             Object target = rest.first();
             Symbol memberSym = Symbol.intern(sym.name.substring(1));
-            return RT.cons(Symbol.intern("."), RT.cons(target, RT.cons(memberSym, rest.next())));
+            return preserveLine(form, RT.cons(Symbol.intern("."), RT.cons(target, RT.cons(memberSym, rest.next()))));
         }
 
         return form;
@@ -192,13 +228,10 @@ public final class Compiler {
         } else if (bform instanceof PersistentHashMap map) {
             Symbol gmap = gensym("map__");
             out.add(gmap);
-            out.add(init);
+            out.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "__destructure-map"), init));
 
             Object orMap = map.valAt(Keyword.intern("or"), PersistentHashMap.EMPTY);
             Object asSym = map.valAt(Keyword.intern("as"), null);
-            Object keysVec = map.valAt(Keyword.intern("keys"), null);
-            Object strsVec = map.valAt(Keyword.intern("strs"), null);
-            Object symsVec = map.valAt(Keyword.intern("syms"), null);
 
             if (asSym != null) {
                 destructurePair(asSym, gmap, out);
@@ -208,48 +241,77 @@ public final class Compiler {
                 PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
                 Object k = me.key;
                 Object v = me.val;
-                if (k instanceof Keyword kw && ("or".equals(kw.getName()) || "as".equals(kw.getName())
-                        || "keys".equals(kw.getName()) || "strs".equals(kw.getName()) || "syms".equals(kw.getName()))) {
-                    continue;
+                if (k instanceof Keyword kw) {
+                    String kn = kw.getName();
+                    if ((kw.getNamespace() == null && ("or".equals(kn) || "as".equals(kn)))
+                            || "keys".equals(kn) || "strs".equals(kn) || "syms".equals(kn)) {
+                        continue;
+                    }
                 }
                 // In Clojure map destructuring {target-pat lookup-key}
-                Object defaultExpr = getOrDefault(orMap, k);
-                Object lookupExpr = makeGetExpr(gmap, v, defaultExpr);
+                boolean hasDef = hasOrDefault(orMap, k);
+                Object defaultExpr = hasDef ? getOrDefault(orMap, k) : null;
+                Object lookupExpr = makeGetExpr(gmap, v, hasDef, defaultExpr);
                 destructurePair(k, lookupExpr, out);
             }
 
-            if (keysVec != null) {
-                for (ISeq s = RT.seq(keysVec); s != null; s = s.next()) {
-                    Object item = s.first();
-                    Symbol sym = item instanceof Symbol sy ? sy : Symbol.intern(RT.name(item));
-                    Symbol localSym = Symbol.intern(sym.name);
-                    Keyword kw = Keyword.intern(sym.ns, sym.name);
-                    Object defaultExpr = getOrDefault(orMap, localSym);
-                    out.add(localSym);
-                    out.add(makeGetExpr(gmap, kw, defaultExpr));
-                }
-            }
-            if (strsVec != null) {
-                for (ISeq s = RT.seq(strsVec); s != null; s = s.next()) {
-                    Symbol sym = (Symbol) s.first();
-                    Symbol localSym = Symbol.intern(sym.name);
-                    Object defaultExpr = getOrDefault(orMap, localSym);
-                    out.add(localSym);
-                    out.add(makeGetExpr(gmap, sym.name, defaultExpr));
-                }
-            }
-            if (symsVec != null) {
-                for (ISeq s = RT.seq(symsVec); s != null; s = s.next()) {
-                    Symbol sym = (Symbol) s.first();
-                    Symbol localSym = Symbol.intern(sym.name);
-                    Object defaultExpr = getOrDefault(orMap, localSym);
-                    out.add(localSym);
-                    out.add(makeGetExpr(gmap, PersistentList.createFromArray(Symbol.intern("quote"), sym), defaultExpr));
+            for (ISeq s = map.seq(); s != null; s = s.next()) {
+                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                if (!(me.key instanceof Keyword kw)) continue;
+                String kn = kw.getName();
+                String defaultNs = kw.getNamespace();
+                if ("keys".equals(kn)) {
+                    for (ISeq ks = RT.seq(me.val); ks != null; ks = ks.next()) {
+                        Object item = ks.first();
+                        String itemNs;
+                        String itemName;
+                        if (item instanceof Symbol sy) {
+                            itemNs = sy.ns != null ? sy.ns : defaultNs;
+                            itemName = sy.name;
+                        } else if (item instanceof Keyword ikw) {
+                            itemNs = ikw.getNamespace() != null ? ikw.getNamespace() : defaultNs;
+                            itemName = ikw.getName();
+                        } else {
+                            itemNs = defaultNs;
+                            itemName = RT.name(item);
+                        }
+                        Symbol localSym = Symbol.intern(itemName);
+                        Keyword lookupKw = Keyword.intern(itemNs, itemName);
+                        boolean hasDef = hasOrDefault(orMap, localSym);
+                        Object defaultExpr = hasDef ? getOrDefault(orMap, localSym) : null;
+                        out.add(localSym);
+                        out.add(makeGetExpr(gmap, lookupKw, hasDef, defaultExpr));
+                    }
+                } else if ("strs".equals(kn)) {
+                    for (ISeq ss = RT.seq(me.val); ss != null; ss = ss.next()) {
+                        Object item = ss.first();
+                        String itemName = (item instanceof Symbol sy) ? sy.name : RT.name(item);
+                        Symbol localSym = Symbol.intern(itemName);
+                        boolean hasDef = hasOrDefault(orMap, localSym);
+                        Object defaultExpr = hasDef ? getOrDefault(orMap, localSym) : null;
+                        out.add(localSym);
+                        out.add(makeGetExpr(gmap, itemName, hasDef, defaultExpr));
+                    }
+                } else if ("syms".equals(kn)) {
+                    for (ISeq syms = RT.seq(me.val); syms != null; syms = syms.next()) {
+                        Symbol sym = (Symbol) syms.first();
+                        String lookupNs = sym.ns != null ? sym.ns : defaultNs;
+                        Symbol localSym = Symbol.intern(sym.name);
+                        Symbol lookupSym = Symbol.intern(lookupNs, sym.name);
+                        boolean hasDef = hasOrDefault(orMap, localSym);
+                        Object defaultExpr = hasDef ? getOrDefault(orMap, localSym) : null;
+                        out.add(localSym);
+                        out.add(makeGetExpr(gmap, PersistentList.createFromArray(Symbol.intern("quote"), lookupSym), hasDef, defaultExpr));
+                    }
                 }
             }
         } else {
             throw new IllegalArgumentException("Unsupported binding form: " + bform);
         }
+    }
+
+    private static boolean hasOrDefault(Object orMap, Object pat) {
+        return orMap instanceof PersistentHashMap m && pat instanceof Symbol sym && m.containsKey(Symbol.intern(sym.name));
     }
 
     private static Object getOrDefault(Object orMap, Object pat) {
@@ -259,8 +321,8 @@ public final class Compiler {
         return null;
     }
 
-    private static Object makeGetExpr(Symbol gmap, Object keyExpr, Object defaultExpr) {
-        if (defaultExpr != null) {
+    private static Object makeGetExpr(Symbol gmap, Object keyExpr, boolean hasDefault, Object defaultExpr) {
+        if (hasDefault) {
             return PersistentList.createFromArray(Symbol.intern("clojure.core", "get"), gmap, keyExpr, defaultExpr);
         }
         return PersistentList.createFromArray(Symbol.intern("clojure.core", "get"), gmap, keyExpr);
@@ -331,81 +393,113 @@ public final class Compiler {
     // ========================================================================
 
     public static Node compile(Object form, Scope scope) {
-        form = macroexpand(form, scope);
+        return compile(form, scope, false);
+    }
 
-        if (form == null) return ConstNode.NIL;
-        if (form == Boolean.TRUE) return ConstNode.TRUE;
-        if (form == Boolean.FALSE) return ConstNode.FALSE;
-        if (form instanceof Number || form instanceof String || form instanceof Character
-                || form instanceof Keyword || form instanceof java.util.regex.Pattern) {
+    public static Node compile(Object form, Scope scope, boolean inTail) {
+        Integer prevLine = CURRENT_LINE.get();
+        Integer formLine = prevLine;
+        if (form instanceof IMeta im && im.meta() != null) {
+            Object l = im.meta().valAt(LINE_KW);
+            if (l instanceof Number n) {
+                formLine = n.intValue();
+            }
+        }
+        boolean lineChanged = !Objects.equals(formLine, prevLine);
+        if (lineChanged) CURRENT_LINE.set(formLine);
+        try {
+            form = macroexpand(form, scope);
+
+            if (form instanceof IMeta im2 && im2.meta() != null) {
+                Object l2 = im2.meta().valAt(LINE_KW);
+                if (l2 instanceof Number n2) {
+                    int li = n2.intValue();
+                    if (!Objects.equals(li, CURRENT_LINE.get())) {
+                        CURRENT_LINE.set(li);
+                        lineChanged = true;
+                    }
+                }
+            }
+
+            if (form == null) return ConstNode.NIL;
+            if (form == Boolean.TRUE) return ConstNode.TRUE;
+            if (form == Boolean.FALSE) return ConstNode.FALSE;
+            if (form instanceof Number || form instanceof String || form instanceof Character
+                    || form instanceof Keyword || form instanceof java.util.regex.Pattern) {
+                return new ConstNode(form);
+            }
+
+            if (form instanceof Symbol sym) {
+                return compileSymbol(sym, scope);
+            }
+
+            if (form instanceof PersistentVector pv) {
+                if (pv.count() == 0) return new ConstNode(PersistentVector.EMPTY);
+                Node[] elems = new Node[pv.count()];
+                boolean allConst = true;
+                for (int i = 0; i < pv.count(); i++) {
+                    elems[i] = compile(pv.nth(i), scope, false);
+                    if (!(elems[i] instanceof ConstNode)) allConst = false;
+                }
+                if (allConst) {
+                    Object[] vals = new Object[elems.length];
+                    for (int i = 0; i < elems.length; i++) vals[i] = ((ConstNode) elems[i]).val;
+                    return new ConstNode(PersistentVector.createOwning(vals).withMeta(pv.meta()));
+                }
+                return new VectorNode(elems);
+            }
+
+            if (form instanceof PersistentHashMap pm) {
+                if (pm.count() == 0) return new ConstNode(PersistentHashMap.EMPTY);
+                Node[] kvs = new Node[pm.count() * 2];
+                int i = 0;
+                boolean allConst = true;
+                for (ISeq s = pm.seq(); s != null; s = s.next()) {
+                    PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                    kvs[i] = compile(me.key, scope, false);
+                    kvs[i + 1] = compile(me.val, scope, false);
+                    if (!(kvs[i] instanceof ConstNode) || !(kvs[i + 1] instanceof ConstNode)) allConst = false;
+                    i += 2;
+                }
+                if (allConst) {
+                    Object[] vals = new Object[kvs.length];
+                    for (int j = 0; j < kvs.length; j++) vals[j] = ((ConstNode) kvs[j]).val;
+                    return new ConstNode(PersistentHashMap.create(vals).withMeta(pm.meta()));
+                }
+                return new MapNode(kvs);
+            }
+
+            if (form instanceof PersistentHashSet ps) {
+                if (ps.count() == 0) return new ConstNode(PersistentHashSet.EMPTY);
+                Node[] elems = new Node[ps.count()];
+                int i = 0;
+                boolean allConst = true;
+                for (ISeq s = ps.seq(); s != null; s = s.next()) {
+                    elems[i] = compile(s.first(), scope, false);
+                    if (!(elems[i] instanceof ConstNode)) allConst = false;
+                    i++;
+                }
+                if (allConst) {
+                    Object[] vals = new Object[elems.length];
+                    for (int j = 0; j < elems.length; j++) vals[j] = ((ConstNode) elems[j]).val;
+                    return new ConstNode(PersistentHashSet.create(vals).withMeta(ps.meta()));
+                }
+                return new SetNode(elems);
+            }
+
+            if (form instanceof ISeq seq) {
+                ISeq s = seq.seq();
+                if (s == null) return new ConstNode(PersistentList.EMPTY);
+                return compileSeq(s, scope, inTail);
+            }
+
             return new ConstNode(form);
-        }
-
-        if (form instanceof Symbol sym) {
-            return compileSymbol(sym, scope);
-        }
-
-        if (form instanceof PersistentVector pv) {
-            if (pv.count() == 0) return new ConstNode(PersistentVector.EMPTY);
-            Node[] elems = new Node[pv.count()];
-            boolean allConst = true;
-            for (int i = 0; i < pv.count(); i++) {
-                elems[i] = compile(pv.nth(i), scope);
-                if (!(elems[i] instanceof ConstNode)) allConst = false;
+        } finally {
+            if (lineChanged) {
+                if (prevLine == null) CURRENT_LINE.remove();
+                else CURRENT_LINE.set(prevLine);
             }
-            if (allConst) {
-                Object[] vals = new Object[elems.length];
-                for (int i = 0; i < elems.length; i++) vals[i] = ((ConstNode) elems[i]).val;
-                return new ConstNode(PersistentVector.createOwning(vals).withMeta(pv.meta()));
-            }
-            return new VectorNode(elems);
         }
-
-        if (form instanceof PersistentHashMap pm) {
-            if (pm.count() == 0) return new ConstNode(PersistentHashMap.EMPTY);
-            Node[] kvs = new Node[pm.count() * 2];
-            int i = 0;
-            boolean allConst = true;
-            for (ISeq s = pm.seq(); s != null; s = s.next()) {
-                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
-                kvs[i] = compile(me.key, scope);
-                kvs[i + 1] = compile(me.val, scope);
-                if (!(kvs[i] instanceof ConstNode) || !(kvs[i + 1] instanceof ConstNode)) allConst = false;
-                i += 2;
-            }
-            if (allConst) {
-                Object[] vals = new Object[kvs.length];
-                for (int j = 0; j < kvs.length; j++) vals[j] = ((ConstNode) kvs[j]).val;
-                return new ConstNode(PersistentHashMap.create(vals).withMeta(pm.meta()));
-            }
-            return new MapNode(kvs);
-        }
-
-        if (form instanceof PersistentHashSet ps) {
-            if (ps.count() == 0) return new ConstNode(PersistentHashSet.EMPTY);
-            Node[] elems = new Node[ps.count()];
-            int i = 0;
-            boolean allConst = true;
-            for (ISeq s = ps.seq(); s != null; s = s.next()) {
-                elems[i] = compile(s.first(), scope);
-                if (!(elems[i] instanceof ConstNode)) allConst = false;
-                i++;
-            }
-            if (allConst) {
-                Object[] vals = new Object[elems.length];
-                for (int j = 0; j < elems.length; j++) vals[j] = ((ConstNode) elems[j]).val;
-                return new ConstNode(PersistentHashSet.create(vals).withMeta(ps.meta()));
-            }
-            return new SetNode(elems);
-        }
-
-        if (form instanceof ISeq seq) {
-            ISeq s = seq.seq();
-            if (s == null) return new ConstNode(PersistentList.EMPTY);
-            return compileSeq(s, scope);
-        }
-
-        return new ConstNode(form);
     }
 
     private static Node compileSymbol(Symbol sym, Scope scope) {
@@ -432,7 +526,7 @@ public final class Compiler {
             if (v != null) {
                 return new VarRefNode(v);
             }
-            throw new RuntimeException("Unable to resolve symbol: " + sym + " in this context (" + ns.name + ")");
+            throw new RuntimeException("Unable to resolve symbol: " + sym + " in this context (" + ns.name + ")" + locSuffix());
         } else {
             // Qualified symbol: either ns/var or Class/STATIC_FIELD
             Namespace cur = RT.currentNS();
@@ -458,7 +552,7 @@ public final class Compiler {
                     }
                 }
             }
-            throw new RuntimeException("No such var or static field: " + sym);
+            throw new RuntimeException("No such var or static field: " + sym + locSuffix());
         }
     }
 
@@ -481,7 +575,7 @@ public final class Compiler {
         return null;
     }
 
-    private static Node compileSeq(ISeq s, Scope scope) {
+    private static Node compileSeq(ISeq s, Scope scope, boolean inTail) {
         Object op = s.first();
         ISeq args = s.next();
 
@@ -497,19 +591,19 @@ public final class Compiler {
                         return compileDef(args, scope);
                     }
                     case "if" -> {
-                        return compileIf(args, scope);
+                        return compileIf(args, scope, inTail);
                     }
                     case "do" -> {
-                        return compileDo(args, scope);
+                        return compileDo(args, scope, inTail);
                     }
                     case "let*" -> {
-                        return compileLet(args, scope);
+                        return compileLet(args, scope, inTail);
                     }
                     case "loop*" -> {
                         return compileLoop(args, scope);
                     }
                     case "recur" -> {
-                        return compileRecur(args, scope);
+                        return compileRecur(args, scope, inTail);
                     }
                     case "fn*" -> {
                         return compileFn(args, scope);
@@ -520,14 +614,14 @@ public final class Compiler {
                     case "var" -> {
                         Symbol target = (Symbol) RT.first(args);
                         Var v = lookupVar(RT.currentNS(), target, false);
-                        if (v == null) throw new RuntimeException("Unable to resolve var: " + target);
+                        if (v == null) throw new RuntimeException("Unable to resolve var: " + target + locSuffix());
                         return new ConstNode(v);
                     }
                     case "try" -> {
                         return compileTry(args, scope);
                     }
                     case "throw" -> {
-                        Node expr = compile(RT.first(args), scope);
+                        Node expr = compile(RT.first(args), scope, false);
                         return new ThrowNode(expr);
                     }
                     case "new" -> {
@@ -540,13 +634,17 @@ public final class Compiler {
                         return compileSetBang(args, scope);
                     }
                     case "case*" -> {
-                        return compileCase(args, scope);
+                        return compileCase(args, scope, inTail);
                     }
                     case "monitor-enter" -> {
-                        return new MonitorNode(compile(RT.first(args), scope), true);
+                        return new MonitorNode(compile(RT.first(args), scope, false), true);
                     }
                     case "monitor-exit" -> {
-                        return new MonitorNode(compile(RT.first(args), scope), false);
+                        return new MonitorNode(compile(RT.first(args), scope, false), false);
+                    }
+                    case "locking*" -> {
+                        return new LockingNode(compile(RT.first(args), scope, false),
+                                compile(RT.second(args), scope, false));
                     }
                 }
             }
@@ -581,7 +679,7 @@ public final class Compiler {
         }
 
         // General function call
-        Node fnNode = compile(op, scope);
+        Node fnNode = compile(op, scope, false);
         Node[] argNodes = compileArgs(args, scope);
         return createCallNode(fnNode, argNodes);
     }
@@ -592,7 +690,7 @@ public final class Compiler {
         Node[] nodes = new Node[n];
         int i = 0;
         for (ISeq s = args; s != null; s = s.next()) {
-            nodes[i++] = compile(s.first(), scope);
+            nodes[i++] = compile(s.first(), scope, false);
         }
         return nodes;
     }
@@ -665,6 +763,8 @@ public final class Compiler {
     }
 
     private static Node compileDef(ISeq args, Scope scope) {
+        Integer defLine = CURRENT_LINE.get();
+        Object fileObj = RT.FILE.get();
         Symbol sym = (Symbol) args.first();
         ISeq more = args.next();
         String doc = null;
@@ -674,9 +774,10 @@ public final class Compiler {
                 doc = docStr;
                 more = more.next();
             }
-            initNode = compile(more.first(), scope);
+            initNode = compile(more.first(), scope, false);
         }
         Namespace ns = RT.currentNS();
+        PersistentHashMap symMeta = sym.meta();
         Var v = ns.intern(sym);
         PersistentHashMap meta = v.meta()
                 .assoc(Keyword.intern("ns"), ns)
@@ -684,28 +785,41 @@ public final class Compiler {
         if (doc != null) {
             meta = meta.assoc(Keyword.intern("doc"), doc);
         }
+        if (defLine != null && (symMeta == null || !symMeta.containsKey(LINE_KW))) {
+            meta = meta.assoc(LINE_KW, (long) defLine);
+        }
+        if (fileObj != null && (symMeta == null || !symMeta.containsKey(FILE_KW))) {
+            meta = meta.assoc(FILE_KW, fileObj.toString());
+        }
         v.setMeta(meta);
         return new DefNode(v, initNode);
     }
 
-    private static Node compileIf(ISeq args, Scope scope) {
+    private static Node compileIf(ISeq args, Scope scope, boolean inTail) {
         int c = RT.count(args);
-        if (c < 2 || c > 3) throw new IllegalArgumentException("if requires 2 or 3 arguments");
-        Node testNode = compile(args.first(), scope);
+        if (c < 2 || c > 3) throw new IllegalArgumentException("if requires 2 or 3 arguments" + locSuffix());
+        Node testNode = compile(args.first(), scope, false);
         ISeq s2 = args.next();
-        Node thenNode = compile(s2.first(), scope);
-        Node elseNode = (s2.next() != null) ? compile(s2.next().first(), scope) : ConstNode.NIL;
+        Node thenNode = compile(s2.first(), scope, inTail);
+        Node elseNode = (s2.next() != null) ? compile(s2.next().first(), scope, inTail) : ConstNode.NIL;
         return new IfNode(testNode, thenNode, elseNode);
     }
 
-    private static Node compileDo(ISeq args, Scope scope) {
-        if (args == null) return ConstNode.NIL;
-        Node[] nodes = compileArgs(args, scope);
+    private static Node compileDo(ISeq args, Scope scope, boolean inTail) {
+        if (args == null || args.seq() == null) return ConstNode.NIL;
+        int n = RT.count(args);
+        if (n == 0) return ConstNode.NIL;
+        Node[] nodes = new Node[n];
+        int i = 0;
+        for (ISeq s = args; s != null; s = s.next()) {
+            boolean last = (i == n - 1);
+            nodes[i++] = compile(s.first(), scope, inTail && last);
+        }
         if (nodes.length == 1) return nodes[0];
         return new DoNode(nodes);
     }
 
-    private static Node compileLet(ISeq args, Scope scope) {
+    private static Node compileLet(ISeq args, Scope scope, boolean inTail) {
         PersistentVector rawBindings = (PersistentVector) args.first();
         PersistentVector bindings = destructure(rawBindings);
         ISeq bodyForms = args.next();
@@ -719,12 +833,12 @@ public final class Compiler {
             Node[] inits = new Node[pairCount];
             for (int i = 0; i < pairCount; i++) {
                 Symbol sym = (Symbol) bindings.nth(2 * i);
-                Node init = compile(bindings.nth(2 * i + 1), scope);
+                Node init = compile(bindings.nth(2 * i + 1), scope, false);
                 int slot = scope.allocateSlot(sym);
                 slots[i] = slot;
                 inits[i] = init;
             }
-            Node body = compileDo(bodyForms, scope);
+            Node body = compileDo(bodyForms, scope, inTail);
             Node letNode = (pairCount == 0) ? body : new LetNode(slots, inits, body);
             if (isTopLevel) {
                 return new TopFrameNode(scope.maxSlots, letNode);
@@ -738,7 +852,7 @@ public final class Compiler {
     private static Node compileLoop(ISeq args, Scope scope) {
         PersistentVector rawBindings = (PersistentVector) args.first();
         if ((rawBindings.count() & 1) != 0) {
-            throw new IllegalArgumentException("loop requires an even number of binding forms");
+            throw new IllegalArgumentException("loop requires an even number of binding forms" + locSuffix());
         }
         ISeq bodyForms = args.next();
 
@@ -754,7 +868,7 @@ public final class Compiler {
             for (int i = 0; i < pairCount; i++) {
                 Object pat = rawBindings.nth(2 * i);
                 Object initForm = rawBindings.nth(2 * i + 1);
-                Node init = compile(initForm, scope);
+                Node init = compile(initForm, scope, false);
                 if (pat instanceof Symbol sym) {
                     slots[i] = scope.allocateSlot(sym);
                 } else {
@@ -772,9 +886,9 @@ public final class Compiler {
                 if (!destructurePairs.isEmpty()) {
                     PersistentVector dvec = PersistentVector.create(destructurePairs);
                     Object wrappedBody = RT.cons(Symbol.intern("let*"), RT.cons(dvec, bodyForms));
-                    body = compile(wrappedBody, scope);
+                    body = compile(wrappedBody, scope, true);
                 } else {
-                    body = compileDo(bodyForms, scope);
+                    body = compileDo(bodyForms, scope, true);
                 }
             } finally {
                 scope.recurTargets.pop();
@@ -790,15 +904,18 @@ public final class Compiler {
         }
     }
 
-    private static Node compileRecur(ISeq args, Scope scope) {
+    private static Node compileRecur(ISeq args, Scope scope, boolean inTail) {
         if (scope == null || scope.recurTargets.isEmpty()) {
-            throw new IllegalArgumentException("Can only recur from inside fn or loop");
+            throw new IllegalArgumentException("Can only recur from inside fn or loop" + locSuffix());
+        }
+        if (!inTail) {
+            throw new IllegalArgumentException("Can only recur from tail position" + locSuffix());
         }
         int[] targetSlots = scope.recurTargets.peek();
         Node[] exprs = compileArgs(args, scope);
         if (exprs.length != targetSlots.length) {
             throw new IllegalArgumentException(
-                    "Mismatched argument count to recur, expected: " + targetSlots.length + " args, got: " + exprs.length);
+                    "Mismatched argument count to recur, expected: " + targetSlots.length + " args, got: " + exprs.length + locSuffix());
         }
         if (scope.recurTargets.size() == 1) {
             scope.fnRecurUsed = true;
@@ -906,9 +1023,9 @@ public final class Compiler {
             if (!destructurePairs.isEmpty()) {
                 PersistentVector dvec = PersistentVector.create(destructurePairs);
                 Object wrapped = RT.cons(Symbol.intern("let*"), RT.cons(dvec, bodyForms));
-                bodyNode = compile(wrapped, fnScope);
+                bodyNode = compile(wrapped, fnScope, true);
             } else {
-                bodyNode = compileDo(bodyForms, fnScope);
+                bodyNode = compileDo(bodyForms, fnScope, true);
             }
         } finally {
             fnScope.recurTargets.pop();
@@ -936,6 +1053,8 @@ public final class Compiler {
     }
 
     private static Node compileDefmacro(ISeq args, Scope scope) {
+        Integer defLine = CURRENT_LINE.get();
+        Object fileObj = RT.FILE.get();
         Symbol name = (Symbol) args.first();
         ISeq rest = args.next();
         String doc = null;
@@ -950,8 +1069,9 @@ public final class Compiler {
         }
         ISeq arglists = extractArglists(rest);
         Object fnForm = RT.cons(Symbol.intern("fn*"), RT.cons(name, rest));
-        Node fnNode = compile(fnForm, scope);
+        Node fnNode = compile(fnForm, scope, false);
         Namespace ns = RT.currentNS();
+        PersistentHashMap symMeta = name.meta();
         Var v = ns.intern(name);
         v.setMacro();
         PersistentHashMap meta = v.meta()
@@ -968,6 +1088,14 @@ public final class Compiler {
         }
         if (arglists != null) {
             meta = meta.assoc(Keyword.intern("arglists"), arglists);
+        }
+        if (defLine != null && (symMeta == null || !symMeta.containsKey(LINE_KW))
+                && (attrMap == null || !attrMap.containsKey(LINE_KW))) {
+            meta = meta.assoc(LINE_KW, (long) defLine);
+        }
+        if (fileObj != null && (symMeta == null || !symMeta.containsKey(FILE_KW))
+                && (attrMap == null || !attrMap.containsKey(FILE_KW))) {
+            meta = meta.assoc(FILE_KW, fileObj.toString());
         }
         v.setMeta(meta);
         return new DefMacroNode(v, fnNode);
@@ -1003,12 +1131,12 @@ public final class Compiler {
                     ISeq cargs = clause.next();
                     Symbol classSym = (Symbol) cargs.first();
                     Class<?> exClass = Interop.resolveClass(RT.currentNS(), classSym.toString());
-                    if (exClass == null) throw new RuntimeException("Unable to resolve exception class: " + classSym);
+                    if (exClass == null) throw new RuntimeException("Unable to resolve exception class: " + classSym + locSuffix());
                     Symbol exVar = (Symbol) cargs.next().first();
                     ISeq cbody = cargs.next().next();
                     scope.pushBlock();
                     int slot = scope.allocateSlot(exVar);
-                    Node handler = compileDo(cbody, scope);
+                    Node handler = compileDo(cbody, scope, false);
                     scope.popBlock();
                     catches.add(new CatchClause(exClass, slot, handler));
                     continue;
@@ -1020,8 +1148,8 @@ public final class Compiler {
             bodyForms.add(f);
         }
 
-        Node bodyNode = compileDo(PersistentList.create(bodyForms), scope);
-        Node finallyNode = finallyForms != null ? compileDo(finallyForms, scope) : null;
+        Node bodyNode = bodyForms.isEmpty() ? ConstNode.NIL : compileDo(PersistentList.create(bodyForms), scope, false);
+        Node finallyNode = finallyForms != null ? compileDo(finallyForms, scope, false) : null;
         Node tryNode = new TryNode(bodyNode, catches.toArray(new CatchClause[0]), finallyNode);
         if (isTopLevel && scope.maxSlots > 0) {
             return new TopFrameNode(scope.maxSlots, tryNode);
@@ -1034,11 +1162,11 @@ public final class Compiler {
         Class<?> cls;
         if (classSpec instanceof Symbol sym) {
             cls = Interop.resolveClass(RT.currentNS(), sym.toString());
-            if (cls == null) throw new RuntimeException("Unable to resolve class: " + sym);
+            if (cls == null) throw new RuntimeException("Unable to resolve class: " + sym + locSuffix());
         } else if (classSpec instanceof Class<?> c) {
             cls = c;
         } else {
-            throw new IllegalArgumentException("new requires a Class symbol");
+            throw new IllegalArgumentException("new requires a Class symbol" + locSuffix());
         }
         Node[] argNodes = compileArgs(args.next(), scope);
         return new NewNode(cls, argNodes);
@@ -1058,7 +1186,7 @@ public final class Compiler {
             memberName = msym.name;
             argForms = rest.next();
         } else {
-            throw new IllegalArgumentException("Malformed . member expression");
+            throw new IllegalArgumentException("Malformed . member expression" + locSuffix());
         }
 
         boolean isField = memberName.startsWith("-");
@@ -1082,7 +1210,7 @@ public final class Compiler {
             }
         }
 
-        Node targetNode = compile(targetForm, scope);
+        Node targetNode = compile(targetForm, scope, false);
         if (isField && argNodes.length == 0) {
             return new InstanceFieldNode(targetNode, memberName);
         }
@@ -1091,11 +1219,15 @@ public final class Compiler {
 
     private static Node compileSetBang(ISeq args, Scope scope) {
         Object target = args.first();
-        Node valNode = compile(RT.second(args), scope);
+        Node valNode = compile(RT.second(args), scope, false);
         if (target instanceof Symbol sym) {
             Var v = lookupVar(RT.currentNS(), sym, false);
-            if (v == null) throw new RuntimeException("Unable to resolve var in set!: " + sym);
-            return new SetVarNode(v, valNode);
+            if (v != null) return new SetVarNode(v, valNode);
+            if (sym.ns != null) {
+                Class<?> cls = Interop.resolveClass(RT.currentNS(), sym.ns);
+                if (cls != null) return new SetStaticFieldNode(cls, sym.name, valNode);
+            }
+            throw new RuntimeException("Unable to resolve var in set!: " + sym + locSuffix());
         }
         if (target instanceof ISeq seq) {
             Object expanded = macroexpand(seq, scope);
@@ -1104,30 +1236,37 @@ public final class Compiler {
                 Object memForm = RT.nth(dotSeq, 2);
                 String fieldName = memForm.toString();
                 if (fieldName.startsWith("-")) fieldName = fieldName.substring(1);
-                Node objNode = compile(objForm, scope);
+                if (objForm instanceof Symbol objSym && objSym.ns == null && (scope == null || scope.resolveLocal(objSym) == -1)) {
+                    Var v = lookupVar(RT.currentNS(), objSym, false);
+                    if (v == null) {
+                        Class<?> cls = Interop.resolveClass(RT.currentNS(), objSym.name);
+                        if (cls != null) return new SetStaticFieldNode(cls, fieldName, valNode);
+                    }
+                }
+                Node objNode = compile(objForm, scope, false);
                 return new SetFieldNode(objNode, fieldName, valNode);
             }
         }
-        throw new IllegalArgumentException("Invalid assignment target for set!: " + target);
+        throw new IllegalArgumentException("Invalid assignment target for set!: " + target + locSuffix());
     }
 
-    private static Node compileCase(ISeq args, Scope scope) {
+    private static Node compileCase(ISeq args, Scope scope, boolean inTail) {
         // (case* expr [k1 v1 k2 v2 ...] default-opt)
-        Node exprNode = compile(args.first(), scope);
+        Node exprNode = compile(args.first(), scope, false);
         PersistentVector pairs = (PersistentVector) RT.second(args);
         boolean hasDefault = RT.count(args) >= 3;
-        Node defaultNode = hasDefault ? compile(RT.nth(args, 2), scope) : null;
+        Node defaultNode = hasDefault ? compile(RT.nth(args, 2), scope, inTail) : null;
 
-        Map<Object, Node> table = new HashMap<>();
+        Map<RT.EquivKey, Node> table = new HashMap<>();
         for (int i = 0; i < pairs.count(); i += 2) {
             Object k = pairs.nth(i);
-            Node vNode = compile(pairs.nth(i + 1), scope);
+            Node vNode = compile(pairs.nth(i + 1), scope, inTail);
             if (k instanceof ISeq ks && !Symbol.intern("quote").equals(ks.first())) {
                 for (ISeq s = ks; s != null; s = s.next()) {
-                    table.put(s.first(), vNode);
+                    table.put(new RT.EquivKey(s.first()), vNode);
                 }
             } else {
-                table.put(k, vNode);
+                table.put(new RT.EquivKey(k), vNode);
             }
         }
         return new CaseNode(exprNode, table, hasDefault, defaultNode);
@@ -1210,8 +1349,50 @@ public final class Compiler {
         }
     }
 
-    private static final Map<Object, java.util.concurrent.locks.ReentrantLock> MONITORS =
-            Collections.synchronizedMap(new IdentityHashMap<>());
+    private static final ReferenceQueue<Object> MONITOR_QUEUE = new ReferenceQueue<>();
+    private static final ConcurrentHashMap<WeakIdKey, java.util.concurrent.locks.ReentrantLock> MONITORS =
+            new ConcurrentHashMap<>();
+
+    private static final class WeakIdKey extends WeakReference<Object> {
+        final int hash;
+
+        WeakIdKey(Object referent, ReferenceQueue<Object> q) {
+            super(referent, q);
+            this.hash = System.identityHashCode(referent);
+        }
+
+        @Override
+        public int hashCode() {
+            return hash;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (!(obj instanceof WeakIdKey other)) return false;
+            Object a = this.get();
+            Object b = other.get();
+            return a != null && a == b;
+        }
+    }
+
+    private static void expungeMonitors() {
+        WeakIdKey ref;
+        while ((ref = (WeakIdKey) MONITOR_QUEUE.poll()) != null) {
+            MONITORS.remove(ref);
+        }
+    }
+
+    public static Object monitorOp(Object obj, boolean enter) {
+        if (obj == null) throw new NullPointerException("Cannot lock nil");
+        expungeMonitors();
+        WeakIdKey key = new WeakIdKey(obj, MONITOR_QUEUE);
+        java.util.concurrent.locks.ReentrantLock lock = MONITORS.computeIfAbsent(key,
+                k -> new java.util.concurrent.locks.ReentrantLock());
+        if (enter) lock.lock();
+        else lock.unlock();
+        return null;
+    }
 
     public static final class MonitorNode extends Node {
         public final Node target;
@@ -1219,13 +1400,21 @@ public final class Compiler {
         public MonitorNode(Node target, boolean enter) { this.target = target; this.enter = enter; }
         @Override
         public Object eval(Object[] frame) {
-            Object obj = target.eval(frame);
-            if (obj == null) throw new NullPointerException("Cannot lock nil");
-            java.util.concurrent.locks.ReentrantLock lock = MONITORS.computeIfAbsent(obj,
-                    k -> new java.util.concurrent.locks.ReentrantLock());
-            if (enter) lock.lock();
-            else lock.unlock();
-            return null;
+            return monitorOp(target.eval(frame), enter);
+        }
+    }
+
+    public static final class LockingNode extends Node {
+        public final Node target;
+        public final Node body;
+        public LockingNode(Node target, Node body) { this.target = target; this.body = body; }
+        @Override
+        public Object eval(Object[] frame) {
+            Object lock = target.eval(frame);
+            if (lock == null) throw new NullPointerException("Cannot lock nil");
+            synchronized (lock) {
+                return body.eval(frame);
+            }
         }
     }
 
@@ -1261,6 +1450,7 @@ public final class Compiler {
         public DoNode(Node[] nodes) { this.nodes = nodes; }
         @Override
         public Object eval(Object[] frame) {
+            if (nodes.length == 0) return null;
             int last = nodes.length - 1;
             for (int i = 0; i < last; i++) {
                 nodes[i].eval(frame);
@@ -1516,7 +1706,7 @@ public final class Compiler {
         }
     }
 
-    public static final class CompiledFn extends Fn implements IMeta {
+    public static final class CompiledFn extends Fn implements IObj {
         private static final int JIT_THRESHOLD = 16;
 
         private final String name;
@@ -1524,10 +1714,10 @@ public final class Compiler {
         private final FnMethod[] fixedMethods;
         private final FnMethod variadicMethod;
         private final Object[][] captured;
-        private PersistentHashMap meta;
+        private final PersistentHashMap meta;
         private volatile Fn jitFn;
-        private int calls;
-        private boolean jitAttempted;
+        private final AtomicInteger calls = new AtomicInteger(0);
+        private volatile boolean jitAttempted;
 
         public CompiledFn(
                 String name,
@@ -1535,11 +1725,22 @@ public final class Compiler {
                 FnMethod[] fixedMethods,
                 FnMethod variadicMethod,
                 Object[][] captured) {
+            this(name, isNamed, fixedMethods, variadicMethod, captured, null);
+        }
+
+        public CompiledFn(
+                String name,
+                boolean isNamed,
+                FnMethod[] fixedMethods,
+                FnMethod variadicMethod,
+                Object[][] captured,
+                PersistentHashMap meta) {
             this.name = name;
             this.isNamed = isNamed;
             this.fixedMethods = fixedMethods;
             this.variadicMethod = variadicMethod;
             this.captured = captured;
+            this.meta = meta;
         }
 
         public FnMethod[] getFixedMethods() { return fixedMethods; }
@@ -1548,7 +1749,7 @@ public final class Compiler {
 
         private void maybeCompileJit() {
             if (jitAttempted) return;
-            int c = ++calls;
+            int c = calls.incrementAndGet();
             if (c < JIT_THRESHOLD && (c != 1 || !hasLoop())) {
                 return;
             }
@@ -1731,7 +1932,13 @@ public final class Compiler {
 
         @Override public String getName() { return name; }
         @Override public PersistentHashMap meta() { return meta; }
-        @Override public CompiledFn withMeta(PersistentHashMap m) { this.meta = m; return this; }
+        @Override public CompiledFn withMeta(PersistentHashMap m) {
+            if (this.meta == m) return this;
+            CompiledFn copy = new CompiledFn(name, isNamed, fixedMethods, variadicMethod, captured, m);
+            copy.jitFn = this.jitFn;
+            copy.jitAttempted = this.jitAttempted;
+            return copy;
+        }
         @Override public String toString() { return "#<fn " + name + ">"; }
     }
 
@@ -2232,13 +2439,28 @@ public final class Compiler {
         }
     }
 
+    public static final class SetStaticFieldNode extends Node {
+        public final Class<?> clazz;
+        public final String fieldName;
+        public final Node val;
+        public SetStaticFieldNode(Class<?> clazz, String fieldName, Node val) {
+            this.clazz = clazz;
+            this.fieldName = fieldName;
+            this.val = val;
+        }
+        @Override
+        public Object eval(Object[] frame) {
+            return Interop.setStaticField(clazz, fieldName, val.eval(frame));
+        }
+    }
+
     public static final class CaseNode extends Node {
         public final Node expr;
-        public final Map<Object, Node> table;
+        public final Map<RT.EquivKey, Node> table;
         public final boolean hasDefault;
         public final Node defaultNode;
 
-        public CaseNode(Node expr, Map<Object, Node> table, boolean hasDefault, Node defaultNode) {
+        public CaseNode(Node expr, Map<RT.EquivKey, Node> table, boolean hasDefault, Node defaultNode) {
             this.expr = expr;
             this.table = table;
             this.hasDefault = hasDefault;
@@ -2248,15 +2470,7 @@ public final class Compiler {
         @Override
         public Object eval(Object[] frame) {
             Object v = expr.eval(frame);
-            Node match = table.get(v);
-            if (match == null) {
-                for (Map.Entry<Object, Node> e : table.entrySet()) {
-                    if (RT.equiv(v, e.getKey())) {
-                        match = e.getValue();
-                        break;
-                    }
-                }
-            }
+            Node match = table.get(new RT.EquivKey(v));
             if (match != null) return match.eval(frame);
             if (hasDefault) return defaultNode.eval(frame);
             throw new IllegalArgumentException("No matching clause: " + v);

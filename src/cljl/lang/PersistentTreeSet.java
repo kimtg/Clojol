@@ -8,7 +8,7 @@ import java.util.*;
  * Persistent sorted set backed by PersistentTreeMap.
  */
 public final class PersistentTreeSet extends Fn
-        implements IMeta, Counted, Seqable, Sorted, Reversible, Set<Object>, Iterable<Object> {
+        implements IObj, Counted, Seqable, Sorted, Reversible, Set<Object>, Iterable<Object> {
 
     public static final PersistentTreeSet EMPTY = new PersistentTreeSet(null, PersistentTreeMap.EMPTY);
 
@@ -142,8 +142,12 @@ public final class PersistentTreeSet extends Fn
         if (this == o) return true;
         if (!(o instanceof Set<?> s)) return false;
         if (s.size() != count()) return false;
-        for (Object item : this) {
-            if (!s.contains(item)) return false;
+        try {
+            for (Object item : this) {
+                if (!s.contains(item)) return false;
+            }
+        } catch (ClassCastException e) {
+            return false;
         }
         return true;
     }
@@ -152,7 +156,7 @@ public final class PersistentTreeSet extends Fn
     public int hashCode() {
         int h = 0;
         for (Object item : this) {
-            h += (item == null ? 0 : item.hashCode());
+            h += RT.hash(item);
         }
         return h;
     }

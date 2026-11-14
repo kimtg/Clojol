@@ -1,5 +1,6 @@
 package cljl;
 
+import cljl.lang.IObj;
 import cljl.lang.ISeq;
 import cljl.lang.PersistentHashMap;
 import java.util.Map;
@@ -8,7 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Clojure multimethod supporting arbitrary dispatch functions and hierarchy/isa? matching.
  */
-public final class MultiFn extends Fn {
+public final class MultiFn extends Fn implements IObj {
     public final String name;
     public final Fn dispatchFn;
     public final Object defaultDispatchVal;
@@ -131,6 +132,16 @@ public final class MultiFn extends Fn {
     @Override
     public Object invokeVarargs(Object[] args) {
         return findAndCheckMethod(dispatchFn.invokeVarargs(args)).invokeVarargs(args);
+    }
+
+    @Override
+    public PersistentHashMap meta() {
+        return null;
+    }
+
+    @Override
+    public Object withMeta(PersistentHashMap m) {
+        return m == null ? this : new MetaFn(this, m);
     }
 
     @Override

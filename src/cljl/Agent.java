@@ -29,6 +29,7 @@ public final class Agent extends Fn implements IDeref, IReference {
     public static final Var CURRENT_AGENT = RT.AGENT;
 
     private static final ConcurrentHashMap<Agent, Boolean> ACTIVE_AGENTS = new ConcurrentHashMap<>();
+    private static final ThreadLocal<List<Action>> NESTED_SENDS = new ThreadLocal<>();
 
     private record Action(Agent agent, Fn fn, Object[] args, Executor exec, Map<Var, Object> bindings) {}
 
@@ -98,8 +99,10 @@ public final class Agent extends Fn implements IDeref, IReference {
     }
 
     public void setValidator(Fn valFn) {
-        if (valFn != null) validateState(valFn, state);
-        this.validator = valFn;
+        synchronized (lock) {
+            if (valFn != null) validateState(valFn, state);
+            this.validator = valFn;
+        }
     }
 
     public void addWatch(Object key, Fn callback) {
@@ -121,9 +124,14 @@ public final class Agent extends Fn implements IDeref, IReference {
         if (curErr != null) {
             throw new RuntimeException("Agent is failed, needs restart", curErr);
         }
-        Action action = new Action(this, fn, args != null ? args : Fn.EMPTY_ARGS, exec, Var.getThreadBindings());
+        Action action = new Action(this, fn, args != null ? args : Fn.EMPTY_ARGS, exec, Var.cloneThreadBindings());
         if (LockingTransaction.isRunning()) {
             LockingTransaction.getEx().enqueue(action);
+            return this;
+        }
+        List<Action> nested = NESTED_SENDS.get();
+        if (nested != null) {
+            nested.add(action);
             return this;
         }
         enqueueAction(action);
@@ -133,7 +141,9 @@ public final class Agent extends Fn implements IDeref, IReference {
     void enqueueAction(Action action) {
         boolean schedule = false;
         synchronized (lock) {
-            if (this.error != null) return;
+            if (this.error != null) {
+                throw new RuntimeException("Agent is failed, needs restart", this.error);
+            }
             queue.add(action);
             if (!running) {
                 running = true;
@@ -142,7 +152,16 @@ public final class Agent extends Fn implements IDeref, IReference {
             }
         }
         if (schedule) {
-            action.exec.execute(() -> processQueue());
+            try {
+                action.exec.execute(this::processQueue);
+            } catch (Throwable t) {
+                synchronized (lock) {
+                    running = false;
+                    ACTIVE_AGENTS.remove(this);
+                    lock.notifyAll();
+                }
+                throw t;
+            }
         }
     }
 
@@ -155,8 +174,7 @@ public final class Agent extends Fn implements IDeref, IReference {
         while (true) {
             Action act;
             synchronized (lock) {
-                act = queue.poll();
-                if (act == null || this.error != null) {
+                if (this.error != null || (act = queue.poll()) == null) {
                     running = false;
                     ACTIVE_AGENTS.remove(this);
                     lock.notifyAll();
@@ -171,31 +189,38 @@ public final class Agent extends Fn implements IDeref, IReference {
         Map<Var, Object> frame = act.bindings != null ? new HashMap<>(act.bindings) : new HashMap<>();
         frame.put(CURRENT_AGENT, this);
         Var.pushThreadBindings(frame);
+        List<Action> nested = new ArrayList<>();
+        NESTED_SENDS.set(nested);
         try {
             Object oldVal = this.state;
             Object[] full = new Object[act.args.length + 1];
             full[0] = oldVal;
             System.arraycopy(act.args, 0, full, 1, act.args.length);
             Object newVal = act.fn.applyTo(full);
-            if (validator != null) {
-                validateState(validator, newVal);
+            Fn v = this.validator;
+            if (v != null) {
+                validateState(v, newVal);
             }
             this.state = newVal;
             notifyWatches(oldVal, newVal);
+            for (Action a : nested) {
+                a.agent.enqueueAction(a);
+            }
         } catch (Throwable t) {
+            if (!Keyword.intern("continue").equals(this.errorMode)) {
+                synchronized (lock) {
+                    this.error = t;
+                    lock.notifyAll();
+                }
+            }
             Fn handler = this.errorHandler;
             if (handler != null) {
                 try {
                     handler.invoke(this, t);
                 } catch (Throwable ignored) {}
             }
-            if (Keyword.intern("fail").equals(this.errorMode)) {
-                synchronized (lock) {
-                    this.error = t;
-                    this.queue.clear();
-                }
-            }
         } finally {
+            NESTED_SENDS.remove();
             Var.popThreadBindings();
         }
     }
@@ -216,7 +241,14 @@ public final class Agent extends Fn implements IDeref, IReference {
                 running = true;
                 ACTIVE_AGENTS.put(this, Boolean.TRUE);
                 Action next = queue.peek();
-                next.exec.execute(this::processQueue);
+                try {
+                    next.exec.execute(this::processQueue);
+                } catch (Throwable t) {
+                    running = false;
+                    ACTIVE_AGENTS.remove(this);
+                    lock.notifyAll();
+                    throw t;
+                }
             }
             lock.notifyAll();
             return newState;
@@ -224,9 +256,12 @@ public final class Agent extends Fn implements IDeref, IReference {
     }
 
     public boolean await(long timeoutMs) throws InterruptedException {
+        if (NESTED_SENDS.get() != null) {
+            throw new IllegalStateException("Can't await in agent action");
+        }
         long deadline = timeoutMs > 0 ? System.currentTimeMillis() + timeoutMs : Long.MAX_VALUE;
         synchronized (lock) {
-            while (running || !queue.isEmpty()) {
+            while (running || (!queue.isEmpty() && this.error == null)) {
                 if (timeoutMs == 0) return false;
                 long rem = deadline - System.currentTimeMillis();
                 if (rem <= 0) return false;

@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * and TransientVector support for O(1) amortized batch construction.
  */
 public final class PersistentVector extends Fn
-        implements Associative, IMeta, Reversible, List<Object>, RandomAccess, Comparable<Object> {
+        implements Associative, IObj, Reversible, List<Object>, RandomAccess, Comparable<Object> {
 
     private static final AtomicReference<Thread> NO_EDIT = new AtomicReference<>(null);
     public static final Node EMPTY_NODE = new Node(NO_EDIT, new Object[32]);
@@ -22,6 +22,7 @@ public final class PersistentVector extends Fn
     public final Object[] tail;
     private final PersistentHashMap meta;
     private int hash;
+    private boolean hasHash;
 
     public static final class Node {
         public final AtomicReference<Thread> edit;
@@ -299,6 +300,16 @@ public final class PersistentVector extends Fn
 
     @Override
     public int compareTo(Object o) {
+        if (o instanceof SubVec sv) {
+            int n = sv.count();
+            if (this.cnt < n) return -1;
+            if (this.cnt > n) return 1;
+            for (int i = 0; i < this.cnt; i++) {
+                int c = RT.compare(this.nth(i), sv.nth(i));
+                if (c != 0) return c;
+            }
+            return 0;
+        }
         PersistentVector v = (PersistentVector) o;
         if (this.cnt < v.cnt) return -1;
         if (this.cnt > v.cnt) return 1;
@@ -316,6 +327,13 @@ public final class PersistentVector extends Fn
             if (this.cnt != pv.cnt) return false;
             for (int i = 0; i < cnt; i++) {
                 if (!RT.equiv(nth(i), pv.nth(i))) return false;
+            }
+            return true;
+        }
+        if (obj instanceof SubVec sv) {
+            if (this.cnt != sv.count()) return false;
+            for (int i = 0; i < cnt; i++) {
+                if (!RT.equiv(nth(i), sv.nth(i))) return false;
             }
             return true;
         }
@@ -342,12 +360,13 @@ public final class PersistentVector extends Fn
     @Override
     public int hashCode() {
         int h = this.hash;
-        if (h == 0) {
+        if (!hasHash) {
             h = 1;
             for (int i = 0; i < cnt; i++) {
                 h = 31 * h + RT.hash(nth(i));
             }
             this.hash = h;
+            this.hasHash = true;
         }
         return h;
     }
@@ -412,66 +431,326 @@ public final class PersistentVector extends Fn
     @Override public Object remove(int index) { throw new UnsupportedOperationException(); }
     @Override public ListIterator<Object> listIterator() { return Collections.unmodifiableList(Arrays.asList(toArray())).listIterator(); }
     @Override public ListIterator<Object> listIterator(int index) { return Collections.unmodifiableList(Arrays.asList(toArray())).listIterator(index); }
+    public Object subVec(int fromIndex, int toIndex) {
+        if (fromIndex < 0 || toIndex > cnt || fromIndex > toIndex) throw new IndexOutOfBoundsException();
+        if (fromIndex == toIndex) return EMPTY;
+        return new SubVec(null, this, fromIndex, toIndex);
+    }
+
     @Override public List<Object> subList(int fromIndex, int toIndex) {
         if (fromIndex < 0 || toIndex > cnt || fromIndex > toIndex) throw new IndexOutOfBoundsException();
-        Object[] sub = new Object[toIndex - fromIndex];
-        for (int i = fromIndex; i < toIndex; i++) sub[i - fromIndex] = nth(i);
-        return createOwning(sub);
+        if (fromIndex == toIndex) return EMPTY;
+        return new SubVec(null, this, fromIndex, toIndex);
     }
 
     public static final class VecSeq extends ASeq implements Counted {
         private final PersistentVector v;
         private final int i;
+        private final int end;
 
         public VecSeq(PersistentVector v, int i) {
-            super(null);
-            this.v = v;
-            this.i = i;
+            this(null, v, i, v.cnt);
         }
 
         public VecSeq(PersistentHashMap meta, PersistentVector v, int i) {
+            this(meta, v, i, v.cnt);
+        }
+
+        public VecSeq(PersistentHashMap meta, PersistentVector v, int i, int end) {
             super(meta);
             this.v = v;
             this.i = i;
+            this.end = end;
         }
 
         @Override public Object first() { return v.nth(i); }
         @Override public ISeq next() {
-            if (i + 1 < v.cnt) return new VecSeq(v, i + 1);
+            if (i + 1 < end) return new VecSeq(null, v, i + 1, end);
             return null;
         }
-        @Override public int count() { return v.cnt - i; }
+        @Override public int count() { return end - i; }
         @Override public VecSeq withMeta(PersistentHashMap meta) {
             if (this.meta == meta) return this;
-            return new VecSeq(meta, v, i);
+            return new VecSeq(meta, v, i, end);
         }
     }
 
     public static final class RVecSeq extends ASeq implements Counted {
         private final PersistentVector v;
         private final int i;
+        private final int start;
 
         public RVecSeq(PersistentVector v, int i) {
-            super(null);
-            this.v = v;
-            this.i = i;
+            this(null, v, i, 0);
         }
 
         public RVecSeq(PersistentHashMap meta, PersistentVector v, int i) {
+            this(meta, v, i, 0);
+        }
+
+        public RVecSeq(PersistentHashMap meta, PersistentVector v, int i, int start) {
             super(meta);
             this.v = v;
             this.i = i;
+            this.start = start;
         }
 
         @Override public Object first() { return v.nth(i); }
         @Override public ISeq next() {
-            if (i > 0) return new RVecSeq(v, i - 1);
+            if (i > start) return new RVecSeq(null, v, i - 1, start);
             return null;
         }
-        @Override public int count() { return i + 1; }
+        @Override public int count() { return i - start + 1; }
         @Override public RVecSeq withMeta(PersistentHashMap meta) {
             if (this.meta == meta) return this;
-            return new RVecSeq(meta, v, i);
+            return new RVecSeq(meta, v, i, start);
+        }
+    }
+
+    public static final class SubVec extends Fn
+            implements Associative, IObj, Reversible, PersistentColl, List<Object>, RandomAccess, Comparable<Object> {
+        public final PersistentVector v;
+        public final int start;
+        public final int end;
+        private final PersistentHashMap meta;
+        private int hash;
+        private boolean hasHash;
+
+        public SubVec(PersistentHashMap meta, PersistentVector v, int start, int end) {
+            if (v instanceof PersistentVector pv) {
+                this.v = pv;
+            } else {
+                throw new IllegalArgumentException("SubVec expects PersistentVector");
+            }
+            this.meta = meta;
+            this.start = start;
+            this.end = end;
+        }
+
+        public Object nth(int i) {
+            if (i < 0 || start + i >= end) {
+                throw new IndexOutOfBoundsException("Index " + i + " out of bounds for length " + count());
+            }
+            return v.nth(start + i);
+        }
+
+        public Object nth(int i, Object notFound) {
+            if (i >= 0 && start + i < end) return v.nth(start + i);
+            return notFound;
+        }
+
+        public SubVec assocN(int i, Object val) {
+            if (i < 0 || start + i > end) {
+                throw new IndexOutOfBoundsException("Index " + i + " out of bounds for length " + count());
+            }
+            if (start + i == end) return conj(val);
+            return new SubVec(meta, v.assocN(start + i, val), start, end);
+        }
+
+        public SubVec conj(Object val) {
+            return new SubVec(meta, v.assocN(end, val), start, end + 1);
+        }
+
+        @Override
+        public Object cons(Object x) {
+            return conj(x);
+        }
+
+        @Override
+        public Object without(Object key) {
+            throw new UnsupportedOperationException("dissoc not supported on vector");
+        }
+
+        @Override
+        public Object peek() {
+            return end > start ? v.nth(end - 1) : null;
+        }
+
+        @Override
+        public Object pop() {
+            if (end <= start) throw new IllegalStateException("Can't pop empty vector");
+            if (end - 1 == start) return EMPTY.withMeta(meta);
+            return new SubVec(meta, v, start, end - 1);
+        }
+
+        @Override
+        public Object empty() {
+            return EMPTY.withMeta(meta);
+        }
+
+        public Object subVec(int fromIndex, int toIndex) {
+            if (fromIndex < 0 || toIndex > count() || fromIndex > toIndex) throw new IndexOutOfBoundsException();
+            if (fromIndex == toIndex) return EMPTY;
+            return new SubVec(null, v, start + fromIndex, start + toIndex);
+        }
+
+        @Override public int count() { return end - start; }
+        @Override public PersistentHashMap meta() { return meta; }
+        @Override public SubVec withMeta(PersistentHashMap m) { return m == meta ? this : new SubVec(m, v, start, end); }
+
+        @Override
+        public boolean containsKey(Object key) {
+            if (key instanceof Integer || key instanceof Long || key instanceof Short || key instanceof Byte) {
+                long n = ((Number) key).longValue();
+                return n >= 0 && n < count();
+            }
+            return false;
+        }
+
+        @Override public Object valAt(Object key) { return valAt(key, null); }
+        @Override public Object valAt(Object key, Object notFound) {
+            if (key instanceof Integer || key instanceof Long || key instanceof Short || key instanceof Byte) {
+                long i = ((Number) key).longValue();
+                if (i >= 0 && i < count()) return nth((int) i);
+            }
+            return notFound;
+        }
+
+        @Override public Associative assoc(Object key, Object val) {
+            if (key instanceof Integer || key instanceof Long || key instanceof Short || key instanceof Byte) {
+                return assocN(((Number) key).intValue(), val);
+            }
+            throw new IllegalArgumentException("Key must be integer");
+        }
+
+        @Override public Object invoke(Object arg1) {
+            if (arg1 instanceof Integer || arg1 instanceof Long || arg1 instanceof Short || arg1 instanceof Byte) {
+                return nth(((Number) arg1).intValue());
+            }
+            throw new IllegalArgumentException("Key must be integer: " + arg1);
+        }
+
+        @Override public Object invoke(Object arg1, Object notFound) {
+            if (arg1 instanceof Integer || arg1 instanceof Long || arg1 instanceof Short || arg1 instanceof Byte) {
+                return nth(((Number) arg1).intValue(), notFound);
+            }
+            return notFound;
+        }
+
+        @Override public ISeq seq() { return start < end ? new VecSeq(null, v, start, end) : null; }
+        @Override public ISeq rseq() { return start < end ? new RVecSeq(null, v, end - 1, start) : null; }
+
+        @Override public int compareTo(Object o) {
+            if (o instanceof PersistentVector pv) {
+                int c1 = count();
+                if (c1 < pv.cnt) return -1;
+                if (c1 > pv.cnt) return 1;
+                for (int i = 0; i < c1; i++) {
+                    int c = RT.compare(nth(i), pv.nth(i));
+                    if (c != 0) return c;
+                }
+                return 0;
+            }
+            SubVec sv = (SubVec) o;
+            int c1 = count();
+            int c2 = sv.count();
+            if (c1 < c2) return -1;
+            if (c1 > c2) return 1;
+            for (int i = 0; i < c1; i++) {
+                int c = RT.compare(nth(i), sv.nth(i));
+                if (c != 0) return c;
+            }
+            return 0;
+        }
+
+        @Override public boolean equals(Object obj) {
+            if (this == obj) return true;
+            int cnt = count();
+            if (obj instanceof PersistentVector pv) {
+                if (cnt != pv.cnt) return false;
+                for (int i = 0; i < cnt; i++) if (!RT.equiv(nth(i), pv.nth(i))) return false;
+                return true;
+            }
+            if (obj instanceof SubVec sv) {
+                if (cnt != sv.count()) return false;
+                for (int i = 0; i < cnt; i++) if (!RT.equiv(nth(i), sv.nth(i))) return false;
+                return true;
+            }
+            if (obj instanceof List<?> list && !(obj instanceof Seqable)) {
+                if (cnt != list.size()) return false;
+                Iterator<?> it = list.iterator();
+                for (int i = 0; i < cnt; i++) if (!RT.equiv(nth(i), it.next())) return false;
+                return true;
+            }
+            if (obj instanceof Seqable) {
+                if (obj instanceof PersistentHashMap || obj instanceof PersistentHashSet) return false;
+                ISeq ms = RT.seq(obj);
+                for (int i = 0; i < cnt; i++) {
+                    if (ms == null || !RT.equiv(nth(i), ms.first())) return false;
+                    ms = ms.next();
+                }
+                return ms == null;
+            }
+            return false;
+        }
+
+        @Override public int hashCode() {
+            int h = this.hash;
+            if (!hasHash) {
+                h = 1;
+                int cnt = count();
+                for (int i = 0; i < cnt; i++) h = 31 * h + RT.hash(nth(i));
+                this.hash = h;
+                this.hasHash = true;
+            }
+            return h;
+        }
+
+        @Override public String toString() { return RT.printString(this); }
+        @Override public int size() { return count(); }
+        @Override public boolean isEmpty() { return end <= start; }
+        @Override public boolean contains(Object o) { return indexOf(o) >= 0; }
+        @Override public Iterator<Object> iterator() {
+            return new Iterator<>() {
+                int i = 0;
+                final int cnt = count();
+                @Override public boolean hasNext() { return i < cnt; }
+                @Override public Object next() {
+                    if (i >= cnt) throw new NoSuchElementException();
+                    return nth(i++);
+                }
+            };
+        }
+        @Override public Object[] toArray() {
+            int cnt = count();
+            Object[] ret = new Object[cnt];
+            for (int i = 0; i < cnt; i++) ret[i] = nth(i);
+            return ret;
+        }
+        @Override @SuppressWarnings("unchecked") public <T> T[] toArray(T[] a) {
+            int cnt = count();
+            if (a.length < cnt) a = (T[]) java.lang.reflect.Array.newInstance(a.getClass().getComponentType(), cnt);
+            for (int i = 0; i < cnt; i++) a[i] = (T) nth(i);
+            if (a.length > cnt) a[cnt] = null;
+            return a;
+        }
+        @Override public Object get(int index) { return nth(index); }
+        @Override public int indexOf(Object o) {
+            int cnt = count();
+            for (int i = 0; i < cnt; i++) if (RT.equiv(nth(i), o)) return i;
+            return -1;
+        }
+        @Override public int lastIndexOf(Object o) {
+            for (int i = count() - 1; i >= 0; i--) if (RT.equiv(nth(i), o)) return i;
+            return -1;
+        }
+        @Override public boolean add(Object e) { throw new UnsupportedOperationException(); }
+        @Override public boolean remove(Object o) { throw new UnsupportedOperationException(); }
+        @Override public boolean containsAll(Collection<?> c) { for (Object x : c) if (!contains(x)) return false; return true; }
+        @Override public boolean addAll(Collection<?> c) { throw new UnsupportedOperationException(); }
+        @Override public boolean addAll(int index, Collection<?> c) { throw new UnsupportedOperationException(); }
+        @Override public boolean removeAll(Collection<?> c) { throw new UnsupportedOperationException(); }
+        @Override public boolean retainAll(Collection<?> c) { throw new UnsupportedOperationException(); }
+        @Override public void clear() { throw new UnsupportedOperationException(); }
+        @Override public Object set(int index, Object element) { throw new UnsupportedOperationException(); }
+        @Override public void add(int index, Object element) { throw new UnsupportedOperationException(); }
+        @Override public Object remove(int index) { throw new UnsupportedOperationException(); }
+        @Override public ListIterator<Object> listIterator() { return Collections.unmodifiableList(Arrays.asList(toArray())).listIterator(); }
+        @Override public ListIterator<Object> listIterator(int index) { return Collections.unmodifiableList(Arrays.asList(toArray())).listIterator(index); }
+        @Override public List<Object> subList(int fromIndex, int toIndex) {
+            if (fromIndex < 0 || toIndex > count() || fromIndex > toIndex) throw new IndexOutOfBoundsException();
+            if (fromIndex == toIndex) return EMPTY;
+            return new SubVec(null, v, start + fromIndex, start + toIndex);
         }
     }
 
@@ -499,8 +778,12 @@ public final class PersistentVector extends Fn
         }
 
         private void ensureEditable() {
-            if (root.edit.get() == null) {
+            Thread owner = root.edit.get();
+            if (owner == null) {
                 throw new IllegalAccessError("Transient used after persistent! call");
+            }
+            if (owner != Thread.currentThread()) {
+                throw new IllegalAccessError("Transient used by non-owner thread");
             }
         }
 
@@ -586,11 +869,13 @@ public final class PersistentVector extends Fn
             ensureEditable();
             if (cnt == 0) throw new IllegalStateException("Can't pop empty vector");
             if (cnt == 1) {
+                tail[0] = null;
                 cnt = 0;
                 return this;
             }
             int i = cnt - 1;
             if ((i & 0x01f) > 0) {
+                tail[i & 0x01f] = null;
                 cnt--;
                 return this;
             }
@@ -650,6 +935,33 @@ public final class PersistentVector extends Fn
                 return node.array[i & 0x01f];
             }
             throw new IndexOutOfBoundsException();
+        }
+
+        public Object valAt(Object key) {
+            return valAt(key, null);
+        }
+
+        public Object valAt(Object key, Object notFound) {
+            ensureEditable();
+            if (key instanceof Integer || key instanceof Long || key instanceof Short || key instanceof Byte) {
+                int i = ((Number) key).intValue();
+                if (i >= 0 && i < cnt) return nth(i);
+            }
+            return notFound;
+        }
+
+        @Override
+        public Object invoke(Object arg1) {
+            ensureEditable();
+            if (arg1 instanceof Integer || arg1 instanceof Long || arg1 instanceof Short || arg1 instanceof Byte) {
+                return nth(((Number) arg1).intValue());
+            }
+            throw new IllegalArgumentException("Key must be integer: " + arg1);
+        }
+
+        @Override
+        public Object invoke(Object arg1, Object notFound) {
+            return valAt(arg1, notFound);
         }
 
         @Override

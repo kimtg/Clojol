@@ -748,19 +748,13 @@ public final class CoreExtras {
         }));
 
         defMacro(ns, "locking", Fn.ofVarargs("locking", args -> {
-            Symbol lockSym = Symbol.intern("lockee__" + RT.nextID());
             List<Object> body = new ArrayList<>();
             body.add(Symbol.intern("do"));
             for (int i = 1; i < args.length; i++) body.add(args[i]);
             return PersistentList.createFromArray(
-                    Symbol.intern("let*"),
-                    PersistentVector.createOwning(lockSym, args[0]),
-                    PersistentList.createFromArray(Symbol.intern("monitor-enter"), lockSym),
-                    PersistentList.createFromArray(
-                            Symbol.intern("try"),
-                            PersistentList.create(body),
-                            PersistentList.createFromArray(Symbol.intern("finally"),
-                                    PersistentList.createFromArray(Symbol.intern("monitor-exit"), lockSym))));
+                    Symbol.intern("locking*"),
+                    args[0],
+                    PersistentList.create(body));
         }));
 
         defMacro(ns, "io!", Fn.ofVarargs("io!", args -> {
@@ -796,7 +790,7 @@ public final class CoreExtras {
             Object val = vf.invoke(ret);
             Object nextk = (kf != null) ? kf.invoke(ret) : null;
             ISeq nextSeq = (nextk != null) ? iterationSeq(step, somef, vf, kf, nextk, false) : null;
-            return new PersistentList(null, val, nextSeq, 2);
+            return new Cons(val, nextSeq);
         }));
     }
 
@@ -805,7 +799,7 @@ public final class CoreExtras {
             try {
                 String line = br.readLine();
                 if (line == null) return null;
-                return new PersistentList(null, line, lineSeqStep(br), 2);
+                return new Cons(line, lineSeqStep(br));
             } catch (IOException e) { throw RT.sneakyThrow(e); }
         }));
     }
@@ -833,7 +827,7 @@ public final class CoreExtras {
             try {
                 Object item = q.take();
                 if (item == END) return null;
-                return new PersistentList(null, item == REDUCED_NONE ? null : item, sequeRead(q, END), 2);
+                return new Cons(item == REDUCED_NONE ? null : item, sequeRead(q, END));
             } catch (InterruptedException e) { throw RT.sneakyThrow(e); }
         }));
     }
@@ -1053,12 +1047,12 @@ public final class CoreExtras {
         });
         wrapTransducer0(ns, "distinct", () -> rf -> {
             Fn r = (Fn) rf;
-            Set<Object> seen = new HashSet<>();
+            Set<RT.EquivKey> seen = new HashSet<>();
             return new Fn.NamedFn("distinct-xf") {
                 @Override public Object invoke() { return r.invoke(); }
                 @Override public Object invoke(Object acc) { return r.invoke(acc); }
                 @Override public Object invoke(Object acc, Object x) {
-                    return seen.add(x) ? r.invoke(acc, x) : acc;
+                    return seen.add(new RT.EquivKey(x)) ? r.invoke(acc, x) : acc;
                 }
             };
         });
@@ -1515,7 +1509,7 @@ public final class CoreExtras {
             Var v = Compiler.lookupVar(RT.currentNS(), s, false);
             return v;
         }));
-        def(ns, "loaded-libs", Fn.of0("loaded-libs", () -> PersistentTreeSet.EMPTY));
+        def(ns, "loaded-libs", Fn.of0("loaded-libs", Core::getLoadedLibs));
         def(ns, "load", Fn.ofVarargs("load", args -> {
             for (Object pathObj : args) {
                 String p = pathObj.toString();
@@ -1525,16 +1519,7 @@ public final class CoreExtras {
             }
             return null;
         }));
-        def(ns, "load-reader", Fn.of1("load-reader", rdr -> {
-            try {
-                BufferedReader br = (rdr instanceof BufferedReader b) ? b : new BufferedReader((java.io.Reader) rdr);
-                StringBuilder sb = new StringBuilder();
-                char[] buf = new char[4096];
-                int n;
-                while ((n = br.read(buf)) != -1) sb.append(buf, 0, n);
-                return Compiler.load(sb.toString(), "<reader>");
-            } catch (IOException e) { throw RT.sneakyThrow(e); }
-        }));
+        def(ns, "load-reader", Fn.of1("load-reader", rdr -> Compiler.load((java.io.Reader) rdr, "<reader>")));
         def(ns, "compile", Fn.of1("compile", lib -> lib));
 
         def(ns, "alter-meta!", Fn.ofVarargs("alter-meta!", args -> {
@@ -1922,6 +1907,11 @@ public final class CoreExtras {
             Symbol nameSym = (Symbol) args[0];
             String[] fields = toStringArray(args[1]);
             boolean[] mutables = new boolean[fields.length];
+            if (args.length > 5 && args[5] instanceof PersistentVector mv) {
+                for (int i = 0; i < Math.min(fields.length, mv.count()); i++) {
+                    mutables[i] = RT.truthy(mv.nth(i));
+                }
+            }
             Class<?>[] ifaces = resolveInterfaces(args[2]);
             Map<String, Fn> javaMethods = toMethodMap(args[3]);
             Map<Protocol, Map<Keyword, Fn>> protoImpls = toProtoMap(args[4]);
@@ -2105,7 +2095,19 @@ public final class CoreExtras {
         Symbol nameSym = (Symbol) args[0];
         PersistentVector fieldsVec = (PersistentVector) args[1];
         List<Object> fieldNames = new ArrayList<>();
-        for (int i = 0; i < fieldsVec.count(); i++) fieldNames.add(fieldsVec.nth(i).toString());
+        List<Object> mutFlags = new ArrayList<>();
+        Set<String> mutableSet = new HashSet<>();
+        Keyword volKw = Keyword.intern("volatile-mutable");
+        Keyword unsyncKw = Keyword.intern("unsynchronized-mutable");
+        for (int i = 0; i < fieldsVec.count(); i++) {
+            Symbol fs = (Symbol) fieldsVec.nth(i);
+            fieldNames.add(fs.name);
+            PersistentHashMap fm = fs.meta();
+            boolean isMut = !isRecord && fm != null
+                    && (RT.truthy(fm.valAt(volKw)) || RT.truthy(fm.valAt(unsyncKw)));
+            mutFlags.add(isMut);
+            if (isMut) mutableSet.add(fs.name);
+        }
 
         List<Object> specs = new ArrayList<>();
         List<Object> javaMapKVs = new ArrayList<>();
@@ -2118,7 +2120,7 @@ public final class CoreExtras {
             Map<String, ISeq> methods = new LinkedHashMap<>();
             while (i < args.length && args[i] instanceof ISeq ms) {
                 Symbol mname = (Symbol) ms.first();
-                ISeq mbody = wrapMethodWithFields(fieldsVec, ms.next(), isRecord);
+                ISeq mbody = wrapMethodWithFields(fieldsVec, ms.next(), isRecord, mutableSet);
                 String mn = mname.name;
                 javaMapKVs.add(mn);
                 javaMapKVs.add(RT.cons(Symbol.intern("fn"), mbody));
@@ -2135,33 +2137,45 @@ public final class CoreExtras {
         }
 
         String regFn = isRecord ? "register-record*" : "register-type*";
+        if (isRecord) {
+            return PersistentList.createFromArray(
+                    Symbol.intern("clojure.core", regFn),
+                    PersistentList.createFromArray(Symbol.intern("quote"), nameSym),
+                    PersistentVector.create(fieldNames),
+                    PersistentVector.create(specs),
+                    RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(javaMapKVs)),
+                    RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(protoMapKVs)));
+        }
         return PersistentList.createFromArray(
                 Symbol.intern("clojure.core", regFn),
                 PersistentList.createFromArray(Symbol.intern("quote"), nameSym),
                 PersistentVector.create(fieldNames),
                 PersistentVector.create(specs),
                 RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(javaMapKVs)),
-                RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(protoMapKVs)));
+                RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(protoMapKVs)),
+                PersistentVector.create(mutFlags));
     }
 
-    private static ISeq wrapMethodWithFields(PersistentVector fields, ISeq methodRest, boolean isRecord) {
+    private static ISeq wrapMethodWithFields(
+            PersistentVector fields, ISeq methodRest, boolean isRecord, Set<String> mutableSet) {
         if (methodRest.first() instanceof PersistentVector params) {
-            return wrapSingleArity(fields, params, methodRest.next(), isRecord);
+            return wrapSingleArity(fields, params, methodRest.next(), isRecord, mutableSet);
         }
         List<Object> clauses = new ArrayList<>();
         for (ISeq s = methodRest; s != null; s = s.next()) {
             ISeq arity = (ISeq) s.first();
-            clauses.add(wrapSingleArity(fields, (PersistentVector) arity.first(), arity.next(), isRecord));
+            clauses.add(wrapSingleArity(fields, (PersistentVector) arity.first(), arity.next(), isRecord, mutableSet));
         }
         return PersistentList.create(clauses);
     }
 
     private static ISeq wrapSingleArity(
-            PersistentVector fields, PersistentVector params, ISeq bodyForms, boolean isRecord) {
+            PersistentVector fields, PersistentVector params, ISeq bodyForms, boolean isRecord, Set<String> mutableSet) {
         Object thisSym = params.nth(0);
         List<Object> lets = new ArrayList<>();
         for (int i = 0; i < fields.count(); i++) {
             Symbol f = (Symbol) fields.nth(i);
+            if (!isRecord && mutableSet.contains(f.name)) continue;
             lets.add(f);
             if (isRecord) {
                 lets.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "get"),
@@ -2170,12 +2184,162 @@ public final class CoreExtras {
                 lets.add(PersistentList.createFromArray(Symbol.intern("."), thisSym, Symbol.intern(f.name)));
             }
         }
+        Set<String> shadowed = new HashSet<>();
+        collectBindingSyms(params, shadowed);
         List<Object> body = new ArrayList<>();
         body.add(Symbol.intern("do"));
-        for (ISeq s = bodyForms; s != null; s = s.next()) body.add(s.first());
+        for (ISeq s = bodyForms; s != null; s = s.next()) {
+            Object b = mutableSet.isEmpty() ? s.first() : rewriteMutableFields(s.first(), thisSym, mutableSet, shadowed);
+            body.add(b);
+        }
+        Object bodyExpr = PersistentList.create(body);
+        if (lets.isEmpty()) {
+            return PersistentList.createFromArray(params, bodyExpr);
+        }
         Object letForm = PersistentList.createFromArray(
-                Symbol.intern("let"), PersistentVector.create(lets), PersistentList.create(body));
+                Symbol.intern("let"), PersistentVector.create(lets), bodyExpr);
         return PersistentList.createFromArray(params, letForm);
+    }
+
+    private static void collectBindingSyms(Object pat, Set<String> out) {
+        if (pat instanceof Symbol s && s.ns == null && !"&".equals(s.name)) {
+            out.add(s.name);
+        } else if (pat instanceof PersistentVector pv) {
+            for (int i = 0; i < pv.count(); i++) {
+                Object elem = pv.nth(i);
+                if (Keyword.intern("as").equals(elem) && i + 1 < pv.count()) {
+                    collectBindingSyms(pv.nth(++i), out);
+                } else {
+                    collectBindingSyms(elem, out);
+                }
+            }
+        } else if (pat instanceof PersistentHashMap pm) {
+            for (ISeq s = pm.seq(); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                Object k = e.getKey(), v = e.getValue();
+                if (Keyword.intern("keys").equals(k) || Keyword.intern("strs").equals(k) || Keyword.intern("syms").equals(k)) {
+                    for (ISeq ks = RT.seq(v); ks != null; ks = ks.next()) {
+                        if (ks.first() instanceof Symbol sy) out.add(sy.name);
+                        else if (ks.first() instanceof Keyword kw) out.add(kw.getName());
+                        else if (ks.first() instanceof String st) out.add(st);
+                    }
+                } else if (Keyword.intern("as").equals(k) && v instanceof Symbol sy) {
+                    out.add(sy.name);
+                } else if (!Keyword.intern("or").equals(k)) {
+                    collectBindingSyms(k, out);
+                }
+            }
+        }
+    }
+
+    private static Object rewriteMutableFields(Object form, Object thisSym, Set<String> mutableSet, Set<String> shadowed) {
+        if (form instanceof Symbol s && s.ns == null) {
+            if (mutableSet.contains(s.name) && !shadowed.contains(s.name)) {
+                return PersistentList.createFromArray(Symbol.intern("."), thisSym, Symbol.intern(s.name));
+            }
+            return form;
+        }
+        if (form instanceof ISeq seq) {
+            ISeq sq = seq.seq();
+            if (sq == null) return form;
+            Object head = sq.first();
+            if (Symbol.intern("quote").equals(head)) return form;
+            if (Symbol.intern("set!").equals(head) && sq.next() != null && sq.next().next() != null) {
+                Object target = sq.next().first();
+                Object valExpr = rewriteMutableFields(sq.next().next().first(), thisSym, mutableSet, shadowed);
+                if (target instanceof Symbol ts && ts.ns == null
+                        && mutableSet.contains(ts.name) && !shadowed.contains(ts.name)) {
+                    return PersistentList.createFromArray(
+                            head,
+                            PersistentList.createFromArray(Symbol.intern("."), thisSym, Symbol.intern(ts.name)),
+                            valExpr);
+                }
+                return PersistentList.createFromArray(head, rewriteMutableFields(target, thisSym, mutableSet, shadowed), valExpr);
+            }
+            if ((Symbol.intern("let").equals(head) || Symbol.intern("let*").equals(head)
+                    || Symbol.intern("loop").equals(head) || Symbol.intern("loop*").equals(head))
+                    && sq.next() != null && sq.next().first() instanceof PersistentVector bvec) {
+                Set<String> curShadowed = new HashSet<>(shadowed);
+                List<Object> newBinds = new ArrayList<>(bvec.count());
+                for (int i = 0; i + 1 < bvec.count(); i += 2) {
+                    Object bpat = bvec.nth(i);
+                    Object binit = rewriteMutableFields(bvec.nth(i + 1), thisSym, mutableSet, curShadowed);
+                    newBinds.add(bpat);
+                    newBinds.add(binit);
+                    collectBindingSyms(bpat, curShadowed);
+                }
+                List<Object> out = new ArrayList<>();
+                out.add(head);
+                out.add(PersistentVector.create(newBinds));
+                for (ISeq b = sq.next().next(); b != null; b = b.next()) {
+                    out.add(rewriteMutableFields(b.first(), thisSym, mutableSet, curShadowed));
+                }
+                return PersistentList.create(out);
+            }
+            if (Symbol.intern("fn").equals(head) || Symbol.intern("fn*").equals(head)) {
+                ISeq cur = sq.next();
+                List<Object> out = new ArrayList<>();
+                out.add(head);
+                if (cur != null && cur.first() instanceof Symbol fnName) {
+                    out.add(fnName);
+                    cur = cur.next();
+                }
+                if (cur != null && cur.first() instanceof PersistentVector params) {
+                    out.add(params);
+                    Set<String> fnShadowed = new HashSet<>(shadowed);
+                    collectBindingSyms(params, fnShadowed);
+                    for (ISeq b = cur.next(); b != null; b = b.next()) {
+                        out.add(rewriteMutableFields(b.first(), thisSym, mutableSet, fnShadowed));
+                    }
+                    return PersistentList.create(out);
+                }
+                for (ISeq cl = cur; cl != null; cl = cl.next()) {
+                    if (cl.first() instanceof ISeq arity && arity.first() instanceof PersistentVector params) {
+                        Set<String> fnShadowed = new HashSet<>(shadowed);
+                        collectBindingSyms(params, fnShadowed);
+                        List<Object> aOut = new ArrayList<>();
+                        aOut.add(params);
+                        for (ISeq b = arity.next(); b != null; b = b.next()) {
+                            aOut.add(rewriteMutableFields(b.first(), thisSym, mutableSet, fnShadowed));
+                        }
+                        out.add(PersistentList.create(aOut));
+                    } else {
+                        out.add(cl.first());
+                    }
+                }
+                return PersistentList.create(out);
+            }
+            List<Object> out = new ArrayList<>();
+            for (ISeq s = sq; s != null; s = s.next()) {
+                out.add(rewriteMutableFields(s.first(), thisSym, mutableSet, shadowed));
+            }
+            return PersistentList.create(out);
+        }
+        if (form instanceof PersistentVector pv) {
+            List<Object> out = new ArrayList<>(pv.count());
+            for (int i = 0; i < pv.count(); i++) {
+                out.add(rewriteMutableFields(pv.nth(i), thisSym, mutableSet, shadowed));
+            }
+            return PersistentVector.create(out);
+        }
+        if (form instanceof PersistentHashMap pm) {
+            PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
+            for (ISeq s = pm.seq(); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                tm = tm.assoc(
+                        rewriteMutableFields(e.getKey(), thisSym, mutableSet, shadowed),
+                        rewriteMutableFields(e.getValue(), thisSym, mutableSet, shadowed));
+            }
+            return tm.persistent();
+        }
+        if (form instanceof PersistentHashSet ps) {
+            PersistentHashSet.TransientHashSet ts = PersistentHashSet.EMPTY.asTransient();
+            for (ISeq s = ps.seq(); s != null; s = s.next()) {
+                ts = ts.conj(rewriteMutableFields(s.first(), thisSym, mutableSet, shadowed));
+            }
+            return ts.persistent();
+        }
+        return form;
     }
 
     private static Object expandReify(Object[] args) {

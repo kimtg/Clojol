@@ -143,7 +143,7 @@ public final class Core {
         def(ns, "simple-keyword?", Fn.of1("simple-keyword?", x -> x instanceof Keyword k && k.getNamespace() == null));
         def(ns, "qualified-keyword?", Fn.of1("qualified-keyword?", x -> x instanceof Keyword k && k.getNamespace() != null));
         def(ns, "list?", Fn.of1("list?", x -> x instanceof PersistentList || x instanceof PersistentList.EmptyList));
-        def(ns, "vector?", Fn.of1("vector?", x -> x instanceof PersistentVector || x instanceof PersistentHashMap.MapEntry));
+        def(ns, "vector?", Fn.of1("vector?", x -> x instanceof PersistentVector || x instanceof PersistentVector.SubVec || x instanceof PersistentHashMap.MapEntry));
         def(ns, "map?", Fn.of1("map?", x -> x instanceof PersistentHashMap || x instanceof Map<?, ?>));
         def(ns, "set?", Fn.of1("set?", x -> x instanceof PersistentHashSet || x instanceof Set<?>));
         def(ns, "seq?", Fn.of1("seq?", x -> x instanceof ISeq));
@@ -175,12 +175,9 @@ public final class Core {
         }));
         def(ns, "distinct?", Fn.ofVarargs("distinct?", args -> {
             if (args.length <= 1) return Boolean.TRUE;
-            Set<Object> seen = new HashSet<>(args.length * 2);
+            Set<RT.EquivKey> seen = new HashSet<>(args.length * 2);
             for (Object a : args) {
-                for (Object s : seen) {
-                    if (RT.equiv(a, s)) return Boolean.FALSE;
-                }
-                seen.add(a);
+                if (!seen.add(new RT.EquivKey(a))) return Boolean.FALSE;
             }
             return Boolean.TRUE;
         }));
@@ -665,27 +662,27 @@ public final class Core {
 
         def(ns, "group-by", Fn.of2("group-by", (f, coll) -> {
             Fn fn = (Fn) f;
-            Map<Object, PersistentVector.TransientVector> groups = new LinkedHashMap<>();
+            Map<RT.EquivKey, PersistentVector.TransientVector> groups = new LinkedHashMap<>();
             for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
                 Object item = s.first();
                 Object k = fn.invoke(item);
-                groups.computeIfAbsent(k, _k -> PersistentVector.EMPTY.asTransient()).conj(item);
+                groups.computeIfAbsent(new RT.EquivKey(k), _k -> PersistentVector.EMPTY.asTransient()).conj(item);
             }
             PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
-            for (Map.Entry<Object, PersistentVector.TransientVector> e : groups.entrySet()) {
-                ret = ret.assoc(e.getKey(), e.getValue().persistent());
+            for (Map.Entry<RT.EquivKey, PersistentVector.TransientVector> e : groups.entrySet()) {
+                ret = ret.assoc(e.getKey().val, e.getValue().persistent());
             }
             return ret.persistent();
         }));
 
         def(ns, "frequencies", Fn.of1("frequencies", coll -> {
-            Map<Object, Long> counts = new HashMap<>();
+            Map<RT.EquivKey, Long> counts = new HashMap<>();
             for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                counts.merge(s.first(), 1L, Long::sum);
+                counts.merge(new RT.EquivKey(s.first()), 1L, Long::sum);
             }
             PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
-            for (Map.Entry<Object, Long> e : counts.entrySet()) {
-                ret = ret.assoc(e.getKey(), e.getValue());
+            for (Map.Entry<RT.EquivKey, Long> e : counts.entrySet()) {
+                ret = ret.assoc(e.getKey().val, e.getValue());
             }
             return ret.persistent();
         }));
@@ -735,29 +732,29 @@ public final class Core {
         if ((step > 0 && start >= end) || (step < 0 && start <= end) || step == 0) {
             return PersistentList.EMPTY;
         }
-        return new LazySeq(Fn.of0("range", () -> new PersistentList(null, start, rangeSeq(start + step, end, step), 2)));
+        return new LazySeq(Fn.of0("range", () -> new Cons(start, rangeSeq(start + step, end, step))));
     }
 
     private static ISeq repeatInfSeq(Object x) {
-        return new LazySeq(Fn.of0("repeat", () -> new PersistentList(null, x, repeatInfSeq(x), 2)));
+        return new LazySeq(Fn.of0("repeat", () -> new Cons(x, repeatInfSeq(x))));
     }
 
     private static ISeq repeatNSeq(long n, Object x) {
         if (n <= 0) return PersistentList.EMPTY;
-        return new LazySeq(Fn.of0("repeat", () -> new PersistentList(null, x, repeatNSeq(n - 1, x), 2)));
+        return new LazySeq(Fn.of0("repeat", () -> new Cons(x, repeatNSeq(n - 1, x))));
     }
 
     private static ISeq repeatedlyInfSeq(Fn f) {
-        return new LazySeq(Fn.of0("repeatedly", () -> new PersistentList(null, f.invoke(), repeatedlyInfSeq(f), 2)));
+        return new LazySeq(Fn.of0("repeatedly", () -> new Cons(f.invoke(), repeatedlyInfSeq(f))));
     }
 
     private static ISeq repeatedlyNSeq(long n, Fn f) {
         if (n <= 0) return PersistentList.EMPTY;
-        return new LazySeq(Fn.of0("repeatedly", () -> new PersistentList(null, f.invoke(), repeatedlyNSeq(n - 1, f), 2)));
+        return new LazySeq(Fn.of0("repeatedly", () -> new Cons(f.invoke(), repeatedlyNSeq(n - 1, f))));
     }
 
     private static ISeq iterateSeq(Fn f, Object x) {
-        return new LazySeq(Fn.of0("iterate", () -> new PersistentList(null, x, iterateSeq(f, f.invoke(x)), 2)));
+        return new LazySeq(Fn.of0("iterate", () -> new Cons(x, iterateSeq(f, f.invoke(x)))));
     }
 
     private static ISeq cycleSeq(ISeq orig, ISeq cur) {
@@ -765,7 +762,7 @@ public final class Core {
             ISeq s = cur.seq();
             if (s == null) s = orig.seq();
             ISeq nxt = s.next();
-            return new PersistentList(null, s.first(), cycleSeq(orig, nxt != null ? nxt : orig), 2);
+            return new Cons(s.first(), cycleSeq(orig, nxt != null ? nxt : orig));
         }));
     }
 
@@ -774,7 +771,7 @@ public final class Core {
         return new LazySeq(Fn.of0("take", () -> {
             ISeq sq = s.seq();
             if (sq == null) return null;
-            return new PersistentList(null, sq.first(), takeSeq(n - 1, sq.next()), 2);
+            return new Cons(sq.first(), takeSeq(n - 1, sq.next()));
         }));
     }
 
@@ -785,7 +782,7 @@ public final class Core {
             if (sq == null) return null;
             Object v = sq.first();
             if (RT.truthy(pred.invoke(v))) {
-                return new PersistentList(null, v, takeWhileSeq(pred, sq.next()), 2);
+                return new Cons(v, takeWhileSeq(pred, sq.next()));
             }
             return null;
         }));
@@ -799,7 +796,7 @@ public final class Core {
             Object head = sq.first();
             ISeq cur = sq;
             for (long i = 0; i < n && cur != null; i++) cur = cur.next();
-            return new PersistentList(null, head, takeNthSeq(n, cur), 2);
+            return new Cons(head, takeNthSeq(n, cur));
         }));
     }
 
@@ -838,7 +835,7 @@ public final class Core {
         return new LazySeq(Fn.of0("map", () -> {
             ISeq sq = s.seq();
             if (sq == null) return null;
-            return new PersistentList(null, f.invoke(sq.first()), map1Seq(f, sq.next()), 2);
+            return new Cons(f.invoke(sq.first()), map1Seq(f, sq.next()));
         }));
     }
 
@@ -852,7 +849,7 @@ public final class Core {
                 args[i] = sq.first();
                 nexts[i] = sq.next();
             }
-            return new PersistentList(null, f.applyTo(args), mapNSeq(f, nexts), 2);
+            return new Cons(f.applyTo(args), mapNSeq(f, nexts));
         }));
     }
 
@@ -861,7 +858,7 @@ public final class Core {
         return new LazySeq(Fn.of0("map-indexed", () -> {
             ISeq sq = s.seq();
             if (sq == null) return null;
-            return new PersistentList(null, f.invoke(idx, sq.first()), mapIndexedSeq(f, idx + 1, sq.next()), 2);
+            return new Cons(f.invoke(idx, sq.first()), mapIndexedSeq(f, idx + 1, sq.next()));
         }));
     }
 
@@ -873,7 +870,7 @@ public final class Core {
                 if (sq == null) return null;
                 Object res = f.invoke(sq.first());
                 if (res != null) {
-                    return new PersistentList(null, res, keepSeq(f, sq.next()), 2);
+                    return new Cons(res, keepSeq(f, sq.next()));
                 }
                 sq = sq.next();
             }
@@ -890,7 +887,7 @@ public final class Core {
                 if (sq == null) return null;
                 Object res = f.invoke(i, sq.first());
                 if (res != null) {
-                    return new PersistentList(null, res, keepIndexedSeq(f, i + 1, sq.next()), 2);
+                    return new Cons(res, keepIndexedSeq(f, i + 1, sq.next()));
                 }
                 sq = sq.next();
                 i++;
@@ -908,7 +905,7 @@ public final class Core {
                 Object v = sq.first();
                 boolean keep = RT.truthy(pred.invoke(v)) ^ invert;
                 if (keep) {
-                    return new PersistentList(null, v, filterSeq(pred, sq.next(), invert), 2);
+                    return new Cons(v, filterSeq(pred, sq.next(), invert));
                 }
                 sq = sq.next();
             }
@@ -955,7 +952,7 @@ public final class Core {
             if (nextAcc instanceof Reduced r) {
                 return new PersistentList(null, acc, new PersistentList(r.deref()), 2);
             }
-            return new PersistentList(null, acc, reductionsSeq(f, nextAcc, s.next()), 2);
+            return new Cons(acc, reductionsSeq(f, nextAcc, s.next()));
         }));
     }
 
@@ -978,8 +975,8 @@ public final class Core {
             ISeq sq = headSeq.seq();
             if (sq == null) return concatSeq(tailSeqs);
             ISeq nxt = sq.next();
-            return new PersistentList(null, sq.first(),
-                    nxt != null ? concatChain(nxt, tailSeqs) : concatSeq(tailSeqs), 2);
+            return new Cons(sq.first(),
+                    nxt != null ? concatChain(nxt, tailSeqs) : concatSeq(tailSeqs));
         }));
     }
 
@@ -996,7 +993,7 @@ public final class Core {
             ISeq tail = interleaveSeq(nexts);
             ISeq res = tail;
             for (int i = stepItems.size() - 1; i >= 0; i--) {
-                res = new PersistentList(null, stepItems.get(i), res, 2);
+                res = new Cons(stepItems.get(i), res);
             }
             return res;
         }));
@@ -1008,10 +1005,10 @@ public final class Core {
             ISeq sq = s.seq();
             if (sq == null) return null;
             if (firstElem) {
-                return new PersistentList(null, sq.first(), interposeSeq(sep, sq.next(), false), 2);
+                return new Cons(sq.first(), interposeSeq(sep, sq.next(), false));
             }
-            return new PersistentList(null, sep,
-                    new PersistentList(null, sq.first(), interposeSeq(sep, sq.next(), false), 2), 2);
+            return new Cons(sep,
+                    new Cons(sq.first(), interposeSeq(sep, sq.next(), false)));
         }));
     }
 
@@ -1039,8 +1036,8 @@ public final class Core {
             }
             ISeq nextStart = sq;
             for (int i = 0; i < step && nextStart != null; i++) nextStart = nextStart.next();
-            return new PersistentList(null, PersistentList.create(chunk),
-                    partitionSeq(n, step, pad, nextStart, allowPartial), 2);
+            return new Cons(PersistentList.create(chunk),
+                    partitionSeq(n, step, pad, nextStart, allowPartial));
         }));
     }
 
@@ -1060,19 +1057,19 @@ public final class Core {
                 run.add(item);
                 cur = cur.next();
             }
-            return new PersistentList(null, PersistentList.create(run), partitionBySeq(f, cur), 2);
+            return new Cons(PersistentList.create(run), partitionBySeq(f, cur));
         }));
     }
 
-    private static ISeq distinctSeq(ISeq s, Set<Object> seen) {
+    private static ISeq distinctSeq(ISeq s, Set<RT.EquivKey> seen) {
         return new LazySeq(Fn.of0("distinct", () -> {
             ISeq sq = s;
             while (sq != null) {
                 sq = sq.seq();
                 if (sq == null) return null;
                 Object item = sq.first();
-                if (seen.add(item)) {
-                    return new PersistentList(null, item, distinctSeq(sq.next(), seen), 2);
+                if (seen.add(new RT.EquivKey(item))) {
+                    return new Cons(item, distinctSeq(sq.next(), seen));
                 }
                 sq = sq.next();
             }
@@ -1090,7 +1087,7 @@ public final class Core {
                 if (sq == null) return null;
                 Object item = sq.first();
                 if (firstFlag || !RT.equiv(prev, item)) {
-                    return new PersistentList(null, item, dedupeSeq(sq.next(), item, false), 2);
+                    return new Cons(item, dedupeSeq(sq.next(), item, false));
                 }
                 sq = sq.next();
             }
@@ -1103,7 +1100,7 @@ public final class Core {
             ISeq rest = RT.truthy(branchP.invoke(node))
                     ? treeSeqChildren(branchP, childrenFn, RT.seq(childrenFn.invoke(node)))
                     : null;
-            return new PersistentList(null, node, rest, 2);
+            return new Cons(node, rest);
         }));
     }
 
@@ -1290,8 +1287,19 @@ public final class Core {
         }));
 
         def(ns, "subvec", Fn.of23("subvec",
-                (v, start) -> ((PersistentVector) v).subList((int) Numbers.toLong(start), ((PersistentVector) v).count()),
-                (v, start, end) -> ((PersistentVector) v).subList((int) Numbers.toLong(start), (int) Numbers.toLong(end))));
+                (v, start) -> {
+                    int s = (int) Numbers.toLong(start);
+                    if (v instanceof PersistentVector pv) return pv.subVec(s, pv.cnt);
+                    if (v instanceof PersistentVector.SubVec sv) return sv.subVec(s, sv.count());
+                    throw new ClassCastException("subvec expects a vector: " + v);
+                },
+                (v, start, end) -> {
+                    int s = (int) Numbers.toLong(start);
+                    int e = (int) Numbers.toLong(end);
+                    if (v instanceof PersistentVector pv) return pv.subVec(s, e);
+                    if (v instanceof PersistentVector.SubVec sv) return sv.subVec(s, e);
+                    throw new ClassCastException("subvec expects a vector: " + v);
+                }));
 
         def(ns, "disj", Fn.ofVarargs("disj", args -> {
             Object s = args[0];
@@ -1367,23 +1375,82 @@ public final class Core {
             if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.persistent();
             throw new IllegalArgumentException("Not a transient: " + t);
         }));
-        def(ns, "conj!", Fn.of12("conj!", t -> t, (t, x) -> {
-            if (t instanceof PersistentVector.TransientVector tv) return tv.conj(x);
-            if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.conj(x);
-            if (t instanceof PersistentHashMap.TransientHashMap tm) {
-                Map.Entry<?, ?> e = (Map.Entry<?, ?>) x;
-                return tm.assoc(e.getKey(), e.getValue());
+        def(ns, "__destructure-map", Fn.of1("__destructure-map", RT::destructureMap));
+        def(ns, "conj!", new Fn.NamedFn("conj!") {
+            @Override public Object invoke() { return PersistentVector.EMPTY.asTransient(); }
+            @Override public Object invoke(Object t) { return t; }
+            @Override public Object invoke(Object t, Object x) {
+                if (t instanceof PersistentVector.TransientVector tv) return tv.conj(x);
+                if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.conj(x);
+                if (t instanceof PersistentHashMap.TransientHashMap tm) {
+                    if (x == null) return tm;
+                    if (x instanceof Map.Entry<?, ?> e) return tm.assoc(e.getKey(), e.getValue());
+                    if (x instanceof PersistentVector v && v.cnt == 2) return tm.assoc(v.nth(0), v.nth(1));
+                    if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return tm.assoc(sv.nth(0), sv.nth(1));
+                    if (x instanceof Map<?, ?> m) {
+                        for (Map.Entry<?, ?> e : m.entrySet()) tm = tm.assoc(e.getKey(), e.getValue());
+                        return tm;
+                    }
+                    throw new IllegalArgumentException("Cannot conj onto transient map: " + x);
+                }
+                throw new IllegalArgumentException("Not a transient: " + t);
             }
-            throw new IllegalArgumentException("Not a transient: " + t);
-        }));
-        def(ns, "assoc!", Fn.of3("assoc!", (t, k, v) -> {
-            if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.assoc(k, v);
-            if (t instanceof PersistentVector.TransientVector tv) return tv.assocN((int) Numbers.toLong(k), v);
-            throw new IllegalArgumentException("Not an associative transient: " + t);
-        }));
-        def(ns, "dissoc!", Fn.of2("dissoc!", (t, k) -> ((PersistentHashMap.TransientHashMap) t).without(k)));
+        });
+        def(ns, "assoc!", new Fn.NamedFn("assoc!") {
+            private Object assoc1(Object t, Object k, Object v) {
+                if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.assoc(k, v);
+                if (t instanceof PersistentVector.TransientVector tv) return tv.assocN((int) Numbers.toLong(k), v);
+                throw new IllegalArgumentException("Not an associative transient: " + t);
+            }
+            @Override public Object invoke(Object t, Object k, Object v) {
+                return assoc1(t, k, v);
+            }
+            @Override public Object invokeVarargs(Object[] args) {
+                if (args.length < 3 || (args.length & 1) == 0) throw arityError(args.length);
+                Object res = args[0];
+                for (int i = 1; i < args.length; i += 2) {
+                    res = assoc1(res, args[i], args[i + 1]);
+                }
+                return res;
+            }
+        });
+        def(ns, "dissoc!", new Fn.NamedFn("dissoc!") {
+            @Override public Object invoke(Object t) { return t; }
+            @Override public Object invoke(Object t, Object k) {
+                return ((PersistentHashMap.TransientHashMap) t).without(k);
+            }
+            @Override public Object invoke(Object t, Object k1, Object k2) {
+                return ((PersistentHashMap.TransientHashMap) t).without(k1).without(k2);
+            }
+            @Override public Object invoke(Object t, Object k1, Object k2, Object k3) {
+                return ((PersistentHashMap.TransientHashMap) t).without(k1).without(k2).without(k3);
+            }
+            @Override public Object invokeVarargs(Object[] args) {
+                if (args.length == 0) throw arityError(0);
+                PersistentHashMap.TransientHashMap tm = (PersistentHashMap.TransientHashMap) args[0];
+                for (int i = 1; i < args.length; i++) tm = tm.without(args[i]);
+                return tm;
+            }
+        });
         def(ns, "pop!", Fn.of1("pop!", t -> ((PersistentVector.TransientVector) t).pop()));
-        def(ns, "disj!", Fn.of2("disj!", (t, k) -> ((PersistentHashSet.TransientHashSet) t).disjoin(k)));
+        def(ns, "disj!", new Fn.NamedFn("disj!") {
+            @Override public Object invoke(Object t) { return t; }
+            @Override public Object invoke(Object t, Object k) {
+                return ((PersistentHashSet.TransientHashSet) t).disjoin(k);
+            }
+            @Override public Object invoke(Object t, Object k1, Object k2) {
+                return ((PersistentHashSet.TransientHashSet) t).disjoin(k1).disjoin(k2);
+            }
+            @Override public Object invoke(Object t, Object k1, Object k2, Object k3) {
+                return ((PersistentHashSet.TransientHashSet) t).disjoin(k1).disjoin(k2).disjoin(k3);
+            }
+            @Override public Object invokeVarargs(Object[] args) {
+                if (args.length == 0) throw arityError(0);
+                PersistentHashSet.TransientHashSet ts = (PersistentHashSet.TransientHashSet) args[0];
+                for (int i = 1; i < args.length; i++) ts = ts.disjoin(args[i]);
+                return ts;
+            }
+        });
     }
 
     private static Object intoImpl(Object to, Fn xform, Object from) {
@@ -1862,11 +1929,14 @@ public final class Core {
     private static void initConcurrencyAndVars(Namespace ns) {
         def(ns, "atom", Fn.ofVarargs("atom", args -> {
             if (args.length == 1) return new Atom(args[0]);
-            Atom a = new Atom(args[0]);
+            PersistentHashMap meta = null;
+            Fn validator = null;
             for (int i = 1; i < args.length; i += 2) {
-                if (Keyword.intern("meta").equals(args[i])) a.withMeta((PersistentHashMap) args[i + 1]);
-                else if (Keyword.intern("validator").equals(args[i])) a.setValidator((Fn) args[i + 1]);
+                if (Keyword.intern("meta").equals(args[i])) meta = (PersistentHashMap) args[i + 1];
+                else if (Keyword.intern("validator").equals(args[i])) validator = (Fn) args[i + 1];
             }
+            Atom a = new Atom(args[0], meta);
+            if (validator != null) a.setValidator(validator);
             return a;
         }));
 
@@ -1939,30 +2009,20 @@ public final class Core {
 
         def(ns, "pmap", Fn.ofVarargs("pmap", args -> {
             Fn f = (Fn) args[0];
-            List<Atom.FutureObj> futures = new ArrayList<>();
+            ISeq rets;
             if (args.length == 2) {
-                for (ISeq s = RT.seq(args[1]); s != null; s = s.next()) {
-                    Object item = s.first();
-                    futures.add(new Atom.FutureObj(Fn.of0("pmap-task", () -> f.invoke(item))));
-                }
+                rets = pmapFutures1(f, RT.seq(args[1]));
             } else {
                 ISeq[] seqs = new ISeq[args.length - 1];
                 for (int i = 0; i < seqs.length; i++) seqs[i] = RT.seq(args[i + 1]);
-                while (true) {
-                    Object[] callArgs = new Object[seqs.length];
-                    boolean done = false;
-                    for (int i = 0; i < seqs.length; i++) {
-                        if (seqs[i] == null) { done = true; break; }
-                        callArgs[i] = seqs[i].first();
-                        seqs[i] = seqs[i].next();
-                    }
-                    if (done) break;
-                    futures.add(new Atom.FutureObj(Fn.of0("pmap-task", () -> f.applyTo(callArgs))));
-                }
+                rets = pmapFuturesN(f, seqs);
             }
-            List<Object> results = new ArrayList<>(futures.size());
-            for (Atom.FutureObj fut : futures) results.add(fut.deref());
-            return PersistentList.create(results);
+            int procs = Runtime.getRuntime().availableProcessors() + 2;
+            ISeq ahead = rets;
+            for (int i = 0; i < procs && ahead != null; i++) {
+                ahead = RT.next(ahead);
+            }
+            return pmapStep(rets, ahead);
         }));
 
         def(ns, "add-watch", Fn.of3("add-watch", (ref, key, fn) -> {
@@ -1994,9 +2054,9 @@ public final class Core {
 
         // Metadata & Vars
         def(ns, "meta", Fn.of1("meta", x -> x instanceof IMeta m ? m.meta() : null));
-        def(ns, "with-meta", Fn.of2("with-meta", (x, m) -> ((IMeta) x).withMeta((PersistentHashMap) m)));
+        def(ns, "with-meta", Fn.of2("with-meta", (x, m) -> ((IObj) x).withMeta((PersistentHashMap) m)));
         def(ns, "vary-meta", Fn.ofVarargs("vary-meta", args -> {
-            IMeta obj = (IMeta) args[0];
+            IObj obj = (IObj) args[0];
             Fn f = (Fn) args[1];
             Object[] callArgs = new Object[args.length - 1];
             callArgs[0] = obj.meta();
@@ -2072,7 +2132,25 @@ public final class Core {
         def(ns, "refer", Fn.ofVarargs("refer", args -> {
             Namespace target = Namespace.find((Symbol) args[0]);
             if (target == null) throw new RuntimeException("No namespace: " + args[0]);
-            RT.currentNS().referAll(target);
+            Set<Symbol> exclude = new HashSet<>();
+            Set<Symbol> only = null;
+            Map<Symbol, Symbol> rename = new HashMap<>();
+            for (int i = 1; i + 1 < args.length; i += 2) {
+                Object opt = args[i];
+                Object val = args[i + 1];
+                if (Keyword.intern("exclude").equals(opt)) {
+                    for (ISeq s = RT.seq(val); s != null; s = s.next()) exclude.add(((Symbol) s.first()).withMeta(null));
+                } else if (Keyword.intern("only").equals(opt)) {
+                    only = new HashSet<>();
+                    for (ISeq s = RT.seq(val); s != null; s = s.next()) only.add(((Symbol) s.first()).withMeta(null));
+                } else if (Keyword.intern("rename").equals(opt)) {
+                    for (ISeq s = RT.seq(val); s != null; s = s.next()) {
+                        Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                        rename.put(((Symbol) e.getKey()).withMeta(null), ((Symbol) e.getValue()).withMeta(null));
+                    }
+                }
+            }
+            referWithFilters(RT.currentNS(), target, exclude, only, rename);
             return null;
         }));
         def(ns, "import", Fn.ofVarargs("import", args -> {
@@ -2096,15 +2174,11 @@ public final class Core {
         }));
 
         def(ns, "require", Fn.ofVarargs("require", args -> {
-            for (Object spec : args) processRequireSpec(spec);
+            for (Object spec : args) processLibSpec(spec, false);
             return null;
         }));
         def(ns, "use", Fn.ofVarargs("use", args -> {
-            for (Object spec : args) {
-                Symbol nsSym = processRequireSpec(spec);
-                Namespace target = Namespace.find(nsSym);
-                if (target != null) RT.currentNS().referAll(target);
-            }
+            for (Object spec : args) processLibSpec(spec, true);
             return null;
         }));
 
@@ -2136,10 +2210,60 @@ public final class Core {
                 .assoc(Keyword.intern("doc"), "Prints documentation for a var, namespace, symbol, or metadata map."));
     }
 
-    private static Symbol processRequireSpec(Object spec) {
+    private static void referWithFilters(
+            Namespace dst, Namespace target, Set<Symbol> exclude, Set<Symbol> only, Map<Symbol, Symbol> rename) {
+        if (only == null && exclude.isEmpty() && rename.isEmpty()) {
+            dst.referAll(target);
+            return;
+        }
+        Keyword privKw = Keyword.intern("private");
+        for (Map.Entry<Symbol, Object> e : target.getMappings().entrySet()) {
+            if (e.getValue() instanceof Var v && v.ns == target) {
+                if (RT.truthy(v.meta().valAt(privKw))) continue;
+                Symbol sym = e.getKey().withMeta(null);
+                if (only != null && !only.contains(sym)) continue;
+                if (exclude.contains(sym)) continue;
+                Symbol mapped = rename.getOrDefault(sym, sym);
+                if (only != null || rename.containsKey(sym)) {
+                    dst.refer(mapped, v);
+                } else {
+                    dst.getMappings().putIfAbsent(mapped, v);
+                }
+            }
+        }
+    }
+
+    private static void processLibSpec(Object spec, boolean isUse) {
         if (spec instanceof Symbol s) {
             loadLib(s.name);
-            return s;
+            if (isUse) {
+                Namespace target = Namespace.find(s);
+                if (target != null) RT.currentNS().referAll(target);
+            }
+            return;
+        }
+        if (spec instanceof ISeq prefixSeq) {
+            ISeq sq = prefixSeq.seq();
+            if (sq == null || !(sq.first() instanceof Symbol prefixSym)) {
+                throw new IllegalArgumentException("Invalid prefix lib spec: " + spec);
+            }
+            String prefix = prefixSym.name;
+            for (ISeq s = sq.next(); s != null; s = s.next()) {
+                Object child = s.first();
+                if (child instanceof Symbol cs) {
+                    processLibSpec(Symbol.intern(prefix + "." + cs.name), isUse);
+                } else if (child instanceof PersistentVector cv) {
+                    Object[] arr = new Object[cv.count()];
+                    arr[0] = Symbol.intern(prefix + "." + ((Symbol) cv.nth(0)).name);
+                    for (int i = 1; i < cv.count(); i++) arr[i] = cv.nth(i);
+                    processLibSpec(PersistentVector.createOwning(arr), isUse);
+                } else if (child instanceof ISeq nested && nested.first() instanceof Symbol nsym) {
+                    processLibSpec(RT.cons(Symbol.intern(prefix + "." + nsym.name), nested.next()), isUse);
+                } else {
+                    throw new IllegalArgumentException("Invalid child in prefix lib spec: " + child);
+                }
+            }
+            return;
         }
         if (spec instanceof PersistentVector v) {
             Symbol libSym = (Symbol) v.nth(0);
@@ -2147,6 +2271,9 @@ public final class Core {
             Symbol asAlias = null;
             ISeq referList = null;
             boolean referAll = false;
+            Set<Symbol> exclude = new HashSet<>();
+            Set<Symbol> only = null;
+            Map<Symbol, Symbol> rename = new HashMap<>();
 
             for (int i = 1; i < v.count(); i++) {
                 Object opt = v.nth(i);
@@ -2158,6 +2285,16 @@ public final class Core {
                     Object r = v.nth(++i);
                     if (Keyword.intern("all").equals(r)) referAll = true;
                     else referList = RT.seq(r);
+                } else if (Keyword.intern("exclude").equals(opt)) {
+                    for (ISeq s = RT.seq(v.nth(++i)); s != null; s = s.next()) exclude.add(((Symbol) s.first()).withMeta(null));
+                } else if (Keyword.intern("only").equals(opt)) {
+                    only = new HashSet<>();
+                    for (ISeq s = RT.seq(v.nth(++i)); s != null; s = s.next()) only.add(((Symbol) s.first()).withMeta(null));
+                } else if (Keyword.intern("rename").equals(opt)) {
+                    for (ISeq s = RT.seq(v.nth(++i)); s != null; s = s.next()) {
+                        Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                        rename.put(((Symbol) e.getKey()).withMeta(null), ((Symbol) e.getValue()).withMeta(null));
+                    }
                 }
             }
             if (reload) LOADED_LIBS.remove(libSym.name);
@@ -2165,17 +2302,25 @@ public final class Core {
             Namespace target = Namespace.find(libSym);
             if (target == null) throw new RuntimeException("Namespace not found after require: " + libSym);
             if (asAlias != null) RT.currentNS().addAlias(asAlias, target);
-            if (referAll) RT.currentNS().referAll(target);
             if (referList != null) {
                 for (ISeq s = referList; s != null; s = s.next()) {
-                    Symbol sym = (Symbol) s.first();
+                    Symbol sym = ((Symbol) s.first()).withMeta(null);
+                    if (exclude.contains(sym)) continue;
                     Var found = target.findInternedVar(sym);
-                    if (found != null) RT.currentNS().refer(sym, found);
+                    if (found != null) RT.currentNS().refer(rename.getOrDefault(sym, sym), found);
                 }
+            } else if (referAll || isUse) {
+                referWithFilters(RT.currentNS(), target, exclude, only, rename);
             }
-            return libSym;
+            return;
         }
         throw new IllegalArgumentException("Invalid require spec: " + spec);
+    }
+
+    public static PersistentTreeSet getLoadedLibs() {
+        List<Object> syms = new ArrayList<>(LOADED_LIBS.size());
+        for (String s : LOADED_LIBS) syms.add(Symbol.intern(s));
+        return PersistentTreeSet.create(PersistentTreeMap.DEFAULT_COMPARATOR, PersistentList.create(syms));
     }
 
     public static void loadLib(String nsName) {
@@ -2585,27 +2730,55 @@ public final class Core {
         }));
 
         defMacro(ns, "condp", Fn.ofVarargs("condp", args -> {
+            if (args.length < 2) {
+                throw new IllegalArgumentException("condp requires at least a predicate and expression");
+            }
             Object pred = args[0];
             Object expr = args[1];
             Symbol gpred = Symbol.intern("pred__" + RT.nextID());
             Symbol gexpr = Symbol.intern("expr__" + RT.nextID());
-            int n = args.length;
-            boolean hasDefault = ((n - 2) & 1) != 0;
-            Object acc = hasDefault ? args[n - 1]
+            Keyword arrowKw = Keyword.intern(">>");
+
+            List<Object[]> clauses = new ArrayList<>();
+            boolean hasDefault = false;
+            Object defaultExpr = null;
+            int idx = 2;
+            while (idx < args.length) {
+                if (idx == args.length - 1) {
+                    hasDefault = true;
+                    defaultExpr = args[idx];
+                    break;
+                }
+                if (idx + 2 < args.length && arrowKw.equals(args[idx + 1])) {
+                    clauses.add(new Object[]{args[idx], args[idx + 2], Boolean.TRUE});
+                    idx += 3;
+                } else {
+                    clauses.add(new Object[]{args[idx], args[idx + 1], Boolean.FALSE});
+                    idx += 2;
+                }
+            }
+
+            Object acc = hasDefault ? defaultExpr
                     : PersistentList.createFromArray(Symbol.intern("throw"),
                             PersistentList.createFromArray(Symbol.intern("IllegalArgumentException."),
                                     PersistentList.createFromArray(Symbol.intern("clojure.core", "str"), "No matching clause: ", gexpr)));
-            int end = hasDefault ? n - 1 : n;
-            for (int i = end - 2; i >= 2; i -= 2) {
-                Object testVal = args[i];
-                Object resExpr = args[i + 1];
-                if (Symbol.intern(":>>").equals(resExpr)) {
-                    // Handled by shifting i if needed; standard 2-arg form
+            for (int i = clauses.size() - 1; i >= 0; i--) {
+                Object[] c = clauses.get(i);
+                Object testVal = c[0];
+                Object resForm = c[1];
+                boolean isArrow = (Boolean) c[2];
+                Object predCall = PersistentList.createFromArray(gpred, testVal, gexpr);
+                if (isArrow) {
+                    Symbol resSym = Symbol.intern("condp__" + RT.nextID());
+                    acc = PersistentList.createFromArray(letStar,
+                            PersistentVector.createOwning(resSym, predCall),
+                            PersistentList.createFromArray(ifSym,
+                                    resSym,
+                                    PersistentList.createFromArray(resForm, resSym),
+                                    acc));
+                } else {
+                    acc = PersistentList.createFromArray(ifSym, predCall, resForm, acc);
                 }
-                acc = PersistentList.createFromArray(ifSym,
-                        PersistentList.createFromArray(gpred, testVal, gexpr),
-                        resExpr,
-                        acc);
             }
             return PersistentList.createFromArray(letStar, PersistentVector.createOwning(gpred, pred, gexpr, expr), acc);
         }));
@@ -2964,42 +3137,78 @@ public final class Core {
                                     PersistentList.createFromArray(Symbol.intern("clojure.core", "str"), "Assert failed: ", msg))));
         }));
 
-        // (ns foo.bar (:require ...) (:import ...))
+        // (ns foo.bar docstring? attr-map? (:refer-clojure ...) (:require ...) (:import ...))
         defMacro(ns, "ns", Fn.ofVarargs("ns", args -> {
             Symbol nsSym = (Symbol) args[0];
-            List<Object> forms = new ArrayList<>();
-            forms.add(doSym);
-            forms.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "in-ns"),
-                    PersistentList.createFromArray(quoteSym, nsSym)));
-            forms.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "refer"),
-                    PersistentList.createFromArray(quoteSym, Symbol.intern("clojure.core"))));
-            for (int i = 1; i < args.length; i++) {
+            int idx = 1;
+            String doc = (idx < args.length && args[idx] instanceof String s) ? (String) args[idx++] : null;
+            PersistentHashMap attrMap = (idx < args.length && args[idx] instanceof PersistentHashMap m)
+                    ? (PersistentHashMap) args[idx++] : null;
+            PersistentHashMap mergedMeta = nsSym.meta() != null ? nsSym.meta() : PersistentHashMap.EMPTY;
+            if (doc != null) mergedMeta = mergedMeta.assoc(Keyword.intern("doc"), doc);
+            if (attrMap != null) {
+                for (ISeq s = attrMap.seq(); s != null; s = s.next()) {
+                    Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                    mergedMeta = mergedMeta.assoc(e.getKey(), e.getValue());
+                }
+            }
+
+            List<Object> referClojureOpts = null;
+            List<Object> clauseForms = new ArrayList<>();
+            for (int i = idx; i < args.length; i++) {
                 if (args[i] instanceof ISeq clause) {
                     Object head = clause.first();
-                    if (Keyword.intern("require").equals(head)) {
+                    if (Keyword.intern("refer-clojure").equals(head)) {
+                        referClojureOpts = new ArrayList<>();
+                        referClojureOpts.add(Symbol.intern("clojure.core", "refer"));
+                        referClojureOpts.add(PersistentList.createFromArray(quoteSym, Symbol.intern("clojure.core")));
+                        for (ISeq s = clause.next(); s != null; s = s.next()) {
+                            referClojureOpts.add(PersistentList.createFromArray(quoteSym, s.first()));
+                        }
+                    } else if (Keyword.intern("require").equals(head)) {
                         List<Object> req = new ArrayList<>();
                         req.add(Symbol.intern("clojure.core", "require"));
                         for (ISeq s = clause.next(); s != null; s = s.next()) {
                             req.add(PersistentList.createFromArray(quoteSym, s.first()));
                         }
-                        forms.add(PersistentList.create(req));
+                        clauseForms.add(PersistentList.create(req));
                     } else if (Keyword.intern("use").equals(head)) {
                         List<Object> use = new ArrayList<>();
                         use.add(Symbol.intern("clojure.core", "use"));
                         for (ISeq s = clause.next(); s != null; s = s.next()) {
                             use.add(PersistentList.createFromArray(quoteSym, s.first()));
                         }
-                        forms.add(PersistentList.create(use));
+                        clauseForms.add(PersistentList.create(use));
                     } else if (Keyword.intern("import").equals(head)) {
                         List<Object> imp = new ArrayList<>();
                         imp.add(Symbol.intern("clojure.core", "import"));
                         for (ISeq s = clause.next(); s != null; s = s.next()) {
                             imp.add(PersistentList.createFromArray(quoteSym, s.first()));
                         }
-                        forms.add(PersistentList.create(imp));
+                        clauseForms.add(PersistentList.create(imp));
                     }
                 }
             }
+
+            List<Object> forms = new ArrayList<>();
+            forms.add(doSym);
+            forms.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "in-ns"),
+                    PersistentList.createFromArray(quoteSym, nsSym)));
+            if (mergedMeta.count() > 0) {
+                forms.add(PersistentList.createFromArray(
+                        Symbol.intern("clojure.core", "alter-meta!"),
+                        PersistentList.createFromArray(Symbol.intern("clojure.core", "the-ns"),
+                                PersistentList.createFromArray(quoteSym, nsSym)),
+                        Symbol.intern("clojure.core", "merge"),
+                        PersistentList.createFromArray(quoteSym, mergedMeta)));
+            }
+            if (referClojureOpts != null) {
+                forms.add(PersistentList.create(referClojureOpts));
+            } else {
+                forms.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "refer"),
+                        PersistentList.createFromArray(quoteSym, Symbol.intern("clojure.core"))));
+            }
+            forms.addAll(clauseForms);
             return PersistentList.create(forms);
         }));
 
@@ -3254,5 +3463,52 @@ public final class Core {
                 .assoc(Keyword.intern("name"), Symbol.intern(name))
                 .assoc(Keyword.intern("special-form"), Boolean.TRUE)
                 .assoc(Keyword.intern("doc"), doc);
+    }
+
+    private static ISeq pmapFutures1(Fn f, ISeq s) {
+        return new LazySeq(Fn.of0("pmap-futures", () -> {
+            ISeq cur = RT.seq(s);
+            if (cur == null) return null;
+            Object item = cur.first();
+            Atom.FutureObj fut = new Atom.FutureObj(Fn.of0("pmap-task", () -> f.invoke(item)));
+            return new Cons(fut, pmapFutures1(f, cur.next()));
+        }));
+    }
+
+    private static ISeq pmapFuturesN(Fn f, ISeq[] seqs) {
+        return new LazySeq(Fn.of0("pmap-futures-n", () -> {
+            Object[] callArgs = new Object[seqs.length];
+            ISeq[] nextSeqs = new ISeq[seqs.length];
+            for (int i = 0; i < seqs.length; i++) {
+                ISeq cur = RT.seq(seqs[i]);
+                if (cur == null) return null;
+                callArgs[i] = cur.first();
+                nextSeqs[i] = cur.next();
+            }
+            Atom.FutureObj fut = new Atom.FutureObj(Fn.of0("pmap-task", () -> f.applyTo(callArgs)));
+            return new Cons(fut, pmapFuturesN(f, nextSeqs));
+        }));
+    }
+
+    private static ISeq pmapStep(ISeq vs, ISeq fs) {
+        return new LazySeq(Fn.of0("pmap-step", () -> {
+            ISeq s = RT.seq(fs);
+            if (s != null) {
+                ISeq r = RT.seq(vs);
+                if (r == null) return null;
+                Atom.FutureObj fut = (Atom.FutureObj) r.first();
+                return new Cons(fut.deref(), pmapStep(r.next(), s.next()));
+            }
+            return pmapDerefMap(vs);
+        }));
+    }
+
+    private static ISeq pmapDerefMap(ISeq vs) {
+        return new LazySeq(Fn.of0("pmap-deref", () -> {
+            ISeq r = RT.seq(vs);
+            if (r == null) return null;
+            Atom.FutureObj fut = (Atom.FutureObj) r.first();
+            return new Cons(fut.deref(), pmapDerefMap(r.next()));
+        }));
     }
 }

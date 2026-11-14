@@ -92,19 +92,23 @@ public final class Numbers {
         return Math.addExact(toLong(x), toLong(y));
     }
 
+    private static boolean isSmallInt(Object x) {
+        return x instanceof Long || x instanceof Integer || x instanceof Short || x instanceof Byte;
+    }
+
+    public static Number num(Object x) {
+        if (x instanceof Number n) return n;
+        throw new ClassCastException("Cannot cast " + (x == null ? "nil" : x.getClass().getName()) + " to java.lang.Number");
+    }
+
     public static Number addP(Object x, Object y) {
-        if (x instanceof Long lx && y instanceof Long ly) {
-            long r = lx + ly;
-            if (((lx ^ r) & (ly ^ r)) < 0) {
+        if (isSmallInt(x) && isSmallInt(y)) {
+            long lx = ((Number) x).longValue();
+            long ly = ((Number) y).longValue();
+            try {
+                return Math.addExact(lx, ly);
+            } catch (ArithmeticException e) {
                 return BigInteger.valueOf(lx).add(BigInteger.valueOf(ly));
-            }
-            return r;
-        }
-        if (x instanceof Integer || y instanceof Integer || x instanceof Short || y instanceof Short || x instanceof Byte || y instanceof Byte) {
-            if (!(x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float
-                    || x instanceof BigDecimal || y instanceof BigDecimal || x instanceof Ratio || y instanceof Ratio
-                    || x instanceof BigInteger || y instanceof BigInteger)) {
-                return addP(toLong(x), toLong(y));
             }
         }
         return add(x, y);
@@ -113,7 +117,10 @@ public final class Numbers {
     public static Number minus(Object x) {
         if (x instanceof Long lx) return Math.negateExact(lx);
         if (x instanceof Double dx) return -dx;
-        if (x instanceof Integer ix) return Math.negateExact((long) ix);
+        if (x instanceof Float fx) return -fx;
+        if (x instanceof Integer || x instanceof Short || x instanceof Byte) {
+            return Math.negateExact(((Number) x).longValue());
+        }
         if (x instanceof BigInteger bi) return bi.negate();
         if (x instanceof BigDecimal bd) return bd.negate();
         if (x instanceof Ratio r) return Ratio.create(r.numerator.negate(), r.denominator);
@@ -163,12 +170,14 @@ public final class Numbers {
     }
 
     public static Number minusP(Object x, Object y) {
-        if (x instanceof Long lx && y instanceof Long ly) {
-            long r = lx - ly;
-            if (((lx ^ ly) & (lx ^ r)) < 0) {
+        if (isSmallInt(x) && isSmallInt(y)) {
+            long lx = ((Number) x).longValue();
+            long ly = ((Number) y).longValue();
+            try {
+                return Math.subtractExact(lx, ly);
+            } catch (ArithmeticException e) {
                 return BigInteger.valueOf(lx).subtract(BigInteger.valueOf(ly));
             }
-            return r;
         }
         return minus(x, y);
     }
@@ -206,7 +215,9 @@ public final class Numbers {
     }
 
     public static Number multiplyP(Object x, Object y) {
-        if (x instanceof Long lx && y instanceof Long ly) {
+        if (isSmallInt(x) && isSmallInt(y)) {
+            long lx = ((Number) x).longValue();
+            long ly = ((Number) y).longValue();
             try {
                 return Math.multiplyExact(lx, ly);
             } catch (ArithmeticException e) {
@@ -254,14 +265,24 @@ public final class Numbers {
         }
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
             double q = toDouble(x) / toDouble(y);
-            return q >= 0 ? Math.floor(q) : Math.ceil(q);
+            if (Double.isNaN(q) || Double.isInfinite(q)) return q;
+            double tr = q >= 0 ? Math.floor(q) : Math.ceil(q);
+            return tr == 0.0 ? 0.0 : tr;
         }
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
             return toBigDecimal(x).divideToIntegralValue(toBigDecimal(y));
         }
-        if (x instanceof BigInteger || y instanceof BigInteger || x instanceof Ratio || y instanceof Ratio) {
-            BigInteger n = toBigInteger(divide(x, y));
-            return reduceBigInt(n);
+        if (x instanceof Ratio || y instanceof Ratio) {
+            Ratio rx = toRatio(x);
+            Ratio ry = toRatio(y);
+            if (ry.numerator.signum() == 0) throw new ArithmeticException("Divide by zero");
+            BigInteger q = rx.numerator.multiply(ry.denominator).divide(rx.denominator.multiply(ry.numerator));
+            return reduceBigInt(q);
+        }
+        if (x instanceof BigInteger || y instanceof BigInteger) {
+            BigInteger by = toBigInteger(y);
+            if (by.signum() == 0) throw new ArithmeticException("Divide by zero");
+            return reduceBigInt(toBigInteger(x).divide(by));
         }
         return toLong(x) / toLong(y);
     }
@@ -276,12 +297,12 @@ public final class Numbers {
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
             return toBigDecimal(x).remainder(toBigDecimal(y));
         }
-        if (x instanceof BigInteger || y instanceof BigInteger) {
-            return reduceBigInt(toBigInteger(x).remainder(toBigInteger(y)));
-        }
         if (x instanceof Ratio || y instanceof Ratio) {
             Number q = quotient(x, y);
             return minus(x, multiply(q, y));
+        }
+        if (x instanceof BigInteger || y instanceof BigInteger) {
+            return reduceBigInt(toBigInteger(x).remainder(toBigInteger(y)));
         }
         return toLong(x) % toLong(y);
     }
@@ -322,7 +343,9 @@ public final class Numbers {
     public static Number abs(Object x) {
         if (x instanceof Long lx) return Math.abs(lx);
         if (x instanceof Double dx) return Math.abs(dx);
-        if (x instanceof Integer ix) return Math.abs(ix);
+        if (x instanceof Float fx) return Math.abs(fx);
+        if (x instanceof Integer ix) return Math.abs((long) ix);
+        if (x instanceof Short || x instanceof Byte) return Math.abs(toLong(x));
         if (x instanceof BigInteger bi) return bi.abs();
         if (x instanceof BigDecimal bd) return bd.abs();
         if (x instanceof Ratio r) return isNeg(r) ? minus(r) : r;
@@ -332,7 +355,8 @@ public final class Numbers {
     public static boolean isZero(Object x) {
         if (x instanceof Long lx) return lx == 0L;
         if (x instanceof Double dx) return dx == 0.0;
-        if (x instanceof Integer ix) return ix == 0;
+        if (x instanceof Float fx) return fx == 0.0f;
+        if (x instanceof Integer || x instanceof Short || x instanceof Byte) return ((Number) x).longValue() == 0L;
         if (x instanceof BigInteger bi) return bi.signum() == 0;
         if (x instanceof BigDecimal bd) return bd.signum() == 0;
         if (x instanceof Ratio r) return r.numerator.signum() == 0;
@@ -342,7 +366,8 @@ public final class Numbers {
     public static boolean isPos(Object x) {
         if (x instanceof Long lx) return lx > 0L;
         if (x instanceof Double dx) return dx > 0.0;
-        if (x instanceof Integer ix) return ix > 0;
+        if (x instanceof Float fx) return fx > 0.0f;
+        if (x instanceof Integer || x instanceof Short || x instanceof Byte) return ((Number) x).longValue() > 0L;
         if (x instanceof BigInteger bi) return bi.signum() > 0;
         if (x instanceof BigDecimal bd) return bd.signum() > 0;
         if (x instanceof Ratio r) return r.numerator.signum() > 0;
@@ -352,11 +377,17 @@ public final class Numbers {
     public static boolean isNeg(Object x) {
         if (x instanceof Long lx) return lx < 0L;
         if (x instanceof Double dx) return dx < 0.0;
-        if (x instanceof Integer ix) return ix < 0;
+        if (x instanceof Float fx) return fx < 0.0f;
+        if (x instanceof Integer || x instanceof Short || x instanceof Byte) return ((Number) x).longValue() < 0L;
         if (x instanceof BigInteger bi) return bi.signum() < 0;
         if (x instanceof BigDecimal bd) return bd.signum() < 0;
         if (x instanceof Ratio r) return r.numerator.signum() < 0;
         return toDouble(x) < 0.0;
+    }
+
+    private static boolean isNaN(Object x) {
+        return (x instanceof Double dx && Double.isNaN(dx))
+                || (x instanceof Float fx && Float.isNaN(fx));
     }
 
     public static boolean lt(Object x, Object y) {
@@ -370,10 +401,10 @@ public final class Numbers {
     }
 
     private static boolean ltSlow(Object x, Object y) {
-        if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
-            return toDouble(x) < toDouble(y);
-        }
-        return compare((Number) x, (Number) y) < 0;
+        Number nx = num(x);
+        Number ny = num(y);
+        if (isNaN(nx) || isNaN(ny)) return false;
+        return compare(nx, ny) < 0;
     }
 
     public static boolean lte(Object x, Object y) {
@@ -387,10 +418,10 @@ public final class Numbers {
     }
 
     private static boolean lteSlow(Object x, Object y) {
-        if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
-            return toDouble(x) <= toDouble(y);
-        }
-        return compare((Number) x, (Number) y) <= 0;
+        Number nx = num(x);
+        Number ny = num(y);
+        if (isNaN(nx) || isNaN(ny)) return false;
+        return compare(nx, ny) <= 0;
     }
 
     public static boolean gt(Object x, Object y) {
@@ -404,10 +435,10 @@ public final class Numbers {
     }
 
     private static boolean gtSlow(Object x, Object y) {
-        if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
-            return toDouble(x) > toDouble(y);
-        }
-        return compare((Number) x, (Number) y) > 0;
+        Number nx = num(x);
+        Number ny = num(y);
+        if (isNaN(nx) || isNaN(ny)) return false;
+        return compare(nx, ny) > 0;
     }
 
     public static boolean gte(Object x, Object y) {
@@ -421,16 +452,18 @@ public final class Numbers {
     }
 
     private static boolean gteSlow(Object x, Object y) {
-        if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
-            return toDouble(x) >= toDouble(y);
-        }
-        return compare((Number) x, (Number) y) >= 0;
+        Number nx = num(x);
+        Number ny = num(y);
+        if (isNaN(nx) || isNaN(ny)) return false;
+        return compare(nx, ny) >= 0;
     }
 
     public static boolean equal(Object x, Object y) {
-        if (!(x instanceof Number nx && y instanceof Number ny)) return false;
+        Number nx = num(x);
+        Number ny = num(y);
         if (x instanceof Long lx && y instanceof Long ly) return lx.longValue() == ly.longValue();
-        if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
+        if (isNaN(nx) || isNaN(ny)) return false;
+        if ((nx instanceof Double || nx instanceof Float) && (ny instanceof Double || ny instanceof Float)) {
             return nx.doubleValue() == ny.doubleValue();
         }
         return compare(nx, ny) == 0;
@@ -460,15 +493,59 @@ public final class Numbers {
         return false;
     }
 
+    private static int compareRatioAndBigDecimal(Ratio r, BigDecimal bd) {
+        int scale = bd.scale();
+        BigInteger unscaled = bd.unscaledValue();
+        if (scale >= 0) {
+            BigInteger pow10 = BigInteger.TEN.pow(scale);
+            return r.numerator.multiply(pow10).compareTo(unscaled.multiply(r.denominator));
+        } else {
+            BigInteger pow10 = BigInteger.TEN.pow(-scale);
+            return r.numerator.compareTo(unscaled.multiply(pow10).multiply(r.denominator));
+        }
+    }
+
+    private static int compareDoubleAndExact(double d, Number exact) {
+        if (Double.isNaN(d)) return 1;
+        if (d == Double.POSITIVE_INFINITY) return 1;
+        if (d == Double.NEGATIVE_INFINITY) return -1;
+        BigDecimal bd = new BigDecimal(d);
+        if (exact instanceof Ratio r) {
+            return -compareRatioAndBigDecimal(r, bd);
+        }
+        return bd.compareTo(toBigDecimalExact(exact));
+    }
+
+    private static BigDecimal toBigDecimalExact(Number n) {
+        if (n instanceof BigDecimal bd) return bd;
+        if (n instanceof BigInteger bi) return new BigDecimal(bi);
+        if (n instanceof Double || n instanceof Float) return new BigDecimal(n.doubleValue());
+        return BigDecimal.valueOf(n.longValue());
+    }
+
     public static int compare(Number x, Number y) {
         if (x instanceof Long lx && y instanceof Long ly) {
             return Long.compare(lx, ly);
         }
-        if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
+        boolean xFloat = x instanceof Double || x instanceof Float;
+        boolean yFloat = y instanceof Double || y instanceof Float;
+        if (xFloat && yFloat) {
             return Double.compare(x.doubleValue(), y.doubleValue());
         }
+        if (xFloat) {
+            return compareDoubleAndExact(x.doubleValue(), y);
+        }
+        if (yFloat) {
+            return -compareDoubleAndExact(y.doubleValue(), x);
+        }
+        if (x instanceof Ratio rx && y instanceof BigDecimal bdy) {
+            return compareRatioAndBigDecimal(rx, bdy);
+        }
+        if (x instanceof BigDecimal bdx && y instanceof Ratio ry) {
+            return -compareRatioAndBigDecimal(ry, bdx);
+        }
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
-            return toBigDecimal(x).compareTo(toBigDecimal(y));
+            return toBigDecimalExact(x).compareTo(toBigDecimalExact(y));
         }
         if (x instanceof Ratio || y instanceof Ratio) {
             return toRatio(x).compareTo(toRatio(y));
@@ -480,14 +557,14 @@ public final class Numbers {
     }
 
     public static Object max(Object x, Object y) {
-        if (x instanceof Double dx && Double.isNaN(dx)) return x;
-        if (y instanceof Double dy && Double.isNaN(dy)) return y;
+        if (isNaN(x)) return x;
+        if (isNaN(y)) return y;
         return gt(x, y) ? x : y;
     }
 
     public static Object min(Object x, Object y) {
-        if (x instanceof Double dx && Double.isNaN(dx)) return x;
-        if (y instanceof Double dy && Double.isNaN(dy)) return y;
+        if (isNaN(x)) return x;
+        if (isNaN(y)) return y;
         return lt(x, y) ? x : y;
     }
 

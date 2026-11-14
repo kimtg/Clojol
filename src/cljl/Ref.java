@@ -3,6 +3,7 @@ package cljl;
 import cljl.lang.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -15,6 +16,7 @@ public final class Ref extends Fn implements IDeref, IReference, Comparable<Ref>
     public final long id = IDS.incrementAndGet();
 
     final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+    final AtomicInteger faults = new AtomicInteger(0);
 
     static final class TVal {
         Object val;
@@ -120,10 +122,15 @@ public final class Ref extends Fn implements IDeref, IReference, Comparable<Ref>
 
     public Fn getValidator() { return validator; }
     public void setValidator(Fn valFn) {
-        if (valFn != null && !RT.truthy(valFn.invoke(currentVal()))) {
-            throw new IllegalStateException("Invalid reference state");
+        lock.writeLock().lock();
+        try {
+            if (valFn != null && !RT.truthy(valFn.invoke(tvals.val))) {
+                throw new IllegalStateException("Invalid reference state");
+            }
+            this.validator = valFn;
+        } finally {
+            lock.writeLock().unlock();
         }
-        this.validator = valFn;
     }
 
     public void addWatch(Object key, Fn cb) { watches.put(key, cb); }

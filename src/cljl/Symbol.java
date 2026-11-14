@@ -1,10 +1,10 @@
 package cljl;
 
-import cljl.lang.IMeta;
+import cljl.lang.IObj;
 import cljl.lang.PersistentHashMap;
 import java.util.Objects;
 
-public final class Symbol extends Fn implements IMeta, Comparable<Symbol> {
+public final class Symbol extends Fn implements IObj, Comparable<Symbol> {
     public final String ns;
     public final String name;
     private final PersistentHashMap meta;

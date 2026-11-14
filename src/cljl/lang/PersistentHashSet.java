@@ -5,13 +5,14 @@ import cljl.RT;
 import java.util.*;
 
 public final class PersistentHashSet extends Fn
-        implements Seqable, Counted, IMeta, Set<Object> {
+        implements Seqable, Counted, IObj, Set<Object> {
 
     public static final PersistentHashSet EMPTY = new PersistentHashSet(null, PersistentHashMap.EMPTY);
 
     public final PersistentHashMap impl;
     private final PersistentHashMap meta;
     private int hash;
+    private boolean hasHash;
 
     public PersistentHashSet(PersistentHashMap meta, PersistentHashMap impl) {
         this.meta = meta;
@@ -102,8 +103,12 @@ public final class PersistentHashSet extends Fn
         if (this == obj) return true;
         if (!(obj instanceof Set<?> m)) return false;
         if (count() != m.size()) return false;
-        for (ISeq s = seq(); s != null; s = s.next()) {
-            if (!m.contains(s.first())) return false;
+        try {
+            for (ISeq s = seq(); s != null; s = s.next()) {
+                if (!m.contains(s.first())) return false;
+            }
+        } catch (ClassCastException e) {
+            return false;
         }
         return true;
     }
@@ -111,11 +116,12 @@ public final class PersistentHashSet extends Fn
     @Override
     public int hashCode() {
         int h = this.hash;
-        if (h == 0) {
+        if (!hasHash) {
             for (ISeq s = seq(); s != null; s = s.next()) {
                 h += RT.hash(s.first());
             }
             this.hash = h;
+            this.hasHash = true;
         }
         return h;
     }
@@ -158,24 +164,27 @@ public final class PersistentHashSet extends Fn
     @Override public void clear() { throw new UnsupportedOperationException(); }
 
     public static final class TransientHashSet extends Fn implements Counted {
-        private PersistentHashMap.TransientHashMap impl;
+        private static final Object NOT_FOUND = new Object();
+        private final PersistentHashMap.TransientHashMap impl;
 
         TransientHashSet(PersistentHashMap.TransientHashMap impl) {
             this.impl = impl;
         }
 
         public TransientHashSet conj(Object val) {
-            impl = impl.assoc(val, val);
+            if (!contains(val)) {
+                impl.assoc(val, val);
+            }
             return this;
         }
 
         public TransientHashSet disjoin(Object val) {
-            impl = impl.without(val);
+            impl.without(val);
             return this;
         }
 
         public boolean contains(Object key) {
-            return impl.valAt(key, this) != this;
+            return impl.valAt(key, NOT_FOUND) != NOT_FOUND;
         }
 
         @Override

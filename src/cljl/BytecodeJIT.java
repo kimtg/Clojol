@@ -48,6 +48,7 @@ public final class BytecodeJIT {
     private static final int IF_ACMPEQ = 0xa5;
     private static final int IF_ACMPNE = 0xa6;
     private static final int GOTO = 0xa7;
+    private static final int TABLESWITCH = 0xaa;
     private static final int ARETURN = 0xb0;
     private static final int RETURN = 0xb1;
     private static final int GETSTATIC = 0xb2;
@@ -59,6 +60,8 @@ public final class BytecodeJIT {
     private static final int ANEWARRAY = 0xbd;
     private static final int ATHROW = 0xbf;
     private static final int CHECKCAST = 0xc0;
+    private static final int MONITORENTER = 0xc2;
+    private static final int MONITOREXIT = 0xc3;
     private static final int IFNULL = 0xc6;
     private static final int IFNONNULL = 0xc7;
 
@@ -77,114 +80,132 @@ public final class BytecodeJIT {
     public static boolean canCompile(CompiledFn cf) {
         FnMethod[] fixed = cf.getFixedMethods();
         for (FnMethod m : fixed) {
-            if (m != null && !canCompileNode(m.body)) return false;
+            if (m != null && !canCompileNode(m.body, true)) return false;
         }
         FnMethod variadic = cf.getVariadicMethod();
-        if (variadic != null && !canCompileNode(variadic.body)) return false;
+        if (variadic != null && !canCompileNode(variadic.body, true)) return false;
         return true;
     }
 
-    private static boolean canCompileNode(Node n) {
+    private static boolean canCompileNode(Node n, boolean stackEmpty) {
         if (n == null) return true;
         if (n instanceof ConstNode || n instanceof LocalNode || n instanceof VarRefNode
                 || n instanceof Recur0Node || n instanceof StaticFieldNode) {
             return true;
         }
-        if (n instanceof TryNode || n instanceof CaseNode) {
+        if (n instanceof TryNode) {
             return false;
         }
+        if (n instanceof MonitorNode mn) {
+            return canCompileNode(mn.target, false);
+        }
+        if (n instanceof LockingNode ln) {
+            if (!stackEmpty) return false;
+            return canCompileNode(ln.target, true) && canCompileNode(ln.body, true);
+        }
+        if (n instanceof CaseNode cn) {
+            if (!canCompileNode(cn.expr, stackEmpty)) return false;
+            if (cn.hasDefault && !canCompileNode(cn.defaultNode, stackEmpty)) return false;
+            for (Node b : cn.table.values()) {
+                if (!canCompileNode(b, stackEmpty)) return false;
+            }
+            return true;
+        }
         if (n instanceof IfNode iff) {
-            return canCompileNode(iff.test) && canCompileNode(iff.thenNode) && canCompileNode(iff.elseNode);
+            return canCompileNode(iff.test, stackEmpty)
+                    && canCompileNode(iff.thenNode, stackEmpty)
+                    && canCompileNode(iff.elseNode, stackEmpty);
         }
         if (n instanceof DoNode dn) {
-            for (Node c : dn.nodes) if (!canCompileNode(c)) return false;
+            for (Node c : dn.nodes) if (!canCompileNode(c, stackEmpty)) return false;
             return true;
         }
         if (n instanceof LetNode ln) {
-            for (Node i : ln.inits) if (!canCompileNode(i)) return false;
-            return canCompileNode(ln.body);
+            for (Node i : ln.inits) if (!canCompileNode(i, stackEmpty)) return false;
+            return canCompileNode(ln.body, stackEmpty);
         }
         if (n instanceof LoopNode lp) {
-            for (Node i : lp.inits) if (!canCompileNode(i)) return false;
-            return canCompileNode(lp.body);
+            for (Node i : lp.inits) if (!canCompileNode(i, stackEmpty)) return false;
+            return canCompileNode(lp.body, stackEmpty);
         }
-        if (n instanceof Recur1Node r1) return canCompileNode(r1.expr0);
-        if (n instanceof Recur2Node r2) return canCompileNode(r2.expr0) && canCompileNode(r2.expr1);
+        if (n instanceof Recur1Node r1) return canCompileNode(r1.expr0, false);
+        if (n instanceof Recur2Node r2) return canCompileNode(r2.expr0, false) && canCompileNode(r2.expr1, false);
         if (n instanceof RecurNNode rn) {
-            for (Node e : rn.exprs) if (!canCompileNode(e)) return false;
+            for (Node e : rn.exprs) if (!canCompileNode(e, false)) return false;
             return true;
         }
         if (n instanceof VectorNode vn) {
-            for (Node e : vn.elems) if (!canCompileNode(e)) return false;
+            for (Node e : vn.elems) if (!canCompileNode(e, false)) return false;
             return true;
         }
         if (n instanceof MapNode mn) {
-            for (Node e : mn.kvs) if (!canCompileNode(e)) return false;
+            for (Node e : mn.kvs) if (!canCompileNode(e, false)) return false;
             return true;
         }
         if (n instanceof SetNode sn) {
-            for (Node e : sn.elems) if (!canCompileNode(e)) return false;
+            for (Node e : sn.elems) if (!canCompileNode(e, false)) return false;
             return true;
         }
-        if (n instanceof DefNode dn) return canCompileNode(dn.init);
-        if (n instanceof DefMacroNode dm) return canCompileNode(dm.fnNode);
+        if (n instanceof DefNode dn) return canCompileNode(dn.init, false);
+        if (n instanceof DefMacroNode dm) return canCompileNode(dm.fnNode, false);
         if (n instanceof FnNode) return true;
         if (n instanceof VarCall0Node) return true;
-        if (n instanceof VarCall1Node c) return canCompileNode(c.a);
-        if (n instanceof VarCall2Node c) return canCompileNode(c.a) && canCompileNode(c.b);
-        if (n instanceof VarCall3Node c) return canCompileNode(c.a) && canCompileNode(c.b) && canCompileNode(c.c);
-        if (n instanceof VarCall4Node c) return canCompileNode(c.a) && canCompileNode(c.b) && canCompileNode(c.c) && canCompileNode(c.d);
+        if (n instanceof VarCall1Node c) return canCompileNode(c.a, false);
+        if (n instanceof VarCall2Node c) return canCompileNode(c.a, false) && canCompileNode(c.b, false);
+        if (n instanceof VarCall3Node c) return canCompileNode(c.a, false) && canCompileNode(c.b, false) && canCompileNode(c.c, false);
+        if (n instanceof VarCall4Node c) return canCompileNode(c.a, false) && canCompileNode(c.b, false) && canCompileNode(c.c, false) && canCompileNode(c.d, false);
         if (n instanceof VarCallNNode c) {
-            for (Node a : c.args) if (!canCompileNode(a)) return false;
+            for (Node a : c.args) if (!canCompileNode(a, false)) return false;
             return true;
         }
-        if (n instanceof Call0Node c) return canCompileNode(c.fn);
-        if (n instanceof Call1Node c) return canCompileNode(c.fn) && canCompileNode(c.a);
-        if (n instanceof Call2Node c) return canCompileNode(c.fn) && canCompileNode(c.a) && canCompileNode(c.b);
-        if (n instanceof Call3Node c) return canCompileNode(c.fn) && canCompileNode(c.a) && canCompileNode(c.b) && canCompileNode(c.c);
-        if (n instanceof Call4Node c) return canCompileNode(c.fn) && canCompileNode(c.a) && canCompileNode(c.b) && canCompileNode(c.c) && canCompileNode(c.d);
+        if (n instanceof Call0Node c) return canCompileNode(c.fn, false);
+        if (n instanceof Call1Node c) return canCompileNode(c.fn, false) && canCompileNode(c.a, false);
+        if (n instanceof Call2Node c) return canCompileNode(c.fn, false) && canCompileNode(c.a, false) && canCompileNode(c.b, false);
+        if (n instanceof Call3Node c) return canCompileNode(c.fn, false) && canCompileNode(c.a, false) && canCompileNode(c.b, false) && canCompileNode(c.c, false);
+        if (n instanceof Call4Node c) return canCompileNode(c.fn, false) && canCompileNode(c.a, false) && canCompileNode(c.b, false) && canCompileNode(c.c, false) && canCompileNode(c.d, false);
         if (n instanceof CallNNode c) {
-            if (!canCompileNode(c.fn)) return false;
-            for (Node a : c.args) if (!canCompileNode(a)) return false;
+            if (!canCompileNode(c.fn, false)) return false;
+            for (Node a : c.args) if (!canCompileNode(a, false)) return false;
             return true;
         }
-        if (n instanceof Add2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof Sub2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof Mul2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof NegateNode a) return canCompileNode(a.a);
-        if (n instanceof IncNode a) return canCompileNode(a.a);
-        if (n instanceof DecNode a) return canCompileNode(a.a);
-        if (n instanceof Rem2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof Quot2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof Lt2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof Lte2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof Gt2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof Gte2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof Equiv2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof NumEq2Node a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof ZeroPNode a) return canCompileNode(a.a);
-        if (n instanceof PosPNode a) return canCompileNode(a.a);
-        if (n instanceof NegPNode a) return canCompileNode(a.a);
-        if (n instanceof NilPNode a) return canCompileNode(a.a);
-        if (n instanceof NotNode a) return canCompileNode(a.a);
-        if (n instanceof IdenticalNode a) return canCompileNode(a.a) && canCompileNode(a.b);
-        if (n instanceof ThrowNode a) return canCompileNode(a.expr);
+        if (n instanceof Add2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof Sub2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof Mul2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof NegateNode a) return canCompileNode(a.a, false);
+        if (n instanceof IncNode a) return canCompileNode(a.a, false);
+        if (n instanceof DecNode a) return canCompileNode(a.a, false);
+        if (n instanceof Rem2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof Quot2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof Lt2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof Lte2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof Gt2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof Gte2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof Equiv2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof NumEq2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof ZeroPNode a) return canCompileNode(a.a, false);
+        if (n instanceof PosPNode a) return canCompileNode(a.a, false);
+        if (n instanceof NegPNode a) return canCompileNode(a.a, false);
+        if (n instanceof NilPNode a) return canCompileNode(a.a, false);
+        if (n instanceof NotNode a) return canCompileNode(a.a, false);
+        if (n instanceof IdenticalNode a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof ThrowNode a) return canCompileNode(a.expr, false);
         if (n instanceof NewNode a) {
-            for (Node arg : a.args) if (!canCompileNode(arg)) return false;
+            for (Node arg : a.args) if (!canCompileNode(arg, false)) return false;
             return true;
         }
         if (n instanceof StaticMethodNode a) {
-            for (Node arg : a.args) if (!canCompileNode(arg)) return false;
+            for (Node arg : a.args) if (!canCompileNode(arg, false)) return false;
             return true;
         }
-        if (n instanceof InstanceFieldNode a) return canCompileNode(a.target);
+        if (n instanceof InstanceFieldNode a) return canCompileNode(a.target, false);
         if (n instanceof InstanceMethodNode a) {
-            if (!canCompileNode(a.target)) return false;
-            for (Node arg : a.args) if (!canCompileNode(arg)) return false;
+            if (!canCompileNode(a.target, false)) return false;
+            for (Node arg : a.args) if (!canCompileNode(arg, false)) return false;
             return true;
         }
-        if (n instanceof SetVarNode a) return canCompileNode(a.val);
-        if (n instanceof SetFieldNode a) return canCompileNode(a.target) && canCompileNode(a.val);
+        if (n instanceof SetVarNode a) return canCompileNode(a.val, false);
+        if (n instanceof SetFieldNode a) return canCompileNode(a.target, false) && canCompileNode(a.val, false);
+        if (n instanceof SetStaticFieldNode a) return canCompileNode(a.val, false);
         return false;
     }
 
@@ -219,6 +240,26 @@ public final class BytecodeJIT {
 
     public static Object[] emptyArray() {
         return Fn.EMPTY_ARGS;
+    }
+
+    public static int caseLookup(Object val, Map<RT.EquivKey, Integer> table) {
+        Integer idx = table.get(new RT.EquivKey(val));
+        return idx != null ? idx : -1;
+    }
+
+    public static int caseLookupOrThrow(Object val, Map<RT.EquivKey, Integer> table) {
+        Integer idx = table.get(new RT.EquivKey(val));
+        if (idx != null) return idx;
+        throw new IllegalArgumentException("No matching clause: " + val);
+    }
+
+    public static RuntimeException throwNoMatchingClause(Object val) {
+        throw new IllegalArgumentException("No matching clause: " + val);
+    }
+
+    public static Object requireNonNullLock(Object lock) {
+        if (lock == null) throw new NullPointerException("Cannot lock nil");
+        return lock;
     }
 
     private static void emitMethods(ClassEmitter ce, CompiledFn cf) {
@@ -414,9 +455,12 @@ public final class BytecodeJIT {
     private static final class Label {
         int pos = -1;
         final List<int[]> fixups = new ArrayList<>(); // {opcodePos, operandPos}
+        final List<int[]> wideFixups = new ArrayList<>(); // {opcodePos, operandPos} for 32-bit offsets
     }
 
     private record LoopTarget(int[] slots, Label start) {}
+
+    private record ExceptionEntry(Label start, Label end, Label handler, int catchTypeCpIdx) {}
 
     private static final class ClassEmitter {
         final String className;
@@ -532,6 +576,7 @@ public final class BytecodeJIT {
         private final Map<String, Integer> strMap = new HashMap<>();
         private final Map<String, Integer> natMap = new HashMap<>();
         private final Map<String, Integer> refMap = new HashMap<>();
+        private final Map<Integer, Integer> intMap = new HashMap<>();
         private final Map<Long, Integer> longMap = new HashMap<>();
         private final Map<Double, Integer> doubleMap = new HashMap<>();
 
@@ -564,6 +609,17 @@ public final class BytecodeJIT {
                 int utfIdx = addUtf8(k);
                 buf.write(8);
                 writeShort(utfIdx);
+                return count++;
+            });
+        }
+
+        int addInteger(int v) {
+            return intMap.computeIfAbsent(v, k -> {
+                buf.write(3);
+                buf.write((k >>> 24) & 0xff);
+                buf.write((k >>> 16) & 0xff);
+                buf.write((k >>> 8) & 0xff);
+                buf.write(k & 0xff);
                 return count++;
             });
         }
@@ -644,6 +700,9 @@ public final class BytecodeJIT {
         final int maxLocals;
         final ByteArrayOutputStream code = new ByteArrayOutputStream(256);
         final Deque<LoopTarget> loopTargets = new ArrayDeque<>();
+        final List<ExceptionEntry> exceptionTable = new ArrayList<>();
+        int curTempLocals = 0;
+        int maxTempLocals = 0;
         int selfSlot = -1;
         int curStack = 0;
         int maxStack = 0;
@@ -653,6 +712,16 @@ public final class BytecodeJIT {
             this.nameIdx = ce.cp.addUtf8(name);
             this.descIdx = ce.cp.addUtf8(desc);
             this.maxLocals = maxLocals;
+        }
+
+        int allocTempLocal() {
+            int slot = maxLocals + curTempLocals++;
+            if (curTempLocals > maxTempLocals) maxTempLocals = curTempLocals;
+            return slot;
+        }
+
+        void freeTempLocals(int n) {
+            curTempLocals -= n;
         }
 
         void pushLoopTarget(int[] slots, Label start) {
@@ -681,6 +750,30 @@ public final class BytecodeJIT {
             code.write(0);
             code.write(0);
             target.fixups.add(new int[]{opcodePos, operandPos});
+        }
+
+        private void writeInt32(int v) {
+            code.write((v >>> 24) & 0xff);
+            code.write((v >>> 16) & 0xff);
+            code.write((v >>> 8) & 0xff);
+            code.write(v & 0xff);
+        }
+
+        void tableswitch(int low, int high, Label defaultLabel, Label[] targets) {
+            int opcodePos = code.size();
+            code.write(TABLESWITCH);
+            adjStack(-1);
+            while ((code.size() & 3) != 0) {
+                code.write(0);
+            }
+            defaultLabel.wideFixups.add(new int[]{opcodePos, code.size()});
+            writeInt32(0);
+            writeInt32(low);
+            writeInt32(high);
+            for (Label t : targets) {
+                t.wideFixups.add(new int[]{opcodePos, code.size()});
+                writeInt32(0);
+            }
         }
 
         void gotoLabel(Label l) { emitJump(GOTO, l); }
@@ -714,10 +807,20 @@ public final class BytecodeJIT {
             } else if (v >= Byte.MIN_VALUE && v <= Byte.MAX_VALUE) {
                 code.write(BIPUSH);
                 code.write(v & 0xff);
-            } else {
+            } else if (v >= Short.MIN_VALUE && v <= Short.MAX_VALUE) {
                 code.write(SIPUSH);
                 code.write((v >>> 8) & 0xff);
                 code.write(v & 0xff);
+            } else {
+                int idx = ce.cp.addInteger(v);
+                if (idx <= 255) {
+                    code.write(LDC);
+                    code.write(idx);
+                } else {
+                    code.write(LDC_W);
+                    code.write((idx >>> 8) & 0xff);
+                    code.write(idx & 0xff);
+                }
             }
             adjStack(1);
         }
@@ -782,14 +885,32 @@ public final class BytecodeJIT {
         }
 
         void iload(int idx) {
-            if (idx <= 3) code.write(0x1a + idx);
-            else { code.write(0x15); code.write(idx); }
+            if (idx <= 3) {
+                code.write(0x1a + idx);
+            } else if (idx <= 255) {
+                code.write(0x15);
+                code.write(idx);
+            } else {
+                code.write(0xc4); // WIDE
+                code.write(0x15);
+                code.write((idx >>> 8) & 0xff);
+                code.write(idx & 0xff);
+            }
             adjStack(1);
         }
 
         void istore(int idx) {
-            if (idx <= 3) code.write(0x3b + idx);
-            else { code.write(0x36); code.write(idx); }
+            if (idx <= 3) {
+                code.write(0x3b + idx);
+            } else if (idx <= 255) {
+                code.write(0x36);
+                code.write(idx);
+            } else {
+                code.write(0xc4); // WIDE
+                code.write(0x36);
+                code.write((idx >>> 8) & 0xff);
+                code.write(idx & 0xff);
+            }
             adjStack(-1);
         }
 
@@ -802,6 +923,8 @@ public final class BytecodeJIT {
         void areturn() { code.write(ARETURN); adjStack(-1); }
         void vreturn() { code.write(RETURN); }
         void athrow() { code.write(ATHROW); adjStack(-1); }
+        void monitorenter() { code.write(MONITORENTER); adjStack(-1); }
+        void monitorexit() { code.write(MONITOREXIT); adjStack(-1); }
 
         void anewarray(String internalName) {
             int idx = ce.cp.addClass(internalName);
@@ -889,12 +1012,9 @@ public final class BytecodeJIT {
                     getstatic("java/lang/Boolean", "FALSE", "Ljava/lang/Boolean;");
                 } else if (v instanceof String s) {
                     ldcString(s);
-                } else if (v instanceof Long l) {
+                } else if (v instanceof Long l && l >= -128L && l <= 127L) {
                     ldcLong(l);
                     invokestatic("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", 2, 1);
-                } else if (v instanceof Double d) {
-                    ldcDouble(d);
-                    invokestatic("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", 2, 1);
                 } else {
                     loadConstObj(v);
                 }
@@ -906,11 +1026,13 @@ public final class BytecodeJIT {
             }
             if (node instanceof VarRefNode vr) {
                 loadConstObj(vr.var);
+                checkcast("cljl/Var");
                 invokevirtual("cljl/Var", "deref", "()Ljava/lang/Object;", 1, 1);
                 return false;
             }
             if (node instanceof DefNode dn) {
                 loadConstObj(dn.var);
+                checkcast("cljl/Var");
                 if (dn.init != null) {
                     dup();
                     emitBoxed(dn.init, baseSlot);
@@ -921,7 +1043,7 @@ public final class BytecodeJIT {
             }
             if (node instanceof DefMacroNode dm) {
                 loadConstObj(dm.var);
-                dup();
+                checkcast("cljl/Var");
                 emitBoxed(dm.fnNode, baseSlot);
                 invokevirtual("cljl/Var", "bindRoot", "(Ljava/lang/Object;)Lcljl/Var;", 2, 1);
                 invokevirtual("cljl/Var", "setMacro", "()Lcljl/Var;", 1, 1);
@@ -949,6 +1071,10 @@ public final class BytecodeJIT {
                 return thenTerm && elseTerm;
             }
             if (node instanceof DoNode dn) {
+                if (dn.nodes.length == 0) {
+                    aconstNull();
+                    return false;
+                }
                 int last = dn.nodes.length - 1;
                 for (int i = 0; i < last; i++) {
                     boolean term = emitBoxed(dn.nodes[i], baseSlot);
@@ -1030,6 +1156,7 @@ public final class BytecodeJIT {
             }
             if (node instanceof FnNode fn) {
                 loadConstObj(fn);
+                checkcast("cljl/Compiler$FnNode");
                 int capLen = fn.fixedMethods.length + 1;
                 iconst(capLen);
                 anewarray("[Ljava/lang/Object;");
@@ -1192,11 +1319,16 @@ public final class BytecodeJIT {
 
             // Arithmetic intrinsics
             if (node instanceof Add2Node a) {
-                emitBoxed(a.a, baseSlot);
                 if (a.b instanceof ConstNode cn && cn.isLong) {
+                    emitBoxed(a.a, baseSlot);
+                    ldcLong(cn.longVal);
+                    invokestatic("cljl/Numbers", "add", "(Ljava/lang/Object;J)Ljava/lang/Number;", 3, 1);
+                } else if (a.a instanceof ConstNode cn && cn.isLong) {
+                    emitBoxed(a.b, baseSlot);
                     ldcLong(cn.longVal);
                     invokestatic("cljl/Numbers", "add", "(Ljava/lang/Object;J)Ljava/lang/Number;", 3, 1);
                 } else {
+                    emitBoxed(a.a, baseSlot);
                     emitBoxed(a.b, baseSlot);
                     invokestatic("cljl/Numbers", "add", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
                 }
@@ -1214,11 +1346,16 @@ public final class BytecodeJIT {
                 return false;
             }
             if (node instanceof Mul2Node a) {
-                emitBoxed(a.a, baseSlot);
                 if (a.b instanceof ConstNode cn && cn.isLong) {
+                    emitBoxed(a.a, baseSlot);
+                    ldcLong(cn.longVal);
+                    invokestatic("cljl/Numbers", "multiply", "(Ljava/lang/Object;J)Ljava/lang/Number;", 3, 1);
+                } else if (a.a instanceof ConstNode cn && cn.isLong) {
+                    emitBoxed(a.b, baseSlot);
                     ldcLong(cn.longVal);
                     invokestatic("cljl/Numbers", "multiply", "(Ljava/lang/Object;J)Ljava/lang/Number;", 3, 1);
                 } else {
+                    emitBoxed(a.a, baseSlot);
                     emitBoxed(a.b, baseSlot);
                     invokestatic("cljl/Numbers", "multiply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
                 }
@@ -1259,7 +1396,7 @@ public final class BytecodeJIT {
                 return false;
             }
 
-            // Exceptions & Interop
+            // Exceptions, Monitors, Case & Interop
             if (node instanceof ThrowNode tn) {
                 emitBoxed(tn.expr, baseSlot);
                 invokestatic("cljl/BytecodeJIT", "throwObj", "(Ljava/lang/Object;)Ljava/lang/RuntimeException;", 1, 1);
@@ -1268,18 +1405,21 @@ public final class BytecodeJIT {
             }
             if (node instanceof NewNode nn) {
                 loadConstObj(nn.clazz);
+                checkcast("java/lang/Class");
                 emitObjectArrayOrEmpty(nn.args, baseSlot);
                 invokestatic("cljl/Interop", "invokeConstructor", "(Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
                 return false;
             }
             if (node instanceof StaticFieldNode sf) {
                 loadConstObj(sf.clazz);
+                checkcast("java/lang/Class");
                 ldcString(sf.fieldName);
                 invokestatic("cljl/Interop", "getStaticField", "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;", 2, 1);
                 return false;
             }
             if (node instanceof StaticMethodNode sm) {
                 loadConstObj(sm.clazz);
+                checkcast("java/lang/Class");
                 ldcString(sm.methodName);
                 emitObjectArrayOrEmpty(sm.args, baseSlot);
                 invokestatic("cljl/Interop", "invokeStaticMethod", "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
@@ -1300,6 +1440,7 @@ public final class BytecodeJIT {
             }
             if (node instanceof SetVarNode sv) {
                 loadConstObj(sv.var);
+                checkcast("cljl/Var");
                 emitBoxed(sv.val, baseSlot);
                 invokevirtual("cljl/Var", "set", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
                 return false;
@@ -1310,6 +1451,141 @@ public final class BytecodeJIT {
                 emitBoxed(sf.val, baseSlot);
                 invokestatic("cljl/Interop", "setInstanceField", "(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
                 return false;
+            }
+            if (node instanceof SetStaticFieldNode ssf) {
+                loadConstObj(ssf.clazz);
+                checkcast("java/lang/Class");
+                ldcString(ssf.fieldName);
+                emitBoxed(ssf.val, baseSlot);
+                invokestatic("cljl/Interop", "setStaticField", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                return false;
+            }
+            if (node instanceof MonitorNode mn) {
+                emitBoxed(mn.target, baseSlot);
+                iconst(mn.enter ? 1 : 0);
+                invokestatic("cljl/Compiler", "monitorOp", "(Ljava/lang/Object;Z)Ljava/lang/Object;", 2, 1);
+                return false;
+            }
+            if (node instanceof LockingNode ln) {
+                int lockLocal = allocTempLocal();
+                int exLocal = allocTempLocal();
+                emitBoxed(ln.target, baseSlot);
+                invokestatic("cljl/BytecodeJIT", "requireNonNullLock", "(Ljava/lang/Object;)Ljava/lang/Object;", 1, 1);
+                dup();
+                astore(lockLocal);
+                monitorenter();
+
+                Label tryStart = new Label();
+                Label tryEnd = new Label();
+                Label catchStart = new Label();
+                Label done = new Label();
+
+                markLabel(tryStart);
+                boolean bodyTerm = emitBoxed(ln.body, baseSlot);
+                markLabel(tryEnd);
+
+                if (!bodyTerm) {
+                    aload(lockLocal);
+                    monitorexit();
+                    gotoLabel(done);
+                }
+
+                curStack = 1;
+                if (maxStack < 1) maxStack = 1;
+                markLabel(catchStart);
+                astore(exLocal);
+                aload(lockLocal);
+                monitorexit();
+                aload(exLocal);
+                athrow();
+
+                exceptionTable.add(new ExceptionEntry(tryStart, tryEnd, catchStart, 0));
+
+                freeTempLocals(2);
+                if (!bodyTerm) {
+                    curStack = 1;
+                    markLabel(done);
+                    return false;
+                } else {
+                    curStack = 0;
+                    return true;
+                }
+            }
+            if (node instanceof CaseNode cn) {
+                List<Node> branches = new ArrayList<>();
+                IdentityHashMap<Node, Integer> nodeToIdx = new IdentityHashMap<>();
+                Map<RT.EquivKey, Integer> keyToIdx = new HashMap<>(cn.table.size() * 2 + 1);
+                for (Map.Entry<RT.EquivKey, Node> e : cn.table.entrySet()) {
+                    Integer idx = nodeToIdx.get(e.getValue());
+                    if (idx == null) {
+                        idx = branches.size();
+                        nodeToIdx.put(e.getValue(), idx);
+                        branches.add(e.getValue());
+                    }
+                    keyToIdx.put(e.getKey(), idx);
+                }
+
+                if (branches.isEmpty()) {
+                    emitBoxed(cn.expr, baseSlot);
+                    if (cn.hasDefault) {
+                        pop();
+                        return emitBoxed(cn.defaultNode, baseSlot);
+                    }
+                    invokestatic("cljl/BytecodeJIT", "throwNoMatchingClause", "(Ljava/lang/Object;)Ljava/lang/RuntimeException;", 1, 1);
+                    athrow();
+                    return true;
+                }
+
+                int stackAtEntry = curStack;
+                emitBoxed(cn.expr, baseSlot);
+                loadConstObj(keyToIdx);
+                checkcast("java/util/Map");
+                if (cn.hasDefault) {
+                    invokestatic("cljl/BytecodeJIT", "caseLookup", "(Ljava/lang/Object;Ljava/util/Map;)I", 2, 1);
+                } else {
+                    invokestatic("cljl/BytecodeJIT", "caseLookupOrThrow", "(Ljava/lang/Object;Ljava/util/Map;)I", 2, 1);
+                }
+
+                int n = branches.size();
+                Label[] branchLabels = new Label[n];
+                for (int i = 0; i < n; i++) branchLabels[i] = new Label();
+                Label defaultLabel = new Label();
+                Label endLabel = new Label();
+
+                tableswitch(0, n - 1, defaultLabel, branchLabels);
+
+                boolean anyNonTerm = false;
+                for (int i = 0; i < n; i++) {
+                    curStack = stackAtEntry;
+                    markLabel(branchLabels[i]);
+                    boolean bTerm = emitBoxed(branches.get(i), baseSlot);
+                    if (!bTerm) {
+                        anyNonTerm = true;
+                        gotoLabel(endLabel);
+                    }
+                }
+
+                curStack = stackAtEntry;
+                markLabel(defaultLabel);
+                if (cn.hasDefault) {
+                    boolean dTerm = emitBoxed(cn.defaultNode, baseSlot);
+                    if (!dTerm) {
+                        anyNonTerm = true;
+                    }
+                } else {
+                    aconstNull();
+                    invokestatic("cljl/BytecodeJIT", "throwNoMatchingClause", "(Ljava/lang/Object;)Ljava/lang/RuntimeException;", 1, 1);
+                    athrow();
+                }
+
+                if (anyNonTerm) {
+                    curStack = stackAtEntry + 1;
+                    markLabel(endLabel);
+                    return false;
+                } else {
+                    curStack = stackAtEntry;
+                    return true;
+                }
             }
 
             throw new IllegalStateException("Unsupported node in BytecodeJIT: " + node.getClass().getName());
@@ -1433,6 +1709,7 @@ public final class BytecodeJIT {
 
         private void emitVarFn(Var v) {
             loadConstObj(v);
+            checkcast("cljl/Var");
             invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
             checkcast("cljl/Fn");
         }
@@ -1473,14 +1750,12 @@ public final class BytecodeJIT {
             for (LoopTarget lt : loopTargets) {
                 patchLabel(codeBytes, lt.start);
             }
-            // Note: labels outside loopTargets are patched by collecting all labels?
-            // Actually patch all labels created in this method via a per-method list!
             for (Label l : allLabels) {
                 patchLabel(codeBytes, l);
             }
 
             try {
-                ByteArrayOutputStream baos = new ByteArrayOutputStream(codeBytes.length + 32);
+                ByteArrayOutputStream baos = new ByteArrayOutputStream(codeBytes.length + 32 + exceptionTable.size() * 8);
                 DataOutputStream out = new DataOutputStream(baos);
                 out.writeShort(0x0001); // ACC_PUBLIC
                 out.writeShort(nameIdx);
@@ -1488,12 +1763,18 @@ public final class BytecodeJIT {
                 out.writeShort(1); // 1 attribute: Code
 
                 out.writeShort(ce.codeAttrNameIdx);
-                out.writeInt(12 + codeBytes.length);
+                out.writeInt(12 + codeBytes.length + exceptionTable.size() * 8);
                 out.writeShort(Math.max(maxStack, 4));
-                out.writeShort(maxLocals);
+                out.writeShort(maxLocals + maxTempLocals);
                 out.writeInt(codeBytes.length);
                 out.write(codeBytes);
-                out.writeShort(0); // exception_table_length
+                out.writeShort(exceptionTable.size());
+                for (ExceptionEntry ex : exceptionTable) {
+                    out.writeShort(ex.start.pos);
+                    out.writeShort(ex.end.pos);
+                    out.writeShort(ex.handler.pos);
+                    out.writeShort(ex.catchTypeCpIdx);
+                }
                 out.writeShort(0); // attributes_count
                 out.flush();
                 ce.methodInfos.add(baos.toByteArray());
@@ -1508,8 +1789,19 @@ public final class BytecodeJIT {
             if (l.pos < 0) return;
             for (int[] f : l.fixups) {
                 int rel = l.pos - f[0];
+                if (rel < Short.MIN_VALUE || rel > Short.MAX_VALUE) {
+                    throw new IllegalStateException("Bytecode jump offset overflow: " + rel);
+                }
                 codeBytes[f[1]] = (byte) ((rel >>> 8) & 0xff);
                 codeBytes[f[1] + 1] = (byte) (rel & 0xff);
+            }
+            for (int[] wf : l.wideFixups) {
+                int rel = l.pos - wf[0];
+                int p = wf[1];
+                codeBytes[p] = (byte) ((rel >>> 24) & 0xff);
+                codeBytes[p + 1] = (byte) ((rel >>> 16) & 0xff);
+                codeBytes[p + 2] = (byte) ((rel >>> 8) & 0xff);
+                codeBytes[p + 3] = (byte) (rel & 0xff);
             }
         }
     }

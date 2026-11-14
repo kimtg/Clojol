@@ -67,6 +67,11 @@ public final class PersistentList extends ASeq implements Counted {
     }
 
     @Override
+    public ISeq cons(Object o) {
+        return new PersistentList(meta, o, this, count + 1);
+    }
+
+    @Override
     public PersistentList withMeta(PersistentHashMap meta) {
         if (this.meta == meta) return this;
         return new PersistentList(meta, first, rest, count);

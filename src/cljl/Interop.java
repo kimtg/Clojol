@@ -1,7 +1,7 @@
 package cljl;
 
 import java.lang.reflect.*;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -10,11 +10,13 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class Interop {
 
     private static final ConcurrentHashMap<String, Class<?>> CLASS_CACHE = new ConcurrentHashMap<>(256);
-    private static final ConcurrentHashMap<MemberKey, Executable> METHOD_CACHE = new ConcurrentHashMap<>(512);
+    private static final ConcurrentHashMap<MethodKey, Method> METHOD_CACHE = new ConcurrentHashMap<>(512);
+    private static final ConcurrentHashMap<MethodKey, Constructor<?>> CTOR_CACHE = new ConcurrentHashMap<>(128);
     private static final ConcurrentHashMap<MemberKey, Field> FIELD_CACHE = new ConcurrentHashMap<>(256);
     private static final Class<?> NOT_A_CLASS = Interop.class;
 
     private record MemberKey(Class<?> clazz, String name, int arity, boolean isStatic) {}
+    private record MethodKey(Class<?> clazz, String name, List<Class<?>> argTypes, boolean isStatic) {}
 
     private Interop() {}
 
@@ -55,6 +57,7 @@ public final class Interop {
             case "shorts" -> short[].class;
             case "clojure.lang.IDeref" -> cljl.lang.IDeref.class;
             case "clojure.lang.IMeta" -> cljl.lang.IMeta.class;
+            case "clojure.lang.IObj" -> cljl.lang.IObj.class;
             case "clojure.lang.IReference" -> cljl.lang.IReference.class;
             case "clojure.lang.ISeq" -> cljl.lang.ISeq.class;
             case "clojure.lang.Seqable" -> cljl.lang.Seqable.class;
@@ -89,25 +92,38 @@ public final class Interop {
         return found;
     }
 
+    private static List<Class<?>> argTypesKey(Object[] args) {
+        if (args == null || args.length == 0) return Collections.emptyList();
+        Class<?>[] types = new Class<?>[args.length];
+        for (int i = 0; i < args.length; i++) {
+            types[i] = (args[i] == null) ? Void.class : args[i].getClass();
+        }
+        return Arrays.asList(types);
+    }
+
     public static Object invokeConstructor(Class<?> clazz, Object[] args) {
         try {
             int arity = args == null ? 0 : args.length;
-            Constructor<?>[] ctors = clazz.getConstructors();
-            Constructor<?> best = null;
-            int bestScore = Integer.MAX_VALUE;
-            for (Constructor<?> c : ctors) {
-                int score = matchScore(c.getParameterTypes(), c.isVarArgs(), args);
-                if (score >= 0 && score < bestScore) {
-                    bestScore = score;
-                    best = c;
-                    if (score == 0) break;
-                }
-            }
+            MethodKey key = new MethodKey(clazz, "<init>", argTypesKey(args), true);
+            Constructor<?> best = CTOR_CACHE.get(key);
             if (best == null) {
-                throw new IllegalArgumentException("No matching constructor found for " + clazz.getName() + " with " + arity + " args");
+                Constructor<?>[] ctors = clazz.getConstructors();
+                int bestScore = Integer.MAX_VALUE;
+                for (Constructor<?> c : ctors) {
+                    int score = matchScore(c.getParameterTypes(), c.isVarArgs(), args);
+                    if (score >= 0 && score < bestScore) {
+                        bestScore = score;
+                        best = c;
+                        if (score == 0) break;
+                    }
+                }
+                if (best == null) {
+                    throw new IllegalArgumentException("No matching constructor found for " + clazz.getName() + " with " + arity + " args");
+                }
+                try { best.setAccessible(true); } catch (Exception ignored) {}
+                CTOR_CACHE.put(key, best);
             }
             Object[] coerced = coerceArgs(best.getParameterTypes(), best.isVarArgs(), args);
-            best.setAccessible(true);
             return best.newInstance(coerced);
         } catch (InvocationTargetException e) {
             throw RT.sneakyThrow(e.getTargetException());
@@ -128,6 +144,24 @@ public final class Interop {
             return boxResult(f.get(null));
         } catch (NoSuchFieldException e) {
             // Maybe a zero-arg static method called as Class/member?
+            throw new IllegalArgumentException("No such static field: " + clazz.getName() + "/" + fieldName);
+        } catch (IllegalAccessException e) {
+            throw RT.sneakyThrow(e);
+        }
+    }
+
+    public static Object setStaticField(Class<?> clazz, String fieldName, Object val) {
+        try {
+            MemberKey key = new MemberKey(clazz, fieldName, -1, true);
+            Field f = FIELD_CACHE.get(key);
+            if (f == null) {
+                f = clazz.getField(fieldName);
+                f.setAccessible(true);
+                FIELD_CACHE.put(key, f);
+            }
+            f.set(null, coerceArg(f.getType(), val));
+            return val;
+        } catch (NoSuchFieldException e) {
             throw new IllegalArgumentException("No such static field: " + clazz.getName() + "/" + fieldName);
         } catch (IllegalAccessException e) {
             throw RT.sneakyThrow(e);
@@ -243,11 +277,10 @@ public final class Interop {
     }
 
     private static Method findBestMethod(Class<?> clazz, String name, Object[] args, boolean isStatic) {
-        int arity = args == null ? 0 : args.length;
-        MemberKey key = new MemberKey(clazz, name, arity, isStatic);
-        Executable cached = METHOD_CACHE.get(key);
-        if (cached instanceof Method cm && matchScore(cm.getParameterTypes(), cm.isVarArgs(), args) >= 0) {
-            return cm;
+        MethodKey key = new MethodKey(clazz, name, argTypesKey(args), isStatic);
+        Method cached = METHOD_CACHE.get(key);
+        if (cached != null) {
+            return cached;
         }
 
         Method best = null;
@@ -263,35 +296,50 @@ public final class Interop {
             }
         }
         if (best != null) {
-            setAccessibleSafe(best, clazz);
+            best = setAccessibleSafe(best, clazz);
             METHOD_CACHE.put(key, best);
         }
         return best;
     }
 
-    private static void setAccessibleSafe(Method m, Class<?> clazz) {
-        if (Modifier.isPublic(clazz.getModifiers()) && Modifier.isPublic(m.getModifiers())) {
-            try { m.setAccessible(true); } catch (Exception ignored) {}
-            return;
+    private static Method setAccessibleSafe(Method m, Class<?> clazz) {
+        if (Modifier.isPublic(m.getDeclaringClass().getModifiers()) && Modifier.isPublic(m.getModifiers())) {
+            return m;
         }
-        // Find accessible declaration on interface or superclass
-        for (Class<?> iface : clazz.getInterfaces()) {
-            try {
-                Method im = iface.getMethod(m.getName(), m.getParameterTypes());
-                im.setAccessible(true);
-                return;
-            } catch (Exception ignored) {}
-        }
-        for (Class<?> sup = clazz.getSuperclass(); sup != null; sup = sup.getSuperclass()) {
-            if (Modifier.isPublic(sup.getModifiers())) {
-                try {
-                    Method sm = sup.getMethod(m.getName(), m.getParameterTypes());
-                    sm.setAccessible(true);
-                    return;
-                } catch (Exception ignored) {}
-            }
+        Method pub = findPublicMethodOnHierarchy(clazz, m.getName(), m.getParameterTypes());
+        if (pub != null) {
+            return pub;
         }
         try { m.setAccessible(true); } catch (Exception ignored) {}
+        return m;
+    }
+
+    private static Method findPublicMethodOnHierarchy(Class<?> clazz, String name, Class<?>[] paramTypes) {
+        for (Class<?> cur = clazz; cur != null; cur = cur.getSuperclass()) {
+            if (Modifier.isPublic(cur.getModifiers())) {
+                try {
+                    Method sm = cur.getDeclaredMethod(name, paramTypes);
+                    if (Modifier.isPublic(sm.getModifiers())) return sm;
+                } catch (NoSuchMethodException ignored) {}
+            }
+            Method ifaceMethod = findPublicMethodOnInterfaces(cur.getInterfaces(), name, paramTypes);
+            if (ifaceMethod != null) return ifaceMethod;
+        }
+        return null;
+    }
+
+    private static Method findPublicMethodOnInterfaces(Class<?>[] ifaces, String name, Class<?>[] paramTypes) {
+        for (Class<?> iface : ifaces) {
+            if (Modifier.isPublic(iface.getModifiers())) {
+                try {
+                    Method im = iface.getMethod(name, paramTypes);
+                    if (Modifier.isPublic(im.getModifiers())) return im;
+                } catch (NoSuchMethodException ignored) {}
+            }
+            Method sup = findPublicMethodOnInterfaces(iface.getInterfaces(), name, paramTypes);
+            if (sup != null) return sup;
+        }
+        return null;
     }
 
     private static int matchScore(Class<?>[] paramTypes, boolean varArgs, Object[] args) {
@@ -334,6 +382,7 @@ public final class Interop {
         Class<?> ac = arg.getClass();
         if (param == ac) return 0;
         if (param.isAssignableFrom(ac)) return 1;
+        if (param == Comparator.class && arg instanceof Fn) return 1;
         if (param == long.class || param == Long.class) {
             if (arg instanceof Long) return 0;
             if (Numbers.isInteger(arg)) return 2;
@@ -402,6 +451,7 @@ public final class Interop {
     public static Object coerceArg(Class<?> param, Object arg) {
         if (arg == null) return null;
         if (param.isInstance(arg)) return arg;
+        if (param == Comparator.class && arg instanceof Fn f) return f.asComparator();
         if (param == int.class || param == Integer.class) return ((Number) arg).intValue();
         if (param == long.class || param == Long.class) return ((Number) arg).longValue();
         if (param == double.class || param == Double.class) return ((Number) arg).doubleValue();

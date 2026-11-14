@@ -131,12 +131,6 @@ public final class Atom implements IDeref, IMeta, IReference {
     }
 
     @Override
-    public Atom withMeta(PersistentHashMap meta) {
-        this.meta = meta;
-        return this;
-    }
-
-    @Override
     public PersistentHashMap resetMeta(PersistentHashMap m) {
         this.meta = m != null ? m : PersistentHashMap.EMPTY;
         return this.meta;
@@ -199,7 +193,9 @@ public final class Atom implements IDeref, IMeta, IReference {
 
         @Override
         public String toString() {
-            return "#<Delay " + (isRealized() ? RT.printString(val) : ":pending") + ">";
+            if (!isRealized()) return "#<Delay :pending>";
+            if (exception != null) return "#<Delay :failed " + exception + ">";
+            return "#<Delay " + RT.printString(val) + ">";
         }
     }
 
@@ -259,7 +255,18 @@ public final class Atom implements IDeref, IMeta, IReference {
         private final Future<Object> fut;
 
         public FutureObj(Fn fn) {
-            this.fut = VIRTUAL_EXECUTOR.submit((Callable<Object>) fn);
+            Map<Var, Object> bindings = Var.cloneThreadBindings();
+            this.fut = VIRTUAL_EXECUTOR.submit(() -> {
+                if (bindings.isEmpty()) {
+                    return fn.invoke();
+                }
+                Var.pushThreadBindings(bindings);
+                try {
+                    return fn.invoke();
+                } finally {
+                    Var.popThreadBindings();
+                }
+            });
         }
 
         @Override

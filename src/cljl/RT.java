@@ -130,6 +130,54 @@ public final class RT {
         return o.hashCode();
     }
 
+    public static final class EquivKey {
+        public final Object val;
+        private final int hash;
+
+        public EquivKey(Object val) {
+            this.val = val;
+            this.hash = RT.hash(val);
+        }
+
+        @Override
+        public int hashCode() {
+            return hash;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            return obj instanceof EquivKey ek && RT.equiv(val, ek.val);
+        }
+    }
+
+    public static Object destructureMap(Object x) {
+        if (x == null || x instanceof Associative || x instanceof Map<?, ?>) {
+            return x;
+        }
+        if (x instanceof ISeq seq) {
+            PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
+            ISeq s = seq.seq();
+            while (s != null) {
+                Object k = s.first();
+                ISeq n = s.next();
+                if (n == null) {
+                    if (k instanceof Map<?, ?> m) {
+                        for (Map.Entry<?, ?> e : m.entrySet()) {
+                            tm.assoc(e.getKey(), e.getValue());
+                        }
+                        break;
+                    }
+                    throw new IllegalArgumentException("No value supplied for key: " + k);
+                }
+                tm.assoc(k, n.first());
+                s = n.next();
+            }
+            return tm.persistent();
+        }
+        return x;
+    }
+
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static int compare(Object k1, Object k2) {
         if (k1 == k2) return 0;
@@ -195,7 +243,7 @@ public final class RT {
             public Object invoke() {
                 if (!iter.hasNext()) return null;
                 Object head = iter.next();
-                return new PersistentList(null, head, iteratorSeq(iter), 2);
+                return new Cons(head, iteratorSeq(iter));
             }
         });
     }
@@ -204,12 +252,14 @@ public final class RT {
         if (x == null) return null;
         if (x instanceof ISeq s) return s.first();
         if (x instanceof PersistentVector v) return v.cnt > 0 ? v.nth(0) : null;
+        if (x instanceof PersistentVector.SubVec sv) return sv.count() > 0 ? sv.nth(0) : null;
         ISeq seq = seq(x);
         return seq == null ? null : seq.first();
     }
 
     public static Object second(Object x) {
         if (x instanceof PersistentVector v) return v.cnt > 1 ? v.nth(1) : null;
+        if (x instanceof PersistentVector.SubVec sv) return sv.count() > 1 ? sv.nth(1) : null;
         return first(next(x));
     }
 
@@ -229,13 +279,14 @@ public final class RT {
 
     public static ISeq cons(Object x, Object coll) {
         if (coll == null) return new PersistentList(x);
-        if (coll instanceof ISeq s) return new PersistentList(null, x, s, (s instanceof Counted c ? c.count() + 1 : 2));
-        return new PersistentList(null, x, seq(coll), 2);
+        if (coll instanceof ISeq s) return new Cons(x, s);
+        return new Cons(x, seq(coll));
     }
 
     public static Object conj(Object coll, Object x) {
         if (coll == null) return new PersistentList(x);
         if (coll instanceof PersistentVector v) return v.conj(x);
+        if (coll instanceof PersistentVector.SubVec sv) return sv.conj(x);
         if (coll instanceof PersistentList l) return l.cons(x);
         if (coll instanceof PersistentHashMap m) {
             if (x instanceof Map.Entry<?, ?> e) {
@@ -245,6 +296,10 @@ public final class RT {
                 if (v.count() != 2) throw new IllegalArgumentException("Vector arg to map conj must be a pair");
                 return m.assoc(v.nth(0), v.nth(1));
             }
+            if (x instanceof PersistentVector.SubVec sv) {
+                if (sv.count() != 2) throw new IllegalArgumentException("Vector arg to map conj must be a pair");
+                return m.assoc(sv.nth(0), sv.nth(1));
+            }
             if (x instanceof Seqable || x instanceof Map<?, ?>) {
                 PersistentHashMap ret = m;
                 for (ISeq s = seq(x); s != null; s = s.next()) {
@@ -253,6 +308,8 @@ public final class RT {
                         ret = ret.assoc(e.getKey(), e.getValue());
                     } else if (elem instanceof PersistentVector v && v.count() == 2) {
                         ret = ret.assoc(v.nth(0), v.nth(1));
+                    } else if (elem instanceof PersistentVector.SubVec sv && sv.count() == 2) {
+                        ret = ret.assoc(sv.nth(0), sv.nth(1));
                     } else {
                         throw new IllegalArgumentException("Cannot conj " + elem + " onto map");
                     }
@@ -266,12 +323,14 @@ public final class RT {
         if (coll instanceof PersistentTreeMap m) {
             if (x instanceof Map.Entry<?, ?> e) return m.assoc(e.getKey(), e.getValue());
             if (x instanceof PersistentVector v && v.count() == 2) return m.assoc(v.nth(0), v.nth(1));
+            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return m.assoc(sv.nth(0), sv.nth(1));
             if (x instanceof Seqable || x instanceof Map<?, ?>) {
                 PersistentTreeMap ret = m;
                 for (ISeq s = seq(x); s != null; s = s.next()) {
                     Object elem = s.first();
                     if (elem instanceof Map.Entry<?, ?> e) ret = ret.assoc(e.getKey(), e.getValue());
                     else if (elem instanceof PersistentVector v && v.count() == 2) ret = ret.assoc(v.nth(0), v.nth(1));
+                    else if (elem instanceof PersistentVector.SubVec sv && sv.count() == 2) ret = ret.assoc(sv.nth(0), sv.nth(1));
                     else throw new IllegalArgumentException("Cannot conj " + elem + " onto map");
                 }
                 return ret;
@@ -281,6 +340,7 @@ public final class RT {
         if (coll instanceof PersistentRecord rec) {
             if (x instanceof Map.Entry<?, ?> e) return rec.assoc(e.getKey(), e.getValue());
             if (x instanceof PersistentVector v && v.count() == 2) return rec.assoc(v.nth(0), v.nth(1));
+            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return rec.assoc(sv.nth(0), sv.nth(1));
             throw new IllegalArgumentException("Cannot conj " + x + " onto record");
         }
         if (coll instanceof ISeq s) return cons(x, s);
@@ -381,6 +441,11 @@ public final class RT {
             if (i >= 0 && i < v.count()) return new PersistentHashMap.MapEntry(i, v.nth(i));
             return null;
         }
+        if (coll instanceof PersistentVector.SubVec sv && key instanceof Number n) {
+            int i = n.intValue();
+            if (i >= 0 && i < sv.count()) return new PersistentHashMap.MapEntry(i, sv.nth(i));
+            return null;
+        }
         if (coll instanceof Map<?, ?> m) {
             if (m.containsKey(key)) return new PersistentHashMap.MapEntry(key, m.get(key));
         }
@@ -405,6 +470,7 @@ public final class RT {
     public static Object nth(Object coll, int n) {
         if (coll == null) return null;
         if (coll instanceof PersistentVector v) return v.nth(n);
+        if (coll instanceof PersistentVector.SubVec sv) return sv.nth(n);
         if (coll instanceof CharSequence cs) return cs.charAt(n);
         if (coll.getClass().isArray()) return Array.get(coll, n);
         if (coll instanceof RandomAccess && coll instanceof List<?> l) return l.get(n);
@@ -425,6 +491,7 @@ public final class RT {
         if (coll == null) return notFound;
         if (n < 0) return notFound;
         if (coll instanceof PersistentVector v) return v.nth(n, notFound);
+        if (coll instanceof PersistentVector.SubVec sv) return sv.nth(n, notFound);
         if (coll instanceof CharSequence cs) return n < cs.length() ? cs.charAt(n) : notFound;
         if (coll.getClass().isArray()) return n < Array.getLength(coll) ? Array.get(coll, n) : notFound;
         if (coll instanceof RandomAccess && coll instanceof List<?> l) return n < l.size() ? l.get(n) : notFound;
@@ -469,7 +536,7 @@ public final class RT {
             public Object invoke() {
                 ISeq sq = s.seq();
                 if (sq == null) return null;
-                return new PersistentList(null, f.invoke(sq.first()), mapSeq(f, sq.next()), 2);
+                return new Cons(f.invoke(sq.first()), mapSeq(f, sq.next()));
             }
         });
     }

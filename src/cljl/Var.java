@@ -83,6 +83,11 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
         return stack.peek();
     }
 
+    public static Map<Var, Object> cloneThreadBindings() {
+        Map<Var, Object> top = getThreadBindings();
+        return top.isEmpty() ? Collections.emptyMap() : new HashMap<>(top);
+    }
+
     public boolean isThreadBound() {
         if (!dynamic) return false;
         Deque<Map<Var, Object>> stack = BINDING_STACK.get();
@@ -110,7 +115,7 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
     public Object deref() {
         Object v = get();
         if (v == UNBOUND) {
-            throw new IllegalStateException("Var " + ns.name + "/" + sym.name + " is unbound.");
+            throw new IllegalStateException("Var " + getName() + " is unbound.");
         }
         return v;
     }
@@ -140,8 +145,7 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
                 return val;
             }
         }
-        bindRoot(val);
-        return val;
+        throw new IllegalStateException("Can't change/restore root binding of " + getName() + " without binding");
     }
 
     public synchronized Object alterRoot(Fn fn, Object[] args) {
@@ -198,11 +202,6 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
     }
 
     @Override
-    public Var withMeta(PersistentHashMap m) {
-        return setMeta(m);
-    }
-
-    @Override
     public PersistentHashMap resetMeta(PersistentHashMap m) {
         setMeta(m);
         return this.meta;
@@ -242,7 +241,7 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
     public Fn fn() {
         Object v = deref();
         if (v instanceof Fn f) return f;
-        throw new ClassCastException(ns.name + "/" + sym.name + " (" + v + ") is not a function");
+        throw new ClassCastException(getName() + " (" + v + ") is not a function");
     }
 
     @Override public Object invoke() { return fn().invoke(); }
@@ -255,11 +254,13 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
 
     @Override
     public String getName() {
-        return ns.name + "/" + sym.name;
+        if (ns != null && sym != null) return ns.name + "/" + sym.name;
+        return "--unnamed--";
     }
 
     @Override
     public String toString() {
-        return "#'" + ns.name + "/" + sym.name;
+        if (ns != null && sym != null) return "#'" + ns.name + "/" + sym.name;
+        return "#<Var: --unnamed-->";
     }
 }

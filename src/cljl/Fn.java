@@ -87,15 +87,21 @@ public abstract class Fn implements Callable<Object>, Runnable,
 
     public int compare(Object a, Object b) {
         Object res = invoke(a, b);
+        if (res instanceof Number n) {
+            if (n instanceof Long l) return Long.signum(l);
+            if (n instanceof Integer i) return Integer.compare(i, 0);
+            if (Numbers.isPos(n)) return 1;
+            if (Numbers.isNeg(n)) return -1;
+            return 0;
+        }
         if (res instanceof Boolean bool) {
             if (bool) return -1;
-            Object rev = invoke(b, a);
-            return RT.truthy(rev) ? 1 : 0;
+            return RT.truthy(invoke(b, a)) ? 1 : 0;
         }
-        if (res instanceof Number n) {
-            return n.intValue();
+        if (res == null || !RT.truthy(res)) {
+            return RT.truthy(invoke(b, a)) ? 1 : 0;
         }
-        return RT.compare(a, b);
+        return -1;
     }
 
     // Convenience factory helpers for fast core function registration
@@ -156,11 +162,39 @@ public abstract class Fn implements Callable<Object>, Runnable,
         };
     }
 
-    public abstract static class NamedFn extends Fn {
+    public abstract static class NamedFn extends Fn implements cljl.lang.IObj {
         private final String name;
         public NamedFn(String name) { this.name = name; }
         @Override public String getName() { return name; }
+        @Override public cljl.lang.PersistentHashMap meta() { return null; }
+        @Override public Object withMeta(cljl.lang.PersistentHashMap m) {
+            return m == null ? this : new MetaFn(this, m);
+        }
         @Override public String toString() { return "#<fn " + name + ">"; }
+    }
+
+    public static final class MetaFn extends Fn implements cljl.lang.IObj {
+        private final Fn fn;
+        private final cljl.lang.PersistentHashMap meta;
+
+        public MetaFn(Fn fn, cljl.lang.PersistentHashMap meta) {
+            this.fn = fn;
+            this.meta = meta;
+        }
+
+        @Override public Object invoke() { return fn.invoke(); }
+        @Override public Object invoke(Object a) { return fn.invoke(a); }
+        @Override public Object invoke(Object a, Object b) { return fn.invoke(a, b); }
+        @Override public Object invoke(Object a, Object b, Object c) { return fn.invoke(a, b, c); }
+        @Override public Object invoke(Object a, Object b, Object c, Object d) { return fn.invoke(a, b, c, d); }
+        @Override public Object invokeVarargs(Object[] args) { return fn.invokeVarargs(args); }
+        @Override public Object applyTo(Object[] args) { return fn.applyTo(args); }
+        @Override public String getName() { return fn.getName(); }
+        @Override public cljl.lang.PersistentHashMap meta() { return meta; }
+        @Override public Object withMeta(cljl.lang.PersistentHashMap m) {
+            return m == this.meta ? this : new MetaFn(fn, m);
+        }
+        @Override public String toString() { return fn.toString(); }
     }
 
     @FunctionalInterface public interface S0 { Object call(); }

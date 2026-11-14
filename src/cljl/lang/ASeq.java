@@ -3,9 +3,10 @@ package cljl.lang;
 import cljl.RT;
 import java.util.*;
 
-public abstract class ASeq implements ISeq, IMeta {
+public abstract class ASeq implements ISeq, IObj {
     protected final PersistentHashMap meta;
     private int hash;
+    private boolean hasHash;
 
     protected ASeq() {
         this.meta = null;
@@ -33,7 +34,7 @@ public abstract class ASeq implements ISeq, IMeta {
 
     @Override
     public ISeq cons(Object o) {
-        return new PersistentList(null, o, this, count() + 1);
+        return new Cons(o, this);
     }
 
     public int count() {
@@ -133,12 +134,13 @@ public abstract class ASeq implements ISeq, IMeta {
     @Override
     public int hashCode() {
         int h = this.hash;
-        if (h == 0) {
+        if (!hasHash) {
             h = 1;
             for (ISeq s = seq(); s != null; s = s.next()) {
                 h = 31 * h + RT.hash(s.first());
             }
             this.hash = h;
+            this.hasHash = true;
         }
         return h;
     }

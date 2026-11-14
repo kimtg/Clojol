@@ -178,12 +178,6 @@ public final class Namespace implements IMeta, IReference {
     }
 
     @Override
-    public Namespace withMeta(PersistentHashMap meta) {
-        this.meta = meta;
-        return this;
-    }
-
-    @Override
     public PersistentHashMap resetMeta(PersistentHashMap m) {
         this.meta = m != null ? m : PersistentHashMap.EMPTY;
         return this.meta;

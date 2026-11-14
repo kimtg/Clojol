@@ -125,10 +125,32 @@ public final class StdLib {
         }));
         ns.intern("replace-first", Fn.of3("replace-first", (s, match, replacement) -> {
             String str = (String) s;
+            if (match instanceof Character c && replacement instanceof Character rc) {
+                int idx = str.indexOf(c);
+                return idx < 0 ? str : str.substring(0, idx) + rc + str.substring(idx + 1);
+            }
             if (match instanceof CharSequence cs) {
-                return Pattern.compile(Pattern.quote(cs.toString())).matcher(str).replaceFirst(Matcher.quoteReplacement(replacement.toString()));
+                return Pattern.compile(Pattern.quote(cs.toString())).matcher(str)
+                        .replaceFirst(Matcher.quoteReplacement(replacement.toString()));
             }
             if (match instanceof Pattern p) {
+                if (replacement instanceof Fn fn) {
+                    Matcher m = p.matcher(str);
+                    if (!m.find()) return str;
+                    int gc = m.groupCount();
+                    Object matchArg;
+                    if (gc == 0) {
+                        matchArg = m.group();
+                    } else {
+                        Object[] groups = new Object[gc + 1];
+                        for (int i = 0; i <= gc; i++) groups[i] = m.group(i);
+                        matchArg = PersistentVector.createOwning(groups);
+                    }
+                    StringBuilder sb = new StringBuilder();
+                    m.appendReplacement(sb, Matcher.quoteReplacement(String.valueOf(fn.invoke(matchArg))));
+                    m.appendTail(sb);
+                    return sb.toString();
+                }
                 return p.matcher(str).replaceFirst(replacement.toString());
             }
             throw new IllegalArgumentException("Invalid match type for replace-first: " + match);
@@ -738,20 +760,129 @@ public final class StdLib {
         ns.internMacro("is", Fn.ofVarargs("is", args -> {
             Object form = args[0];
             Object msg = args.length > 1 ? args[1] : null;
+            Object quotedForm = PersistentList.createFromArray(Symbol.intern("quote"), form);
+            if (form instanceof ISeq fseq && fseq.first() instanceof Symbol head
+                    && (head.ns == null || "clojure.test".equals(head.ns))) {
+                if ("thrown?".equals(head.name)) {
+                    ISeq rest = fseq.next();
+                    if (rest == null || rest.next() == null) {
+                        throw new IllegalArgumentException("thrown? requires an exception class and body expression");
+                    }
+                    Object exCls = rest.first();
+                    List<Object> tryBody = new ArrayList<>();
+                    tryBody.add(Symbol.intern("do"));
+                    for (ISeq b = rest.next(); b != null; b = b.next()) tryBody.add(b.first());
+                    Symbol errSym = Symbol.intern("e__" + RT.nextID());
+                    return PersistentList.createFromArray(
+                            Symbol.intern("try"),
+                            PersistentList.create(tryBody),
+                            PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
+                                    PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("fail"),
+                                            Keyword.intern("message"), msg,
+                                            Keyword.intern("expected"), quotedForm,
+                                            Keyword.intern("actual"), null)),
+                            null,
+                            PersistentList.createFromArray(
+                                    Symbol.intern("catch"), exCls, errSym,
+                                    PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
+                                            PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("pass"),
+                                                    Keyword.intern("message"), msg,
+                                                    Keyword.intern("expected"), quotedForm,
+                                                    Keyword.intern("actual"), errSym)),
+                                    errSym));
+                }
+                if ("thrown-with-msg?".equals(head.name)) {
+                    ISeq rest = fseq.next();
+                    ISeq afterCls = rest != null ? rest.next() : null;
+                    if (rest == null || afterCls == null || afterCls.next() == null) {
+                        throw new IllegalArgumentException("thrown-with-msg? requires an exception class, regex, and body expression");
+                    }
+                    Object exCls = rest.first();
+                    Object reForm = afterCls.first();
+                    List<Object> tryBody = new ArrayList<>();
+                    tryBody.add(Symbol.intern("do"));
+                    for (ISeq b = afterCls.next(); b != null; b = b.next()) tryBody.add(b.first());
+                    Symbol errSym = Symbol.intern("e__" + RT.nextID());
+                    Symbol msgSym = Symbol.intern("m__" + RT.nextID());
+                    return PersistentList.createFromArray(
+                            Symbol.intern("try"),
+                            PersistentList.create(tryBody),
+                            PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
+                                    PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("fail"),
+                                            Keyword.intern("message"), msg,
+                                            Keyword.intern("expected"), quotedForm,
+                                            Keyword.intern("actual"), null)),
+                            null,
+                            PersistentList.createFromArray(
+                                    Symbol.intern("catch"), exCls, errSym,
+                                    PersistentList.createFromArray(
+                                            Symbol.intern("let"),
+                                            PersistentVector.createOwning(msgSym,
+                                                    PersistentList.createFromArray(Symbol.intern("."), errSym, Symbol.intern("getMessage"))),
+                                            PersistentList.createFromArray(
+                                                    Symbol.intern("if"),
+                                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "and"),
+                                                            msgSym,
+                                                            PersistentList.createFromArray(Symbol.intern("clojure.core", "re-find"), reForm, msgSym)),
+                                                    PersistentList.createFromArray(Symbol.intern("do"),
+                                                            PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
+                                                                    PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("pass"),
+                                                                            Keyword.intern("message"), msg,
+                                                                            Keyword.intern("expected"), quotedForm,
+                                                                            Keyword.intern("actual"), errSym)),
+                                                            errSym),
+                                                    PersistentList.createFromArray(Symbol.intern("do"),
+                                                            PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
+                                                                    PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("fail"),
+                                                                            Keyword.intern("message"), msg,
+                                                                            Keyword.intern("expected"), quotedForm,
+                                                                            Keyword.intern("actual"), errSym)),
+                                                            null)))));
+                }
+            }
+            Symbol resSym = Symbol.intern("res__" + RT.nextID());
             return PersistentList.createFromArray(
                     Symbol.intern("let"),
-                    PersistentVector.createOwning(Symbol.intern("res__"), form),
+                    PersistentVector.createOwning(resSym, form),
                     PersistentList.createFromArray(
-                            Symbol.intern("if"), Symbol.intern("res__"),
+                            Symbol.intern("if"), resSym,
                             PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
                                     PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("pass"),
                                             Keyword.intern("message"), msg)),
                             PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
                                     PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("fail"),
                                             Keyword.intern("message"), msg,
-                                            Keyword.intern("expected"), PersistentList.createFromArray(Symbol.intern("quote"), form),
-                                            Keyword.intern("actual"), Symbol.intern("res__")))),
-                    Symbol.intern("res__"));
+                                            Keyword.intern("expected"), quotedForm,
+                                            Keyword.intern("actual"), resSym))),
+                    resSym);
+        }));
+
+        ns.internMacro("are", Fn.ofVarargs("are", args -> {
+            if (args.length < 2 || !(args[0] instanceof PersistentVector argv)) {
+                throw new IllegalArgumentException("are requires a parameter vector and template expression");
+            }
+            Object expr = args[1];
+            int arity = argv.count();
+            if (arity == 0) {
+                return args.length == 2
+                        ? PersistentList.createFromArray(Symbol.intern("clojure.test", "is"), expr)
+                        : Boolean.TRUE;
+            }
+            if (((args.length - 2) % arity) != 0) {
+                throw new IllegalArgumentException("The number of args doesn't match are's argv.");
+            }
+            List<Object> body = new ArrayList<>();
+            body.add(Symbol.intern("do"));
+            for (int i = 2; i < args.length; i += arity) {
+                Map<Symbol, Object> subs = new HashMap<>();
+                for (int j = 0; j < arity; j++) {
+                    subs.put(((Symbol) argv.nth(j)).withMeta(null), args[i + j]);
+                }
+                body.add(PersistentList.createFromArray(
+                        Symbol.intern("clojure.test", "is"),
+                        substituteAreTemplate(expr, subs)));
+            }
+            return PersistentList.create(body);
         }));
 
         ns.intern("run-tests", Fn.ofVarargs("run-tests", args -> {
@@ -988,5 +1119,50 @@ public final class StdLib {
         }
         err.flush();
         return null;
+    }
+
+    private static Object substituteAreTemplate(Object form, Map<Symbol, Object> subs) {
+        if (form instanceof Symbol s && s.ns == null) {
+            Symbol key = s.withMeta(null);
+            if (subs.containsKey(key)) return subs.get(key);
+            return form;
+        }
+        if (form instanceof ISeq seq) {
+            List<Object> items = new ArrayList<>();
+            for (ISeq s = seq.seq(); s != null; s = s.next()) {
+                items.add(substituteAreTemplate(s.first(), subs));
+            }
+            Object res = PersistentList.create(items);
+            if (form instanceof IMeta im && im.meta() != null && res instanceof IObj io) {
+                return io.withMeta(im.meta());
+            }
+            return res;
+        }
+        if (form instanceof PersistentVector pv) {
+            List<Object> items = new ArrayList<>(pv.count());
+            for (int i = 0; i < pv.count(); i++) {
+                items.add(substituteAreTemplate(pv.nth(i), subs));
+            }
+            PersistentVector res = PersistentVector.create(items);
+            return pv.meta() != null ? res.withMeta(pv.meta()) : res;
+        }
+        if (form instanceof PersistentHashMap pm) {
+            PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
+            for (ISeq s = pm.seq(); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                tm = tm.assoc(substituteAreTemplate(e.getKey(), subs), substituteAreTemplate(e.getValue(), subs));
+            }
+            PersistentHashMap res = tm.persistent();
+            return pm.meta() != null ? res.withMeta(pm.meta()) : res;
+        }
+        if (form instanceof PersistentHashSet ps) {
+            PersistentHashSet.TransientHashSet ts = PersistentHashSet.EMPTY.asTransient();
+            for (ISeq s = ps.seq(); s != null; s = s.next()) {
+                ts = ts.conj(substituteAreTemplate(s.first(), subs));
+            }
+            PersistentHashSet res = ts.persistent();
+            return ps.meta() != null ? res.withMeta(ps.meta()) : res;
+        }
+        return form;
     }
 }

@@ -23,6 +23,11 @@ public final class LazySeq extends ASeq {
         this.s = s;
     }
 
+    private LazySeq(PersistentHashMap meta, Fn fn) {
+        super(meta);
+        this.fn = fn;
+    }
+
     private synchronized Object sval() {
         if (fn != null) {
             sv = fn.invoke();
@@ -39,11 +44,13 @@ public final class LazySeq extends ASeq {
         sval();
         if (sv != null) {
             Object ls = sv;
-            sv = null;
             while (ls instanceof LazySeq lseq) {
                 ls = lseq.sval();
+                sv = ls;
             }
-            s = RT.seq(ls);
+            ISeq res = RT.seq(ls);
+            sv = null;
+            s = res;
         }
         return s;
     }
@@ -87,6 +94,9 @@ public final class LazySeq extends ASeq {
     @Override
     public LazySeq withMeta(PersistentHashMap meta) {
         if (this.meta == meta) return this;
-        return new LazySeq(meta, seq());
+        if (fn == null && sv == null) {
+            return new LazySeq(meta, s);
+        }
+        return new LazySeq(meta, Fn.of0("lazy-meta", this::seq));
     }
 }

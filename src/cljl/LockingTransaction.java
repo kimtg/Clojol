@@ -22,9 +22,9 @@ public final class LockingTransaction {
     private record Commute(Fn fn, ISeq args) {}
 
     private long readPoint;
-    private long startPoint;
     private boolean running;
     private final Map<Ref, Object> vals = new TreeMap<>();
+    private final Map<Ref, Object> setVals = new TreeMap<>();
     private final Set<Ref> sets = new TreeSet<>();
     private final Map<Ref, List<Commute>> commutes = new TreeMap<>();
     private final Set<Ref> ensures = new TreeSet<>();
@@ -65,6 +65,7 @@ public final class LockingTransaction {
 
     private void resetState() {
         vals.clear();
+        setVals.clear();
         sets.clear();
         commutes.clear();
         ensures.clear();
@@ -72,7 +73,6 @@ public final class LockingTransaction {
     }
 
     private Object run(Callable<Object> fn) throws Exception {
-        this.startPoint = LAST_POINT.incrementAndGet();
         for (int attempt = 0; attempt < RETRY_LIMIT; attempt++) {
             resetState();
             this.readPoint = LAST_POINT.incrementAndGet();
@@ -87,10 +87,17 @@ public final class LockingTransaction {
                 this.running = false;
                 throw ex;
             }
-            if (commit()) {
+            List<Runnable> notifications = new ArrayList<>();
+            if (commit(notifications)) {
                 this.running = false;
-                for (Object a : agentActions) {
-                    Agent.dispatchAction(a);
+                try {
+                    for (Object a : agentActions) {
+                        Agent.dispatchAction(a);
+                    }
+                } finally {
+                    for (Runnable n : notifications) {
+                        n.run();
+                    }
                 }
                 return ret;
             }
@@ -113,6 +120,7 @@ public final class LockingTransaction {
                 }
                 ver = ver.prior;
             } while (ver != head);
+            ref.faults.incrementAndGet();
             throw RetryEx.INSTANCE;
         } finally {
             ref.lock.readLock().unlock();
@@ -122,20 +130,20 @@ public final class LockingTransaction {
     public Object doSet(Ref ref, Object val) {
         sets.add(ref);
         vals.put(ref, val);
+        setVals.put(ref, val);
+        commutes.remove(ref);
         return val;
     }
 
     public Object doCommute(Ref ref, Fn fn, ISeq args) {
-        if (!vals.containsKey(ref)) {
-            ref.lock.readLock().lock();
-            try {
-                vals.put(ref, ref.tvals.val);
-            } finally {
-                ref.lock.readLock().unlock();
-            }
+        Object cur;
+        if (vals.containsKey(ref)) {
+            cur = vals.get(ref);
+        } else {
+            cur = doGet(ref);
+            vals.put(ref, cur);
         }
         commutes.computeIfAbsent(ref, k -> new ArrayList<>()).add(new Commute(fn, args));
-        Object cur = vals.get(ref);
         Object next = applyFn(fn, cur, args);
         vals.put(ref, next);
         return next;
@@ -169,10 +177,8 @@ public final class LockingTransaction {
         return fn.applyTo(callArgs);
     }
 
-    private boolean commit() {
+    private boolean commit(List<Runnable> notifications) {
         Set<Ref> writeLocked = new TreeSet<>();
-        Set<Ref> readLocked = new TreeSet<>();
-        List<Runnable> notifications = new ArrayList<>();
         try {
             Set<Ref> allWrite = new TreeSet<>();
             allWrite.addAll(sets);
@@ -196,10 +202,10 @@ public final class LockingTransaction {
                 }
             }
 
-            // Re-run commutes against latest committed state
+            // Re-run commutes against latest committed state (or last doSet in this tx)
             for (Map.Entry<Ref, List<Commute>> e : commutes.entrySet()) {
                 Ref r = e.getKey();
-                Object val = sets.contains(r) ? vals.get(r) : r.tvals.val;
+                Object val = sets.contains(r) ? setVals.get(r) : r.tvals.val;
                 for (Commute c : e.getValue()) {
                     val = applyFn(c.fn, val, c.args);
                 }
@@ -222,8 +228,10 @@ public final class LockingTransaction {
                 Object oldVal = r.tvals.val;
                 Object newVal = vals.get(r);
                 int count = r.getHistoryCount();
-                if (count < r.maxHistory) {
+                int hfaults = r.faults.get();
+                if (count < r.minHistory || (hfaults > 0 && count < r.maxHistory)) {
                     r.tvals = new Ref.TVal(newVal, commitPoint, r.tvals);
+                    if (hfaults > 0) r.faults.set(0);
                 } else {
                     Ref.TVal reused = r.tvals.next;
                     reused.val = newVal;
@@ -235,11 +243,7 @@ public final class LockingTransaction {
                 }
             }
         } finally {
-            for (Ref r : readLocked) r.lock.readLock().unlock();
             for (Ref r : writeLocked) r.lock.writeLock().unlock();
-        }
-        for (Runnable n : notifications) {
-            n.run();
         }
         return true;
     }

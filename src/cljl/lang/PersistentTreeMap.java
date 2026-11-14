@@ -9,7 +9,7 @@ import java.util.*;
  * Persistent sorted map implemented as an immutable AVL tree with structural sharing.
  */
 public final class PersistentTreeMap extends Fn
-        implements Associative, IMeta, Sorted, Reversible, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
+        implements Associative, IObj, Sorted, Reversible, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static final Comparator<Object> DEFAULT_COMPARATOR = (k1, k2) -> {
@@ -293,14 +293,19 @@ public final class PersistentTreeMap extends Fn
         final boolean asc;
 
         TreeSeq(List<Node> stack, boolean asc) {
-            super(null);
+            this(null, stack, asc);
+        }
+
+        TreeSeq(PersistentHashMap meta, List<Node> stack, boolean asc) {
+            super(meta);
             this.stack = stack;
             this.asc = asc;
         }
 
         @Override
         public TreeSeq withMeta(PersistentHashMap m) {
-            return this;
+            if (this.meta == m) return this;
+            return new TreeSeq(m, stack, asc);
         }
 
         static TreeSeq create(Node root, boolean asc) {
@@ -416,9 +421,13 @@ public final class PersistentTreeMap extends Fn
         if (this == o) return true;
         if (!(o instanceof Map<?, ?> m)) return false;
         if (m.size() != count) return false;
-        for (Entry<Object, Object> e : this) {
-            Object k = e.getKey();
-            if (!m.containsKey(k) || !RT.equiv(e.getValue(), m.get(k))) return false;
+        try {
+            for (Entry<Object, Object> e : this) {
+                Object k = e.getKey();
+                if (!m.containsKey(k) || !RT.equiv(e.getValue(), m.get(k))) return false;
+            }
+        } catch (ClassCastException e) {
+            return false;
         }
         return true;
     }
@@ -427,8 +436,8 @@ public final class PersistentTreeMap extends Fn
     public int hashCode() {
         int h = 0;
         for (Entry<Object, Object> e : this) {
-            int kh = e.getKey() == null ? 0 : e.getKey().hashCode();
-            int vh = e.getValue() == null ? 0 : e.getValue().hashCode();
+            int kh = RT.hash(e.getKey());
+            int vh = RT.hash(e.getValue());
             h += (kh ^ vh);
         }
         return h;

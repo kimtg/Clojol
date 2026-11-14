@@ -37,7 +37,8 @@ public final class Reader {
     private static final Pattern INT_PAT = Pattern.compile(
             "^([-+]?)(?:(0)|([1-9][0-9]*)|0[xX]([0-9A-Fa-f]+)|0([0-7]+)|([1-9][0-9]?)[rR]([0-9A-Za-z]+)|0[bB]([01]+))(N)?$");
     private static final Pattern RATIO_PAT = Pattern.compile("^([-+]?[0-9]+)/([0-9]+)$");
-    private static final Pattern FLOAT_PAT = Pattern.compile("^([-+]?[0-9]+(\\.[0-9]*)?([eE][-+]?[0-9]+)?)(M)?$");
+    private static final Pattern FLOAT_PAT = Pattern.compile(
+            "^([-+]?[0-9]+(?:\\.[0-9]*(?:[eE][-+]?[0-9]+)?|[eE][-+]?[0-9]+))(M)?$|^([-+]?[0-9]+)(M)$");
 
     private final CharSource source;
     private int line = 1;
@@ -245,18 +246,27 @@ public final class Reader {
         return opts.get(Keyword.intern("eof"));
     }
 
-    public static List<Object> readAll(String s, String filename) {
-        Reader r = new Reader(s, filename);
-        List<Object> forms = new ArrayList<>();
-        while (true) {
-            Object form = r.readForm(false, EOF);
-            if (form == EOF) break;
-            if (form instanceof SpliceResult sr) {
-                forms.addAll(sr.items);
-            } else {
-                forms.add(form);
+    public void consumeForms(java.util.function.Consumer<Object> consumer) {
+        try {
+            while (true) {
+                Object form = readForm(false, EOF);
+                if (form == EOF) break;
+                if (form instanceof SpliceResult sr) {
+                    for (Object item : sr.items) {
+                        consumer.accept(item);
+                    }
+                } else {
+                    consumer.accept(form);
+                }
             }
+        } finally {
+            source.finish();
         }
+    }
+
+    public static List<Object> readAll(String s, String filename) {
+        List<Object> forms = new ArrayList<>();
+        new Reader(s, filename).consumeForms(forms::add);
         return forms;
     }
 
@@ -494,16 +504,16 @@ public final class Reader {
             throw readerError("Metadata must be Symbol, Keyword, String or Map");
         }
         Object target = readForm(true, null);
-        if (target instanceof IMeta im) {
-            PersistentHashMap existing = im.meta();
+        if (target instanceof IObj io) {
+            PersistentHashMap existing = io.meta();
             if (existing != null) {
                 for (ISeq s = metaMap.seq(); s != null; s = s.next()) {
                     PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
                     existing = existing.assoc(me.key, me.val);
                 }
-                return im.withMeta(existing);
+                return io.withMeta(existing);
             }
-            return im.withMeta(metaMap);
+            return io.withMeta(metaMap);
         }
         return target;
     }
@@ -841,10 +851,13 @@ public final class Reader {
         }
         m = FLOAT_PAT.matcher(s);
         if (m.matches()) {
-            if (m.group(4) != null) {
+            if (m.group(3) != null) {
+                return new BigDecimal(m.group(3));
+            }
+            if (m.group(2) != null) {
                 return new BigDecimal(m.group(1));
             }
-            return Double.parseDouble(s);
+            return Double.parseDouble(m.group(1));
         }
         m = RATIO_PAT.matcher(s);
         if (m.matches()) {

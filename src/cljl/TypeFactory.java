@@ -192,10 +192,10 @@ public final class TypeFactory {
             Map<Protocol, Map<Keyword, Fn>> protocolImpls,
             PersistentHashMap meta) {
         List<Class<?>> allIfaces = new ArrayList<>();
-        allIfaces.add(IMeta.class);
+        allIfaces.add(IObj.class);
         allIfaces.add(Protocol.Dispatchable.class);
         for (Class<?> c : interfaces) {
-            if (c != IMeta.class && c != Protocol.Dispatchable.class) {
+            if (c != IObj.class && c != IMeta.class && c != Protocol.Dispatchable.class) {
                 allIfaces.add(c);
             }
         }
@@ -236,6 +236,9 @@ public final class TypeFactory {
                 if ("equals".equals(mname) && method.getParameterCount() == 1) {
                     return proxy == args[0];
                 }
+                if (method.isDefault()) {
+                    return InvocationHandler.invokeDefault(proxy, method, args);
+                }
                 throw new UnsupportedOperationException("No implementation of " + mname + " in reify");
             }
         };
@@ -272,8 +275,18 @@ public final class TypeFactory {
             cw.emitProxyCtor(superInternal, ctor.getParameterTypes());
         }
 
-        // Override overridable methods
+        // Record final methods from superclass hierarchy so interfaces never override them
         Set<String> seen = new HashSet<>();
+        for (Class<?> cur = superClass; cur != null; cur = cur.getSuperclass()) {
+            for (Method m : cur.getDeclaredMethods()) {
+                int mod = m.getModifiers();
+                if (Modifier.isFinal(mod) && !Modifier.isStatic(mod) && !Modifier.isPrivate(mod)) {
+                    seen.add(m.getName() + methodDesc(m.getReturnType(), m.getParameterTypes()));
+                }
+            }
+        }
+
+        // Override overridable methods
         List<Method> toOverride = new ArrayList<>();
         for (Class<?> iface : interfaces) {
             for (Method m : iface.getMethods()) {
@@ -383,6 +396,7 @@ public final class TypeFactory {
         final Map<String, Integer> utf8Map = new HashMap<>();
         final Map<String, Integer> classMap = new HashMap<>();
         final Map<String, Integer> strMap = new HashMap<>();
+        final Map<Integer, Integer> intMap = new HashMap<>();
         final Map<String, Integer> natMap = new HashMap<>();
         final Map<String, Integer> refMap = new HashMap<>();
 
@@ -437,6 +451,17 @@ public final class TypeFactory {
                 cpBuf.write(8);
                 cpBuf.write((ui >>> 8) & 0xff);
                 cpBuf.write(ui & 0xff);
+                return cpCount++;
+            });
+        }
+
+        int addInteger(int v) {
+            return intMap.computeIfAbsent(v, k -> {
+                cpBuf.write(3);
+                cpBuf.write((k >>> 24) & 0xff);
+                cpBuf.write((k >>> 16) & 0xff);
+                cpBuf.write((k >>> 8) & 0xff);
+                cpBuf.write(k & 0xff);
                 return cpCount++;
             });
         }
@@ -815,24 +840,33 @@ public final class TypeFactory {
         void iconst(int v) {
             if (v == -1) code.write(0x02);
             else if (v >= 0 && v <= 5) code.write(0x03 + v);
-            else if (v >= -128 && v <= 127) { code.write(0x10); code.write(v & 0xff); }
-            else { code.write(0x11); code.write((v >>> 8) & 0xff); code.write(v & 0xff); }
+            else if (v >= Byte.MIN_VALUE && v <= Byte.MAX_VALUE) { code.write(0x10); code.write(v & 0xff); }
+            else if (v >= Short.MIN_VALUE && v <= Short.MAX_VALUE) { code.write(0x11); code.write((v >>> 8) & 0xff); code.write(v & 0xff); }
+            else {
+                int idx = cw.addInteger(v);
+                if (idx < 256) { code.write(0x12); code.write(idx); }
+                else { code.write(0x13); code.write((idx >>> 8) & 0xff); code.write(idx & 0xff); }
+            }
         }
         void aconstNull() { code.write(0x01); }
         void dup() { code.write(0x59); }
         void pop() { code.write(0x57); }
-        void aload(int slot) {
-            if (slot <= 3) code.write(0x2a + slot);
-            else { code.write(0x19); code.write(slot); }
+        private void emitVarOp(int baseOp4, int wideOp, int slot) {
+            if (baseOp4 >= 0 && slot <= 3) {
+                code.write(baseOp4 + slot);
+            } else if (slot <= 255) {
+                code.write(wideOp);
+                code.write(slot);
+            } else {
+                code.write(0xc4); // WIDE
+                code.write(wideOp);
+                code.write((slot >>> 8) & 0xff);
+                code.write(slot & 0xff);
+            }
         }
-        void iload(int slot) {
-            if (slot <= 3) code.write(0x1a + slot);
-            else { code.write(0x15); code.write(slot); }
-        }
-        void astore(int slot) {
-            if (slot <= 3) code.write(0x4b + slot);
-            else { code.write(0x3a); code.write(slot); }
-        }
+        void aload(int slot) { emitVarOp(0x2a, 0x19, slot); }
+        void iload(int slot) { emitVarOp(0x1a, 0x15, slot); }
+        void astore(int slot) { emitVarOp(0x4b, 0x3a, slot); }
         void aaload() { code.write(0x32); }
         void aastore() { code.write(0x53); }
         void anewarray(String internalName) {
@@ -887,9 +921,9 @@ public final class TypeFactory {
 
         void loadTyped(Class<?> t, int slot) {
             if (t == boolean.class || t == byte.class || t == short.class || t == char.class || t == int.class) iload(slot);
-            else if (t == long.class) { code.write(0x16); code.write(slot); }
-            else if (t == float.class) { code.write(0x17); code.write(slot); }
-            else if (t == double.class) { code.write(0x18); code.write(slot); }
+            else if (t == long.class) emitVarOp(0x1e, 0x16, slot);
+            else if (t == float.class) emitVarOp(0x22, 0x17, slot);
+            else if (t == double.class) emitVarOp(0x26, 0x18, slot);
             else aload(slot);
         }
 
@@ -921,8 +955,7 @@ public final class TypeFactory {
                 return;
             }
             if (retType == boolean.class) {
-                checkcast("java/lang/Boolean");
-                invokevirtual("java/lang/Boolean", "booleanValue", "()Z");
+                invokestatic("cljl/RT", "truthy", "(Ljava/lang/Object;)Z");
                 ireturn();
             } else if (retType == char.class) {
                 checkcast("java/lang/Character");
@@ -968,6 +1001,9 @@ public final class TypeFactory {
             byte[] b = code.toByteArray();
             for (int[] p : patchList) {
                 int rel = p[1] - p[0];
+                if (rel < Short.MIN_VALUE || rel > Short.MAX_VALUE) {
+                    throw new IllegalStateException("Bytecode branch offset overflow: " + rel);
+                }
                 b[p[0] + 1] = (byte) ((rel >>> 8) & 0xff);
                 b[p[0] + 2] = (byte) (rel & 0xff);
             }

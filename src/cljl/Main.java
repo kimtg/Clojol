@@ -72,13 +72,12 @@ public final class Main {
 
     private static void evalAndPrint(String src, String filename) {
         try {
-            List<Object> forms = Reader.readAll(src, filename);
-            for (Object form : forms) {
+            new Reader(src, filename).consumeForms(form -> {
                 Object res = Compiler.eval(form);
                 if (res != null) {
                     System.out.println(RT.printString(res, true));
                 }
-            }
+            });
         } catch (Throwable t) {
             printError(t);
             System.exit(1);
@@ -87,8 +86,7 @@ public final class Main {
 
     private static void runStdin() {
         try {
-            String src = new String(System.in.readAllBytes(), StandardCharsets.UTF_8);
-            Compiler.load(src, "<stdin>");
+            Compiler.load(new InputStreamReader(System.in, StandardCharsets.UTF_8), "<stdin>");
         } catch (Throwable t) {
             printError(t);
             System.exit(1);
@@ -149,14 +147,13 @@ public final class Main {
 
     private static void processReplBuffer(String code, Var v1, Var v2, Var v3, Var ve) {
         try {
-            List<Object> forms = Reader.readAll(code, "<repl>");
-            for (Object form : forms) {
+            new Reader(code, "<repl>").consumeForms(form -> {
                 Object res = Compiler.eval(form);
                 v3.bindRoot(v2.get());
                 v2.bindRoot(v1.get());
                 v1.bindRoot(res);
                 System.out.println(RT.printString(res, true));
-            }
+            });
         } catch (Throwable t) {
             ve.bindRoot(t);
             printError(t);

@@ -785,7 +785,7 @@ public final class StdLibMore {
                 Fn.of2("seq-make", (node, children) -> {
                     Object m = node instanceof IMeta im ? im.meta() : null;
                     Object s = children == null ? PersistentList.EMPTY : children;
-                    return m instanceof PersistentHashMap pm && s instanceof IMeta sm ? sm.withMeta(pm) : s;
+                    return m instanceof PersistentHashMap pm && s instanceof IObj sm ? sm.withMeta(pm) : s;
                 }),
                 root));
         ns.intern("seq-zip", seqZip);
@@ -1696,7 +1696,7 @@ public final class StdLibMore {
     // clojure.data.priority-map, int-map, avl & flatland.ordered.*
     // ========================================================================
 
-    private static final class PriorityMap extends Fn implements Associative, Map<Object, Object>, PersistentColl, IMeta, Reversible {
+    private static final class PriorityMap extends Fn implements Associative, Map<Object, Object>, PersistentColl, IObj, Reversible {
         final PersistentHashMap map;
         final PersistentTreeMap ordered; // priorityKey -> val, sorted by (priority, key)
         final Comparator<Object> priCmp;
@@ -1734,7 +1734,7 @@ public final class StdLibMore {
         @Override public Object invoke(Object key) { return map.valAt(key); }
         @Override public Object invoke(Object key, Object notFound) { return map.valAt(key, notFound); }
         @Override public PersistentHashMap meta() { return meta; }
-        @Override public IMeta withMeta(PersistentHashMap m) { return new PriorityMap(map, ordered, priCmp, m); }
+        @Override public IObj withMeta(PersistentHashMap m) { return new PriorityMap(map, ordered, priCmp, m); }
 
         @Override public PriorityMap assoc(Object k, Object pri) {
             PersistentHashMap m2 = map.assoc(k, pri);
@@ -1748,6 +1748,7 @@ public final class StdLibMore {
         @Override public Object cons(Object x) {
             if (x instanceof Map.Entry<?, ?> e) return assoc(e.getKey(), e.getValue());
             if (x instanceof PersistentVector v && v.cnt == 2) return assoc(v.nth(0), v.nth(1));
+            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return assoc(sv.nth(0), sv.nth(1));
             if (x instanceof Map<?, ?> m) {
                 PriorityMap res = this;
                 for (Map.Entry<?, ?> e : m.entrySet()) res = res.assoc(e.getKey(), e.getValue());
@@ -1826,7 +1827,7 @@ public final class StdLibMore {
         @Override public String toString() { return RT.printString(this); }
     }
 
-    private static final class OrderedMap extends Fn implements Associative, Map<Object, Object>, PersistentColl, IMeta {
+    private static final class OrderedMap extends Fn implements Associative, Map<Object, Object>, PersistentColl, IObj {
         final PersistentHashMap map;
         final PersistentVector order;
         final PersistentHashMap meta;
@@ -1849,7 +1850,7 @@ public final class StdLibMore {
         @Override public Object invoke(Object key) { return map.valAt(key); }
         @Override public Object invoke(Object key, Object notFound) { return map.valAt(key, notFound); }
         @Override public PersistentHashMap meta() { return meta; }
-        @Override public IMeta withMeta(PersistentHashMap m) { return new OrderedMap(map, order, m); }
+        @Override public IObj withMeta(PersistentHashMap m) { return new OrderedMap(map, order, m); }
 
         @Override public OrderedMap assoc(Object k, Object v) {
             boolean existed = map.containsKey(k);
@@ -1858,6 +1859,7 @@ public final class StdLibMore {
         @Override public Object cons(Object x) {
             if (x instanceof Map.Entry<?, ?> e) return assoc(e.getKey(), e.getValue());
             if (x instanceof PersistentVector v && v.cnt == 2) return assoc(v.nth(0), v.nth(1));
+            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return assoc(sv.nth(0), sv.nth(1));
             if (x instanceof Map<?, ?> m) {
                 OrderedMap res = this;
                 for (Map.Entry<?, ?> e : m.entrySet()) res = res.assoc(e.getKey(), e.getValue());
@@ -1912,7 +1914,7 @@ public final class StdLibMore {
         @Override public String toString() { return RT.printString(this); }
     }
 
-    private static final class OrderedSet extends Fn implements Set<Object>, Seqable, Counted, PersistentColl, IMeta {
+    private static final class OrderedSet extends Fn implements Set<Object>, Seqable, Counted, PersistentColl, IObj {
         final PersistentHashSet set;
         final PersistentVector order;
         final PersistentHashMap meta;
@@ -1931,7 +1933,7 @@ public final class StdLibMore {
         @Override public Object invoke(Object key) { return set.contains(key) ? key : null; }
         @Override public Object invoke(Object key, Object notFound) { return set.contains(key) ? key : notFound; }
         @Override public PersistentHashMap meta() { return meta; }
-        @Override public IMeta withMeta(PersistentHashMap m) { return new OrderedSet(set, order, m); }
+        @Override public IObj withMeta(PersistentHashMap m) { return new OrderedSet(set, order, m); }
 
         @Override public Object cons(Object x) {
             if (set.contains(x)) return this;
@@ -2130,10 +2132,18 @@ public final class StdLibMore {
         final Object val;
         final CompletableFuture<Boolean> done = new CompletableFuture<>();
         final Fn callback;
-        PutWaiter(Object val, Fn callback) { this.val = val; this.callback = callback; }
+        final Runnable onSelect;
+        volatile boolean cancelled = false;
+        PutWaiter(Object val, Fn callback) { this(val, callback, null); }
+        PutWaiter(Object val, Fn callback, Runnable onSelect) {
+            this.val = val;
+            this.callback = callback;
+            this.onSelect = onSelect;
+        }
         void complete(boolean ok) {
             done.complete(ok);
             if (callback != null) Thread.startVirtualThread(() -> callback.invoke(ok));
+            if (onSelect != null) onSelect.run();
         }
     }
 
@@ -2141,7 +2151,7 @@ public final class StdLibMore {
         final CompletableFuture<Object> done = new CompletableFuture<>();
         final Fn callback;
         final Runnable onSelect;
-        boolean cancelled = false;
+        volatile boolean cancelled = false;
         TakeWaiter(Fn callback, Runnable onSelect) { this.callback = callback; this.onSelect = onSelect; }
         void complete(Object val) {
             done.complete(val);
@@ -2192,7 +2202,8 @@ public final class StdLibMore {
                 tw.complete(val);
             }
             while (!puts.isEmpty()) {
-                puts.pollFirst().complete(false);
+                PutWaiter pw = puts.pollFirst();
+                if (!pw.cancelled) pw.complete(false);
             }
         }
 
@@ -2270,16 +2281,19 @@ public final class StdLibMore {
         synchronized Object poll() {
             if (buf != null && buf.count() > 0) {
                 Object val = buf.remove();
-                if (!puts.isEmpty()) {
+                while (!puts.isEmpty()) {
                     PutWaiter pw = puts.pollFirst();
+                    if (pw.cancelled) continue;
                     if (xformStep != null) xformStep.invoke(null, pw.val);
                     else buf.add(pw.val);
                     pw.complete(true);
+                    break;
                 }
                 return val;
             }
-            if (!puts.isEmpty()) {
+            while (!puts.isEmpty()) {
                 PutWaiter pw = puts.pollFirst();
+                if (pw.cancelled) continue;
                 pw.complete(true);
                 return pw.val;
             }
@@ -2316,6 +2330,16 @@ public final class StdLibMore {
             takes.addLast(tw);
             return false;
         }
+
+        synchronized boolean registerSelectPut(PutWaiter pw) {
+            if (closed) {
+                pw.complete(false);
+                return true;
+            }
+            if (putAsync(pw.val, pw.callback, pw)) return true;
+            puts.addLast(pw);
+            return false;
+        }
     }
 
     private static synchronized void initCoreAsync() {
@@ -2350,8 +2374,14 @@ public final class StdLibMore {
         ns.intern("offer!", Fn.of2("offer!", (ch, val) -> ((Channel) ch).offer(val)));
         ns.intern("poll!", Fn.of1("poll!", ch -> ((Channel) ch).poll()));
         ns.intern("put!", Fn.of23("put!",
-                (ch, val) -> { ((Channel) ch).put(val, null, true); return Boolean.TRUE; },
-                (ch, val, fn) -> { ((Channel) ch).put(val, (Fn) fn, true); return Boolean.TRUE; }));
+                (ch, val) -> {
+                    CompletableFuture<Boolean> fut = ((Channel) ch).put(val, null, true);
+                    return fut.isDone() ? fut.getNow(true) : Boolean.TRUE;
+                },
+                (ch, val, fn) -> {
+                    CompletableFuture<Boolean> fut = ((Channel) ch).put(val, (Fn) fn, true);
+                    return fut.isDone() ? fut.getNow(true) : Boolean.TRUE;
+                }));
         ns.intern("take!", Fn.of2("take!", (ch, fn) -> { ((Channel) ch).take((Fn) fn); return null; }));
 
         Fn putBlock = Fn.of2(">!!", (ch, val) -> {
@@ -2376,11 +2406,14 @@ public final class StdLibMore {
         Fn goCall = Fn.of1("go-call", f -> {
             Channel res = new Channel(new FixedBuffer(1), null, null);
             Fn fn = (Fn) f;
+            Map<Var, Object> bindings = Var.cloneThreadBindings();
             Thread.startVirtualThread(() -> {
+                if (!bindings.isEmpty()) Var.pushThreadBindings(bindings);
                 try {
                     Object v = fn.invoke();
                     if (v != null) res.put(v, null, true);
                 } finally {
+                    if (!bindings.isEmpty()) Var.popThreadBindings();
                     res.close();
                 }
             });
@@ -2404,30 +2437,75 @@ public final class StdLibMore {
             return PersistentList.createFromArray(Symbol.intern("clojure.core.async", "thread-call"), PersistentList.create(fnForm));
         }));
 
-        Fn altsBlock = Fn.of12("alts!!",
-                ports -> altsImpl(ports, PersistentHashMap.EMPTY),
-                (ports, opts) -> altsImpl(ports, opts));
+        Fn altsBlock = Fn.ofVarargs("alts!!", args -> {
+            if (args.length == 0) throw new IllegalArgumentException("alts!! requires ports");
+            Object ports = args[0];
+            Map<Object, Object> opts = new HashMap<>();
+            if (args.length == 2 && args[1] instanceof Map<?, ?> m) {
+                opts.putAll(m);
+            } else {
+                for (int i = 1; i + 1 < args.length; i += 2) {
+                    opts.put(args[i], args[i + 1]);
+                }
+            }
+            return altsImpl(ports, opts);
+        });
         ns.intern("alts!!", altsBlock);
         ns.intern("alts!", altsBlock);
 
         LOADED.add("clojure.core.async");
     }
 
-    private static Object altsImpl(Object portsObj, Object opts) {
-        List<Object> ports = toList(portsObj);
+    private static Object altsImpl(Object portsObj, Map<?, ?> opts) {
+        List<Object> ports = new ArrayList<>(toList(portsObj));
+        boolean priority = opts != null && RT.truthy(opts.get(Keyword.intern("priority")));
+        if (!priority && ports.size() > 1) {
+            Collections.shuffle(ports);
+        }
+        Keyword defaultKw = Keyword.intern("default");
+        boolean hasDefault = opts != null && opts.containsKey(defaultKw);
+        Object defaultVal = hasDefault ? opts.get(defaultKw) : null;
+
         CompletableFuture<PersistentVector> winner = new CompletableFuture<>();
-        List<TakeWaiter> registered = new ArrayList<>();
+        List<TakeWaiter> takeWaiters = new ArrayList<>();
+        List<PutWaiter> putWaiters = new ArrayList<>();
+        Runnable cancelAll = () -> {
+            for (TakeWaiter tw : takeWaiters) tw.cancelled = true;
+            for (PutWaiter pw : putWaiters) pw.cancelled = true;
+        };
+
         for (Object p : ports) {
             if (p instanceof Channel ch) {
                 TakeWaiter tw = new TakeWaiter(null, null);
-                registered.add(tw);
+                takeWaiters.add(tw);
                 tw.done.thenAccept(v -> {
                     if (winner.complete(PersistentVector.createOwning(v, ch))) {
-                        for (TakeWaiter other : registered) if (other != tw) other.cancelled = true;
+                        for (TakeWaiter o : takeWaiters) if (o != tw) o.cancelled = true;
+                        for (PutWaiter o : putWaiters) o.cancelled = true;
                     }
                 });
                 ch.registerSelectTake(tw);
                 if (winner.isDone()) break;
+            } else if (RT.count(p) == 2) {
+                Object p0 = RT.nth(p, 0);
+                Object p1 = RT.nth(p, 1);
+                if (p0 instanceof Channel ch) {
+                    PutWaiter pw = new PutWaiter(p1, null);
+                    putWaiters.add(pw);
+                    pw.done.thenAccept(ok -> {
+                        if (winner.complete(PersistentVector.createOwning(ok, ch))) {
+                            for (TakeWaiter o : takeWaiters) o.cancelled = true;
+                            for (PutWaiter o : putWaiters) if (o != pw) o.cancelled = true;
+                        }
+                    });
+                    ch.registerSelectPut(pw);
+                    if (winner.isDone()) break;
+                }
+            }
+        }
+        if (!winner.isDone() && hasDefault) {
+            if (winner.complete(PersistentVector.createOwning(defaultVal, defaultKw))) {
+                cancelAll.run();
             }
         }
         try {

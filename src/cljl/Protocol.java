@@ -19,8 +19,14 @@ public final class Protocol {
     public final ConcurrentHashMap<Keyword, Fn> methodDefaults = new ConcurrentHashMap<>();
     // Target Class<?> -> (methodName Keyword -> Fn)
     private final ConcurrentHashMap<Class<?>, ConcurrentHashMap<Keyword, Fn>> impls = new ConcurrentHashMap<>();
+    // Cached resolved dispatch: Target Class<?> -> (methodName Keyword -> Fn or MISSING_IMPL)
+    private final ConcurrentHashMap<Class<?>, ConcurrentHashMap<Keyword, Fn>> methodCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Class<?>, Boolean> satisfiesCache = new ConcurrentHashMap<>();
     // Special key for nil dispatch
     private static final Class<?> NIL_CLASS = Void.class;
+    private static final Fn MISSING_IMPL = Fn.ofVarargs("protocol-missing", args -> {
+        throw new IllegalStateException("Protocol missing sentinel invoked");
+    });
 
     public Protocol(Symbol name, String doc, Class<?> onInterface) {
         this.name = name;
@@ -32,20 +38,23 @@ public final class Protocol {
         Class<?> key = (type == null) ? NIL_CLASS : type;
         ConcurrentHashMap<Keyword, Fn> map = impls.computeIfAbsent(key, k -> new ConcurrentHashMap<>());
         map.putAll(methods);
+        methodCache.clear();
+        satisfiesCache.clear();
     }
 
     public boolean satisfies(Object x) {
         if (x == null) return impls.containsKey(NIL_CLASS);
         if (x instanceof Dispatchable d && d.__satisfies(this)) return true;
-        Class<?> c = x.getClass();
-        if (onInterface != null && onInterface.isAssignableFrom(c)) return true;
-        return findImplMap(c) != null;
+        return extendsType(x.getClass());
     }
 
     public boolean extendsType(Class<?> c) {
         if (c == null) return impls.containsKey(NIL_CLASS);
-        if (onInterface != null && onInterface.isAssignableFrom(c)) return true;
-        return findImplMap(c) != null;
+        Boolean cached = satisfiesCache.get(c);
+        if (cached != null) return cached;
+        boolean res = (onInterface != null && onInterface.isAssignableFrom(c)) || findImplMap(c) != null;
+        satisfiesCache.putIfAbsent(c, res);
+        return res;
     }
 
     public Collection<Class<?>> extenders() {
@@ -60,8 +69,8 @@ public final class Protocol {
         if (c == null) return impls.get(NIL_CLASS);
         ConcurrentHashMap<Keyword, Fn> direct = impls.get(c);
         if (direct != null) return direct;
-        // Walk superclass chain, then interfaces, then Object
-        for (Class<?> sup = c.getSuperclass(); sup != null; sup = sup.getSuperclass()) {
+        // Walk superclass chain (excluding Object), then interfaces, then Object
+        for (Class<?> sup = c.getSuperclass(); sup != null && sup != Object.class; sup = sup.getSuperclass()) {
             ConcurrentHashMap<Keyword, Fn> m = impls.get(sup);
             if (m != null) return m;
         }
@@ -91,24 +100,54 @@ public final class Protocol {
         return result;
     }
 
+    private Fn resolveUncached(Class<?> cls, Keyword methodKey) {
+        if (cls == NIL_CLASS) {
+            ConcurrentHashMap<Keyword, Fn> nilMap = impls.get(NIL_CLASS);
+            if (nilMap != null) {
+                Fn f = nilMap.get(methodKey);
+                if (f != null) return f;
+            }
+            return methodDefaults.get(methodKey);
+        }
+        for (Class<?> cur = cls; cur != null && cur != Object.class; cur = cur.getSuperclass()) {
+            ConcurrentHashMap<Keyword, Fn> m = impls.get(cur);
+            if (m != null) {
+                Fn f = m.get(methodKey);
+                if (f != null) return f;
+            }
+        }
+        for (Class<?> iface : collectInterfaces(cls)) {
+            ConcurrentHashMap<Keyword, Fn> m = impls.get(iface);
+            if (m != null) {
+                Fn f = m.get(methodKey);
+                if (f != null) return f;
+            }
+        }
+        ConcurrentHashMap<Keyword, Fn> objMap = impls.get(Object.class);
+        if (objMap != null) {
+            Fn f = objMap.get(methodKey);
+            if (f != null) return f;
+        }
+        return methodDefaults.get(methodKey);
+    }
+
     public Fn resolveMethod(Keyword methodKey, Object target) {
         if (target instanceof Dispatchable d) {
             Fn df = d.__protocolFn(this, methodKey);
             if (df != null) return df;
         }
-        Class<?> cls = (target == null) ? null : target.getClass();
-        ConcurrentHashMap<Keyword, Fn> m = findImplMap(cls);
-        if (m != null) {
-            Fn f = m.get(methodKey);
-            if (f != null) return f;
+        Class<?> cls = (target == null) ? NIL_CLASS : target.getClass();
+        ConcurrentHashMap<Keyword, Fn> cmap = methodCache.computeIfAbsent(cls, k -> new ConcurrentHashMap<>());
+        Fn f = cmap.get(methodKey);
+        if (f == null) {
+            Fn resolved = resolveUncached(cls, methodKey);
+            f = (resolved != null) ? resolved : MISSING_IMPL;
+            cmap.putIfAbsent(methodKey, f);
         }
-        if (cls != null && impls.containsKey(Object.class)) {
-            Fn f = impls.get(Object.class).get(methodKey);
-            if (f != null) return f;
-        }
+        if (f != MISSING_IMPL) return f;
         throw new IllegalArgumentException(
                 "No implementation of method: " + methodKey + " of protocol: " + name
-                        + " found for class: " + (cls == null ? "nil" : cls.getName()));
+                        + " found for class: " + (cls == NIL_CLASS ? "nil" : cls.getName()));
     }
 
     @Override

@@ -3,12 +3,13 @@ package cljl.lang;
 import cljl.Fn;
 import cljl.RT;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 32-way Hash Array Mapped Trie (HAMT) persistent map with MapEntry and TransientHashMap.
  */
 public final class PersistentHashMap extends Fn
-        implements Associative, IMeta, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
+        implements Associative, IObj, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
 
     private static final Object NOT_FOUND = new Object();
     public static final PersistentHashMap EMPTY = new PersistentHashMap(null, 0, null, false, null);
@@ -19,6 +20,7 @@ public final class PersistentHashMap extends Fn
     public final Object nullValue;
     private final PersistentHashMap meta;
     private int hash;
+    private boolean hasHash;
 
     public PersistentHashMap(PersistentHashMap meta, int count, INode root, boolean hasNull, Object nullValue) {
         this.meta = meta;
@@ -126,7 +128,7 @@ public final class PersistentHashMap extends Fn
     @Override
     public ISeq seq() {
         ISeq s = root != null ? root.nodeSeq() : null;
-        return hasNull ? new PersistentList(null, new MapEntry(null, nullValue), s, count) : s;
+        return hasNull ? new Cons(new MapEntry(null, nullValue), s) : s;
     }
 
     public TransientHashMap asTransient() {
@@ -151,15 +153,19 @@ public final class PersistentHashMap extends Fn
         if (this == obj) return true;
         if (!(obj instanceof Map<?, ?> m)) return false;
         if (count != m.size()) return false;
-        for (ISeq s = seq(); s != null; s = s.next()) {
-            Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
-            Object k = e.getKey();
-            if (m instanceof PersistentHashMap phm) {
-                Object v = phm.valAt(k, NOT_FOUND);
-                if (v == NOT_FOUND || !RT.equiv(e.getValue(), v)) return false;
-            } else {
-                if (!m.containsKey(k) || !RT.equiv(e.getValue(), m.get(k))) return false;
+        try {
+            for (ISeq s = seq(); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                Object k = e.getKey();
+                if (m instanceof PersistentHashMap phm) {
+                    Object v = phm.valAt(k, NOT_FOUND);
+                    if (v == NOT_FOUND || !RT.equiv(e.getValue(), v)) return false;
+                } else {
+                    if (!m.containsKey(k) || !RT.equiv(e.getValue(), m.get(k))) return false;
+                }
             }
+        } catch (ClassCastException e) {
+            return false;
         }
         return true;
     }
@@ -167,12 +173,13 @@ public final class PersistentHashMap extends Fn
     @Override
     public int hashCode() {
         int h = this.hash;
-        if (h == 0) {
+        if (!hasHash) {
             for (ISeq s = seq(); s != null; s = s.next()) {
                 Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
                 h += (RT.hash(e.getKey()) ^ RT.hash(e.getValue()));
             }
             this.hash = h;
+            this.hasHash = true;
         }
         return h;
     }
@@ -241,6 +248,8 @@ public final class PersistentHashMap extends Fn
     public interface INode {
         INode assoc(int shift, int hash, Object key, Object val, Box addedLeaf);
         INode without(int shift, int hash, Object key);
+        INode assoc(AtomicReference<Thread> edit, int shift, int hash, Object key, Object val, Box addedLeaf);
+        INode without(AtomicReference<Thread> edit, int shift, int hash, Object key, Box removedLeaf);
         Object find(int shift, int hash, Object key, Object notFound);
         ISeq nodeSeq();
         Object kvreduce(Fn f, Object init);
@@ -255,18 +264,29 @@ public final class PersistentHashMap extends Fn
     }
 
     static final class BitmapIndexedNode implements INode {
-        static final BitmapIndexedNode EMPTY = new BitmapIndexedNode(0, new Object[0]);
+        static final BitmapIndexedNode EMPTY = new BitmapIndexedNode(null, 0, new Object[0]);
 
-        final int bitmap;
-        final Object[] array;
+        final AtomicReference<Thread> edit;
+        int bitmap;
+        Object[] array;
 
         BitmapIndexedNode(int bitmap, Object[] array) {
+            this(null, bitmap, array);
+        }
+
+        BitmapIndexedNode(AtomicReference<Thread> edit, int bitmap, Object[] array) {
+            this.edit = edit;
             this.bitmap = bitmap;
             this.array = array;
         }
 
         int index(int bit) {
             return Integer.bitCount(bitmap & (bit - 1));
+        }
+
+        BitmapIndexedNode ensureEditable(AtomicReference<Thread> edit) {
+            if (this.edit == edit) return this;
+            return new BitmapIndexedNode(edit, bitmap, array.clone());
         }
 
         @Override
@@ -307,6 +327,46 @@ public final class PersistentHashMap extends Fn
         }
 
         @Override
+        public INode assoc(AtomicReference<Thread> edit, int shift, int hash, Object key, Object val, Box addedLeaf) {
+            int bit = bitpos(hash, shift);
+            int idx = index(bit);
+            if ((bitmap & bit) != 0) {
+                Object keyOrNull = array[2 * idx];
+                Object valOrNode = array[2 * idx + 1];
+                if (keyOrNull == null) {
+                    INode n = ((INode) valOrNode).assoc(edit, shift + 5, hash, key, val, addedLeaf);
+                    if (n == valOrNode) return this;
+                    BitmapIndexedNode editable = ensureEditable(edit);
+                    editable.array[2 * idx + 1] = n;
+                    return editable;
+                }
+                if (RT.equiv(key, keyOrNull)) {
+                    if (val == valOrNode) return this;
+                    BitmapIndexedNode editable = ensureEditable(edit);
+                    editable.array[2 * idx + 1] = val;
+                    return editable;
+                }
+                addedLeaf.val = addedLeaf;
+                BitmapIndexedNode editable = ensureEditable(edit);
+                editable.array[2 * idx] = null;
+                editable.array[2 * idx + 1] = createNode(edit, shift + 5, keyOrNull, valOrNode, hash, key, val);
+                return editable;
+            } else {
+                int n = Integer.bitCount(bitmap);
+                BitmapIndexedNode editable = ensureEditable(edit);
+                Object[] newArray = new Object[2 * (n + 1)];
+                System.arraycopy(editable.array, 0, newArray, 0, 2 * idx);
+                newArray[2 * idx] = key;
+                addedLeaf.val = addedLeaf;
+                newArray[2 * idx + 1] = val;
+                System.arraycopy(editable.array, 2 * idx, newArray, 2 * (idx + 1), 2 * (n - idx));
+                editable.array = newArray;
+                editable.bitmap |= bit;
+                return editable;
+            }
+        }
+
+        @Override
         public INode without(int shift, int hash, Object key) {
             int bit = bitpos(hash, shift);
             if ((bitmap & bit) == 0) return this;
@@ -333,6 +393,43 @@ public final class PersistentHashMap extends Fn
                 System.arraycopy(array, 0, newArray, 0, 2 * idx);
                 System.arraycopy(array, 2 * (idx + 1), newArray, 2 * idx, array.length - 2 * (idx + 1));
                 return new BitmapIndexedNode(bitmap ^ bit, newArray);
+            }
+            return this;
+        }
+
+        @Override
+        public INode without(AtomicReference<Thread> edit, int shift, int hash, Object key, Box removedLeaf) {
+            int bit = bitpos(hash, shift);
+            if ((bitmap & bit) == 0) return this;
+            int idx = index(bit);
+            Object keyOrNull = array[2 * idx];
+            Object valOrNode = array[2 * idx + 1];
+            if (keyOrNull == null) {
+                INode n = ((INode) valOrNode).without(edit, shift + 5, hash, key, removedLeaf);
+                if (n == valOrNode) return this;
+                BitmapIndexedNode editable = ensureEditable(edit);
+                if (n != null) {
+                    editable.array[2 * idx + 1] = n;
+                    return editable;
+                }
+                if (editable.bitmap == bit) return null;
+                Object[] newArray = new Object[editable.array.length - 2];
+                System.arraycopy(editable.array, 0, newArray, 0, 2 * idx);
+                System.arraycopy(editable.array, 2 * (idx + 1), newArray, 2 * idx, editable.array.length - 2 * (idx + 1));
+                editable.bitmap ^= bit;
+                editable.array = newArray;
+                return editable;
+            }
+            if (RT.equiv(key, keyOrNull)) {
+                removedLeaf.val = removedLeaf;
+                if (bitmap == bit) return null;
+                BitmapIndexedNode editable = ensureEditable(edit);
+                Object[] newArray = new Object[editable.array.length - 2];
+                System.arraycopy(editable.array, 0, newArray, 0, 2 * idx);
+                System.arraycopy(editable.array, 2 * (idx + 1), newArray, 2 * idx, editable.array.length - 2 * (idx + 1));
+                editable.bitmap ^= bit;
+                editable.array = newArray;
+                return editable;
             }
             return this;
         }
@@ -377,7 +474,7 @@ public final class PersistentHashMap extends Fn
     static INode createNode(int shift, Object key1, Object val1, int key2hash, Object key2, Object val2) {
         int key1hash = RT.hash(key1);
         if (key1hash == key2hash) {
-            return new HashCollisionNode(key1hash, 2, new Object[]{key1, val1, key2, val2});
+            return new HashCollisionNode(null, key1hash, 2, new Object[]{key1, val1, key2, val2});
         }
         Box addedLeaf = new Box(null);
         return BitmapIndexedNode.EMPTY
@@ -385,15 +482,37 @@ public final class PersistentHashMap extends Fn
                 .assoc(shift, key2hash, key2, val2, addedLeaf);
     }
 
+    static INode createNode(AtomicReference<Thread> edit, int shift, Object key1, Object val1, int key2hash, Object key2, Object val2) {
+        int key1hash = RT.hash(key1);
+        if (key1hash == key2hash) {
+            return new HashCollisionNode(edit, key1hash, 2, new Object[]{key1, val1, key2, val2});
+        }
+        Box addedLeaf = new Box(null);
+        return BitmapIndexedNode.EMPTY
+                .assoc(edit, shift, key1hash, key1, val1, addedLeaf)
+                .assoc(edit, shift, key2hash, key2, val2, addedLeaf);
+    }
+
     static final class HashCollisionNode implements INode {
+        final AtomicReference<Thread> edit;
         final int hash;
-        final int count;
-        final Object[] array;
+        int count;
+        Object[] array;
 
         HashCollisionNode(int hash, int count, Object[] array) {
+            this(null, hash, count, array);
+        }
+
+        HashCollisionNode(AtomicReference<Thread> edit, int hash, int count, Object[] array) {
+            this.edit = edit;
             this.hash = hash;
             this.count = count;
             this.array = array;
+        }
+
+        HashCollisionNode ensureEditable(AtomicReference<Thread> edit) {
+            if (this.edit == edit) return this;
+            return new HashCollisionNode(edit, hash, count, array.clone());
         }
 
         int findIndex(Object key) {
@@ -425,6 +544,30 @@ public final class PersistentHashMap extends Fn
         }
 
         @Override
+        public INode assoc(AtomicReference<Thread> edit, int shift, int hash, Object key, Object val, Box addedLeaf) {
+            if (hash == this.hash) {
+                int idx = findIndex(key);
+                if (idx != -1) {
+                    if (array[idx + 1] == val) return this;
+                    HashCollisionNode editable = ensureEditable(edit);
+                    editable.array[idx + 1] = val;
+                    return editable;
+                }
+                HashCollisionNode editable = ensureEditable(edit);
+                Object[] newArray = new Object[2 * (editable.count + 1)];
+                System.arraycopy(editable.array, 0, newArray, 0, 2 * editable.count);
+                newArray[2 * editable.count] = key;
+                newArray[2 * editable.count + 1] = val;
+                editable.array = newArray;
+                editable.count++;
+                addedLeaf.val = addedLeaf;
+                return editable;
+            }
+            return new BitmapIndexedNode(edit, bitpos(this.hash, shift), new Object[]{null, this})
+                    .assoc(edit, shift, hash, key, val, addedLeaf);
+        }
+
+        @Override
         public INode without(int shift, int hash, Object key) {
             int idx = findIndex(key);
             if (idx == -1) return this;
@@ -433,6 +576,21 @@ public final class PersistentHashMap extends Fn
             System.arraycopy(array, 0, newArray, 0, idx);
             System.arraycopy(array, idx + 2, newArray, idx, 2 * count - (idx + 2));
             return new HashCollisionNode(hash, count - 1, newArray);
+        }
+
+        @Override
+        public INode without(AtomicReference<Thread> edit, int shift, int hash, Object key, Box removedLeaf) {
+            int idx = findIndex(key);
+            if (idx == -1) return this;
+            removedLeaf.val = removedLeaf;
+            if (count == 1) return null;
+            HashCollisionNode editable = ensureEditable(edit);
+            Object[] newArray = new Object[2 * (editable.count - 1)];
+            System.arraycopy(editable.array, 0, newArray, 0, idx);
+            System.arraycopy(editable.array, idx + 2, newArray, idx, 2 * editable.count - (idx + 2));
+            editable.array = newArray;
+            editable.count--;
+            return editable;
         }
 
         @Override
@@ -506,13 +664,24 @@ public final class PersistentHashMap extends Fn
     }
 
     public static final class MapEntry extends Fn
-            implements Map.Entry<Object, Object>, Seqable, Counted, List<Object>, RandomAccess, Comparable<Object> {
+            implements IObj, Map.Entry<Object, Object>, Seqable, Counted, List<Object>, RandomAccess, Comparable<Object> {
         public final Object key;
         public final Object val;
+        private final PersistentHashMap meta;
 
         public MapEntry(Object key, Object val) {
+            this(null, key, val);
+        }
+
+        public MapEntry(PersistentHashMap meta, Object key, Object val) {
+            this.meta = meta;
             this.key = key;
             this.val = val;
+        }
+
+        @Override public PersistentHashMap meta() { return meta; }
+        @Override public MapEntry withMeta(PersistentHashMap m) {
+            return m == meta ? this : new MapEntry(m, key, val);
         }
 
         @Override public Object getKey() { return key; }
@@ -591,38 +760,73 @@ public final class PersistentHashMap extends Fn
     }
 
     public static final class TransientHashMap extends Fn implements Counted {
-        private PersistentHashMap map;
-        private boolean editable = true;
+        private final AtomicReference<Thread> edit;
+        private INode root;
+        private int count;
+        private boolean hasNull;
+        private Object nullValue;
+        private final Box leafFlag = new Box(null);
 
         TransientHashMap(PersistentHashMap map) {
-            this.map = map;
+            this.edit = new AtomicReference<>(Thread.currentThread());
+            this.root = map.root;
+            this.count = map.count;
+            this.hasNull = map.hasNull;
+            this.nullValue = map.nullValue;
         }
 
         private void ensureEditable() {
-            if (!editable) throw new IllegalAccessError("Transient used after persistent! call");
+            Thread owner = edit.get();
+            if (owner == null) throw new IllegalAccessError("Transient used after persistent! call");
+            if (owner != Thread.currentThread()) throw new IllegalAccessError("Transient used by non-owner thread");
         }
 
         public TransientHashMap assoc(Object key, Object val) {
             ensureEditable();
-            map = map.assoc(key, val);
+            if (key == null) {
+                if (nullValue != val) nullValue = val;
+                if (!hasNull) {
+                    count++;
+                    hasNull = true;
+                }
+                return this;
+            }
+            leafFlag.val = null;
+            INode n = (root == null ? BitmapIndexedNode.EMPTY : root)
+                    .assoc(edit, 0, RT.hash(key), key, val, leafFlag);
+            if (n != root) root = n;
+            if (leafFlag.val != null) count++;
             return this;
         }
 
         public TransientHashMap without(Object key) {
             ensureEditable();
-            map = map.without(key);
+            if (key == null) {
+                if (!hasNull) return this;
+                hasNull = false;
+                nullValue = null;
+                count--;
+                return this;
+            }
+            if (root == null) return this;
+            leafFlag.val = null;
+            INode n = root.without(edit, 0, RT.hash(key), key, leafFlag);
+            if (n != root) root = n;
+            if (leafFlag.val != null) count--;
             return this;
         }
 
         public Object valAt(Object key, Object notFound) {
             ensureEditable();
-            return map.valAt(key, notFound);
+            if (key == null) return hasNull ? nullValue : notFound;
+            if (root == null) return notFound;
+            return root.find(0, RT.hash(key), key, notFound);
         }
 
         @Override
         public int count() {
             ensureEditable();
-            return map.count();
+            return count;
         }
 
         @Override
@@ -637,8 +841,8 @@ public final class PersistentHashMap extends Fn
 
         public PersistentHashMap persistent() {
             ensureEditable();
-            editable = false;
-            return map;
+            edit.set(null);
+            return new PersistentHashMap(null, count, root, hasNull, nullValue);
         }
     }
 }
