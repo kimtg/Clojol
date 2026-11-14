@@ -13,6 +13,20 @@ Standard Clojure on the JVM parses and compiles thousands of lines of `clojure/c
 - **Virtual Thread Concurrency, Agents & STM**: `future`, `pmap`, `pcalls`, `pvalues`, and `clojure.core.async` run on Java Virtual Threads alongside asynchronous `agent` queues and Software Transactional Memory (`ref` / `dosync`).
 - **Runtime JVM Class Generation**: `defprotocol`, `defrecord`, `deftype`, `reify`, `definterface`, `gen-interface`, and `proxy` generate real JVM classes and interfaces dynamically (`TypeFactory.java`).
 
+## Performance (`fib(40)` vs. Official Clojure)
+
+Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measured on OpenJDK 21.0.13 (Temurin, Linux x86_64) comparing **ClojureLite** (`./cljl.sh test/fib_bench.clj`, AppCDS + Tier-1 `BytecodeJIT`) against **Clojure 1.12.0** (`clojure.main test/fib_bench.clj`):
+
+| Metric | ClojureLite (`cljl`) | Clojure 1.12.0 | Speedup |
+| :--- | :---: | :---: | :---: |
+| `fib(40)` Run 1 (first call) | **602.8 ms** | 738.5 ms | 1.23x faster |
+| `fib(40)` Run 2 (warm) | **578.1 ms** | 618.2 ms | 1.07x faster |
+| `fib(40)` Run 3 (warm) | **579.4 ms** | 634.0 ms | 1.09x faster |
+| Total wall time (3 runs + JVM startup) | **1.99 s** | 3.03 s | 1.52x faster |
+| Cold startup + eval (`-e "(+ 1 2)"`) | **0.11 s** | 0.54 s | 4.9x faster |
+
+With Tier-1 JVM bytecode compilation (`BytecodeJIT.java`) and direct unboxed numeric fast paths, ClojureLite slightly beats official Clojure even on compute-bound recursive calls while cutting total wall-clock execution time by ~34% thanks to ~5x faster cold startup.
+
 ## Requirements
 
 - **JDK 21 or newer** (`javac`, `java`, `jar` on `PATH`) — tested on OpenJDK 25.0.4.1.
