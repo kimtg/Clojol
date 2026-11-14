@@ -18,6 +18,10 @@ public final class Interop {
 
     private Interop() {}
 
+    public static void registerClass(String name, Class<?> cls) {
+        CLASS_CACHE.put(name, cls);
+    }
+
     public static Class<?> resolveClass(Namespace ns, String name) {
         if (ns != null) {
             Object mapped = ns.getMapping(Symbol.intern(name));
@@ -47,6 +51,25 @@ public final class Interop {
             case "bytes" -> byte[].class;
             case "chars" -> char[].class;
             case "booleans" -> boolean[].class;
+            case "floats" -> float[].class;
+            case "shorts" -> short[].class;
+            case "clojure.lang.IDeref" -> cljl.lang.IDeref.class;
+            case "clojure.lang.IMeta" -> cljl.lang.IMeta.class;
+            case "clojure.lang.IReference" -> cljl.lang.IReference.class;
+            case "clojure.lang.ISeq" -> cljl.lang.ISeq.class;
+            case "clojure.lang.Seqable" -> cljl.lang.Seqable.class;
+            case "clojure.lang.Associative" -> cljl.lang.Associative.class;
+            case "clojure.lang.Counted" -> cljl.lang.Counted.class;
+            case "clojure.lang.Sorted" -> cljl.lang.Sorted.class;
+            case "clojure.lang.Reversible" -> cljl.lang.Reversible.class;
+            case "clojure.lang.IFn" -> Fn.class;
+            case "clojure.lang.Var" -> Var.class;
+            case "clojure.lang.Atom" -> Atom.class;
+            case "clojure.lang.Agent" -> Agent.class;
+            case "clojure.lang.Ref" -> Ref.class;
+            case "clojure.lang.Namespace" -> Namespace.class;
+            case "clojure.lang.Symbol" -> Symbol.class;
+            case "clojure.lang.Keyword" -> Keyword.class;
             default -> null;
         };
 

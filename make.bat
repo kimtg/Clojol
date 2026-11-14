@@ -63,8 +63,12 @@ if errorlevel 1 exit /b 1
 echo [ClojureLite] Running tests...
 if exist "%JSA%" (
     java %CLJL_OPTS% -XX:SharedArchiveFile="%JSA%" -jar "%JAR%" "%CLJL_HOME%\test\core_test.clj"
+    if errorlevel 1 exit /b 1
+    java %CLJL_OPTS% -XX:SharedArchiveFile="%JSA%" -jar "%JAR%" "%CLJL_HOME%\test\cheatsheet_test.clj"
 ) else (
     java %CLJL_OPTS% -jar "%JAR%" "%CLJL_HOME%\test\core_test.clj"
+    if errorlevel 1 exit /b 1
+    java %CLJL_OPTS% -jar "%JAR%" "%CLJL_HOME%\test\cheatsheet_test.clj"
 )
 exit /b %ERRORLEVEL%
 

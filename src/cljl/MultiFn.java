@@ -34,6 +34,39 @@ public final class MultiFn extends Fn {
         return this;
     }
 
+    public synchronized MultiFn removeAllMethods() {
+        methodTable.clear();
+        cachedMethodTable = PersistentHashMap.EMPTY;
+        return this;
+    }
+
+    @SuppressWarnings("unchecked")
+    public synchronized MultiFn preferMethod(Object dispatchValX, Object dispatchValY) {
+        Object xKey = dispatchValX == null ? NULL_KEY : dispatchValX;
+        Object yKey = dispatchValY == null ? NULL_KEY : dispatchValY;
+        cljl.lang.PersistentHashSet prefs = (cljl.lang.PersistentHashSet) preferTable.get(xKey);
+        if (prefs == null) prefs = cljl.lang.PersistentHashSet.EMPTY;
+        preferTable.put(xKey, prefs.conj(yKey));
+        return this;
+    }
+
+    public PersistentHashMap prefers() {
+        PersistentHashMap m = PersistentHashMap.EMPTY;
+        for (Map.Entry<Object, Object> e : preferTable.entrySet()) {
+            Object k = e.getKey() == NULL_KEY ? null : e.getKey();
+            m = m.assoc(k, e.getValue());
+        }
+        return m;
+    }
+
+    private boolean isPreferred(Object x, Object y) {
+        Object xKey = x == null ? NULL_KEY : x;
+        Object yKey = y == null ? NULL_KEY : y;
+        Object prefs = preferTable.get(xKey);
+        if (prefs instanceof cljl.lang.PersistentHashSet s && s.contains(yKey)) return true;
+        return false;
+    }
+
     public PersistentHashMap getMethodTable() {
         return cachedMethodTable;
     }
@@ -42,13 +75,22 @@ public final class MultiFn extends Fn {
         Object key = dispatchVal == null ? NULL_KEY : dispatchVal;
         Fn m = methodTable.get(key);
         if (m != null) return m;
-        // Fallback: isa? check across registered dispatch values (handles Java class inheritance)
+        // Collect all isa?-matching entries and pick most specific / preferred
+        Map.Entry<Object, Fn> best = null;
         for (Map.Entry<Object, Fn> e : methodTable.entrySet()) {
             Object k = e.getKey() == NULL_KEY ? null : e.getKey();
             if (k != null && !RT.equiv(k, defaultDispatchVal) && Core.isa(dispatchVal, k)) {
-                return e.getValue();
+                if (best == null) {
+                    best = e;
+                } else {
+                    Object bk = best.getKey() == NULL_KEY ? null : best.getKey();
+                    if (isPreferred(k, bk) || (!isPreferred(bk, k) && Core.isa(k, bk))) {
+                        best = e;
+                    }
+                }
             }
         }
+        if (best != null) return best.getValue();
         return methodTable.get(defaultDispatchVal == null ? NULL_KEY : defaultDispatchVal);
     }
 

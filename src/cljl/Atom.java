@@ -2,6 +2,8 @@ package cljl;
 
 import cljl.lang.IDeref;
 import cljl.lang.IMeta;
+import cljl.lang.IReference;
+import cljl.lang.ISeq;
 import cljl.lang.PersistentHashMap;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -11,7 +13,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * Concurrency and state primitives: Atom, Volatile, Delay, Promise, FutureObj.
  * Futures run on Java 25 Virtual Threads for near-zero overhead concurrency.
  */
-public final class Atom implements IDeref, IMeta {
+public final class Atom implements IDeref, IMeta, IReference {
     public static final ExecutorService VIRTUAL_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
     private final AtomicReference<Object> state;
@@ -132,6 +134,22 @@ public final class Atom implements IDeref, IMeta {
     public Atom withMeta(PersistentHashMap meta) {
         this.meta = meta;
         return this;
+    }
+
+    @Override
+    public PersistentHashMap resetMeta(PersistentHashMap m) {
+        this.meta = m != null ? m : PersistentHashMap.EMPTY;
+        return this.meta;
+    }
+
+    @Override
+    public synchronized PersistentHashMap alterMeta(Fn alter, ISeq args) {
+        Object[] callArgs = new Object[1 + RT.count(args)];
+        callArgs[0] = this.meta;
+        int i = 1;
+        for (ISeq s = args; s != null; s = s.next()) callArgs[i++] = s.first();
+        this.meta = (PersistentHashMap) alter.applyTo(callArgs);
+        return this.meta;
     }
 
     @Override

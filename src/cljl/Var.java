@@ -2,8 +2,11 @@ package cljl;
 
 import cljl.lang.IDeref;
 import cljl.lang.IMeta;
+import cljl.lang.IReference;
+import cljl.lang.ISeq;
 import cljl.lang.PersistentHashMap;
 import java.util.ArrayDeque;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.Map;
@@ -13,7 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Clojure Var with ultra-fast root access (zero ThreadLocal overhead unless dynamic)
  * and thread-local dynamic binding frame stack.
  */
-public final class Var extends Fn implements IDeref, IMeta {
+public final class Var extends Fn implements IDeref, IMeta, IReference {
     public static final Object UNBOUND = new Object() {
         @Override public String toString() { return "#<Unbound>"; }
     };
@@ -33,6 +36,14 @@ public final class Var extends Fn implements IDeref, IMeta {
         this.sym = sym;
         this.root = UNBOUND;
         this.meta = PersistentHashMap.EMPTY;
+    }
+
+    public static Var create() {
+        return new Var(null, null).setDynamic();
+    }
+
+    public static Var create(Object root) {
+        return new Var(null, null, root).setDynamic();
     }
 
     public Var(Namespace ns, Symbol sym, Object root) {
@@ -66,6 +77,18 @@ public final class Var extends Fn implements IDeref, IMeta {
         }
     }
 
+    public static Map<Var, Object> getThreadBindings() {
+        Deque<Map<Var, Object>> stack = BINDING_STACK.get();
+        if (stack == null || stack.isEmpty()) return Collections.emptyMap();
+        return stack.peek();
+    }
+
+    public boolean isThreadBound() {
+        if (!dynamic) return false;
+        Deque<Map<Var, Object>> stack = BINDING_STACK.get();
+        return stack != null && !stack.isEmpty() && stack.peek().containsKey(this);
+    }
+
     public Object get() {
         if (dynamic) {
             Deque<Map<Var, Object>> stack = BINDING_STACK.get();
@@ -76,6 +99,10 @@ public final class Var extends Fn implements IDeref, IMeta {
                 }
             }
         }
+        return root;
+    }
+
+    public Object getRawRoot() {
         return root;
     }
 
@@ -173,6 +200,21 @@ public final class Var extends Fn implements IDeref, IMeta {
     @Override
     public Var withMeta(PersistentHashMap m) {
         return setMeta(m);
+    }
+
+    @Override
+    public PersistentHashMap resetMeta(PersistentHashMap m) {
+        setMeta(m);
+        return this.meta;
+    }
+
+    @Override
+    public synchronized PersistentHashMap alterMeta(Fn alter, ISeq args) {
+        Object[] callArgs = new Object[1 + RT.count(args)];
+        callArgs[0] = this.meta;
+        int i = 1;
+        for (ISeq s = args; s != null; s = s.next()) callArgs[i++] = s.first();
+        return resetMeta((PersistentHashMap) alter.applyTo(callArgs));
     }
 
     public void addWatch(Object key, Fn callback) {

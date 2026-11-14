@@ -46,6 +46,7 @@ public final class Core {
         initNamespacesAndEval(ns);
         initArraysAndExceptions(ns);
         initMacros(ns);
+        CoreExtras.init(ns);
     }
 
     private static void def(Namespace ns, String name, Object val) {
@@ -57,11 +58,7 @@ public final class Core {
     }
 
     public static boolean isa(Object child, Object parent) {
-        if (RT.equiv(child, parent)) return true;
-        if (child instanceof Class<?> cc && parent instanceof Class<?> pc) {
-            return pc.isAssignableFrom(cc);
-        }
-        return false;
+        return CoreExtras.isa(child, parent);
     }
 
     @SuppressWarnings("unchecked")
@@ -153,17 +150,20 @@ public final class Core {
         def(ns, "seqable?", Fn.of1("seqable?", x -> x == null || x instanceof Seqable || x instanceof Iterable<?>
                 || x instanceof Map<?, ?> || x instanceof CharSequence || x.getClass().isArray()));
         def(ns, "coll?", Fn.of1("coll?", x -> x instanceof PersistentVector || x instanceof PersistentHashMap
-                || x instanceof PersistentHashSet || x instanceof ISeq || x instanceof Collection<?>));
+                || x instanceof PersistentHashSet || x instanceof PersistentTreeMap || x instanceof PersistentTreeSet
+                || x instanceof PersistentRecord || x instanceof PersistentColl
+                || x instanceof ISeq || x instanceof Collection<?>));
         def(ns, "associative?", Fn.of1("associative?", x -> x instanceof Associative));
         def(ns, "sequential?", Fn.of1("sequential?", x -> x instanceof ISeq || x instanceof PersistentVector || x instanceof List<?>));
         def(ns, "counted?", Fn.of1("counted?", x -> x instanceof Counted));
         def(ns, "ifn?", Fn.of1("ifn?", x -> x instanceof Fn));
         def(ns, "fn?", Fn.of1("fn?", x -> x instanceof Fn && !(x instanceof Keyword || x instanceof Symbol
-                || x instanceof PersistentVector || x instanceof PersistentHashMap || x instanceof PersistentHashSet)));
+                || x instanceof PersistentVector || x instanceof PersistentHashMap || x instanceof PersistentHashSet
+                || x instanceof PersistentTreeMap || x instanceof PersistentTreeSet || x instanceof PersistentColl)));
         def(ns, "var?", Fn.of1("var?", x -> x instanceof Var));
         def(ns, "class?", Fn.of1("class?", x -> x instanceof Class<?>));
         def(ns, "instance?", Fn.of2("instance?", (c, x) -> ((Class<?>) c).isInstance(x)));
-        def(ns, "isa?", Fn.of2("isa?", Core::isa));
+        def(ns, "isa?", Fn.of23("isa?", CoreExtras::isa, CoreExtras::isa));
         def(ns, "empty?", Fn.of1("empty?", x -> RT.seq(x) == null));
         def(ns, "reduced?", Fn.of1("reduced?", x -> x instanceof Reduced));
         def(ns, "realized?", Fn.of1("realized?", x -> {
@@ -420,6 +420,9 @@ public final class Core {
             if (o instanceof PersistentVector) return PersistentVector.EMPTY;
             if (o instanceof PersistentHashMap) return PersistentHashMap.EMPTY;
             if (o instanceof PersistentHashSet) return PersistentHashSet.EMPTY;
+            if (o instanceof PersistentTreeMap ptm) return ptm.empty();
+            if (o instanceof PersistentTreeSet pts) return pts.empty();
+            if (o instanceof PersistentColl pc) return pc.empty();
             if (o instanceof ISeq) return PersistentList.EMPTY;
             if (o instanceof String) return "";
             return null;
@@ -1273,6 +1276,7 @@ public final class Core {
             if (coll instanceof PersistentVector pv) return pv.peek();
             if (coll instanceof PersistentList pl) return pl.peek();
             if (coll instanceof PersistentList.EmptyList) return null;
+            if (coll instanceof PersistentColl pc) return pc.peek();
             return RT.first(coll);
         }));
 
@@ -1281,6 +1285,7 @@ public final class Core {
             if (coll instanceof PersistentVector pv) return pv.pop();
             if (coll instanceof PersistentList pl) return pl.pop();
             if (coll instanceof PersistentList.EmptyList el) return el.pop();
+            if (coll instanceof PersistentColl pc) return pc.pop();
             throw new IllegalArgumentException("pop not supported on: " + coll.getClass().getName());
         }));
 
@@ -1289,7 +1294,16 @@ public final class Core {
                 (v, start, end) -> ((PersistentVector) v).subList((int) Numbers.toLong(start), (int) Numbers.toLong(end))));
 
         def(ns, "disj", Fn.ofVarargs("disj", args -> {
-            PersistentHashSet set = (PersistentHashSet) args[0];
+            Object s = args[0];
+            if (s instanceof PersistentTreeSet pts) {
+                for (int i = 1; i < args.length; i++) pts = pts.disjoin(args[i]);
+                return pts;
+            }
+            if (s instanceof PersistentColl pc) {
+                for (int i = 1; i < args.length; i++) pc = (PersistentColl) pc.without(args[i]);
+                return pc;
+            }
+            PersistentHashSet set = (PersistentHashSet) s;
             for (int i = 1; i < args.length; i++) set = set.disjoin(args[i]);
             return set;
         }));
@@ -1303,7 +1317,7 @@ public final class Core {
         }));
 
         def(ns, "rseq", Fn.of1("rseq", coll -> {
-            if (coll instanceof PersistentVector pv) return pv.rseq();
+            if (coll instanceof Reversible rev) return rev.rseq();
             return RT.seq(coll);
         }));
 
@@ -1954,18 +1968,29 @@ public final class Core {
         def(ns, "add-watch", Fn.of3("add-watch", (ref, key, fn) -> {
             if (ref instanceof Atom a) a.addWatch(key, (Fn) fn);
             else if (ref instanceof Var v) v.addWatch(key, (Fn) fn);
+            else if (ref instanceof Agent ag) ag.addWatch(key, (Fn) fn);
+            else if (ref instanceof Ref r) r.addWatch(key, (Fn) fn);
             return ref;
         }));
         def(ns, "remove-watch", Fn.of2("remove-watch", (ref, key) -> {
             if (ref instanceof Atom a) a.removeWatch(key);
             else if (ref instanceof Var v) v.removeWatch(key);
+            else if (ref instanceof Agent ag) ag.removeWatch(key);
+            else if (ref instanceof Ref r) r.removeWatch(key);
             return ref;
         }));
         def(ns, "set-validator!", Fn.of2("set-validator!", (ref, fn) -> {
-            ((Atom) ref).setValidator((Fn) fn);
+            if (ref instanceof Atom a) a.setValidator((Fn) fn);
+            else if (ref instanceof Agent ag) ag.setValidator((Fn) fn);
+            else if (ref instanceof Ref r) r.setValidator((Fn) fn);
             return null;
         }));
-        def(ns, "get-validator", Fn.of1("get-validator", ref -> ((Atom) ref).getValidator()));
+        def(ns, "get-validator", Fn.of1("get-validator", ref -> {
+            if (ref instanceof Atom a) return a.getValidator();
+            if (ref instanceof Agent ag) return ag.getValidator();
+            if (ref instanceof Ref r) return r.getValidator();
+            return null;
+        }));
 
         // Metadata & Vars
         def(ns, "meta", Fn.of1("meta", x -> x instanceof IMeta m ? m.meta() : null));

@@ -96,10 +96,10 @@ public final class Main {
     }
 
     private static void runRepl() {
-        Var v1 = RT.USER_NS.intern("*1", null);
-        Var v2 = RT.USER_NS.intern("*2", null);
-        Var v3 = RT.USER_NS.intern("*3", null);
-        Var ve = RT.USER_NS.intern("*e", null);
+        Var v1 = RT.STAR_1;
+        Var v2 = RT.STAR_2;
+        Var v3 = RT.STAR_3;
+        Var ve = RT.STAR_E;
 
         System.out.println("ClojureLite " + VERSION + " (Java " + System.getProperty("java.version") + ")");
         System.out.println("Type :quit or EOF to exit.");

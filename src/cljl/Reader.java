@@ -530,8 +530,35 @@ public final class Reader {
             }
             case '?' -> readConditional();
             case ':' -> readNamespacedMap();
-            default -> throw readerError("No dispatch macro for: " + (char) c);
+            case '#' -> readSymbolicValue();
+            default -> {
+                if (Character.isLetter(c) || c == '_' || c == '*' || c == '+' || c == '!' || c == '-' || c == '?') {
+                    yield readTaggedLiteral((char) c);
+                }
+                throw readerError("No dispatch macro for: " + (char) c);
+            }
         };
+    }
+
+    private Object readTaggedLiteral(char firstChar) {
+        Object tagObj = readToken(firstChar);
+        if (!(tagObj instanceof Symbol tag)) {
+            throw readerError("Reader tag must be a symbol");
+        }
+        Object form = readForm(true, null);
+        Object readersObj = RT.DATA_READERS.get();
+        Object readerFn = (readersObj != null) ? RT.get(readersObj, tag) : null;
+        if (readerFn == null) {
+            readerFn = RT.DEFAULT_DATA_READERS_MAP.valAt(tag);
+        }
+        if (readerFn instanceof Fn f) {
+            return f.invoke(form);
+        }
+        Object defFn = RT.DEFAULT_DATA_READER_FN.get();
+        if (defFn instanceof Fn f) {
+            return f.invoke(tag, form);
+        }
+        throw readerError("No reader function for tag " + tag);
     }
 
     private Pattern readRegex() {
@@ -615,6 +642,19 @@ public final class Reader {
             }
         }
         return DISCARD;
+    }
+
+    private Object readSymbolicValue() {
+        Object sym = readForm(true, null);
+        if (sym instanceof Symbol s && s.ns == null) {
+            return switch (s.name) {
+                case "Inf" -> Double.POSITIVE_INFINITY;
+                case "-Inf" -> Double.NEGATIVE_INFINITY;
+                case "NaN" -> Double.NaN;
+                default -> throw readerError("Unknown symbolic value: ##" + s);
+            };
+        }
+        throw readerError("Invalid symbolic value: ##" + sym);
     }
 
     private Object readNamespacedMap() {

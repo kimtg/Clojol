@@ -1,12 +1,14 @@
 package cljl;
 
 import cljl.lang.IMeta;
+import cljl.lang.IReference;
+import cljl.lang.ISeq;
 import cljl.lang.PersistentHashMap;
 import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-public final class Namespace implements IMeta {
+public final class Namespace implements IMeta, IReference {
     private static final ConcurrentHashMap<Symbol, Namespace> NAMESPACES = new ConcurrentHashMap<>();
 
     public final Symbol name;
@@ -179,6 +181,22 @@ public final class Namespace implements IMeta {
     public Namespace withMeta(PersistentHashMap meta) {
         this.meta = meta;
         return this;
+    }
+
+    @Override
+    public PersistentHashMap resetMeta(PersistentHashMap m) {
+        this.meta = m != null ? m : PersistentHashMap.EMPTY;
+        return this.meta;
+    }
+
+    @Override
+    public synchronized PersistentHashMap alterMeta(Fn alter, ISeq args) {
+        Object[] callArgs = new Object[1 + RT.count(args)];
+        callArgs[0] = this.meta;
+        int i = 1;
+        for (ISeq s = args; s != null; s = s.next()) callArgs[i++] = s.first();
+        this.meta = (PersistentHashMap) alter.applyTo(callArgs);
+        return this.meta;
     }
 
     @Override

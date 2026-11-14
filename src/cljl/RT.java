@@ -23,7 +23,41 @@ public final class RT {
     public static final Var ERR = CLOJURE_NS.intern(Symbol.intern("*err*")).bindRoot(new PrintWriter(System.err, true)).setDynamic();
     public static final Var IN = CLOJURE_NS.intern(Symbol.intern("*in*")).bindRoot(new BufferedReader(new InputStreamReader(System.in))).setDynamic();
     public static final Var PRINT_READABLY = CLOJURE_NS.intern(Symbol.intern("*print-readably*")).bindRoot(Boolean.TRUE).setDynamic();
+    public static final Var PRINT_META = CLOJURE_NS.intern(Symbol.intern("*print-meta*")).bindRoot(Boolean.FALSE).setDynamic();
+    public static final Var PRINT_DUP = CLOJURE_NS.intern(Symbol.intern("*print-dup*")).bindRoot(Boolean.FALSE).setDynamic();
+    public static final Var PRINT_LENGTH = CLOJURE_NS.intern(Symbol.intern("*print-length*")).bindRoot(null).setDynamic();
+    public static final Var PRINT_LEVEL = CLOJURE_NS.intern(Symbol.intern("*print-level*")).bindRoot(null).setDynamic();
     public static final Var COMMAND_LINE_ARGS = CLOJURE_NS.intern(Symbol.intern("*command-line-args*")).bindRoot(null).setDynamic();
+    public static final Var STAR_1 = CLOJURE_NS.intern(Symbol.intern("*1")).bindRoot(null).setDynamic();
+    public static final Var STAR_2 = CLOJURE_NS.intern(Symbol.intern("*2")).bindRoot(null).setDynamic();
+    public static final Var STAR_3 = CLOJURE_NS.intern(Symbol.intern("*3")).bindRoot(null).setDynamic();
+    public static final Var STAR_E = CLOJURE_NS.intern(Symbol.intern("*e")).bindRoot(null).setDynamic();
+    public static final Var FILE = CLOJURE_NS.intern(Symbol.intern("*file*")).bindRoot("NO_SOURCE_PATH").setDynamic();
+    public static final Var AGENT = CLOJURE_NS.intern(Symbol.intern("*agent*")).bindRoot(null).setDynamic();
+    public static final Var COMPILE_FILES = CLOJURE_NS.intern(Symbol.intern("*compile-files*")).bindRoot(Boolean.FALSE).setDynamic();
+    public static final Var COMPILE_PATH = CLOJURE_NS.intern(Symbol.intern("*compile-path*")).bindRoot("classes").setDynamic();
+    public static final Var UNCHECKED_MATH = CLOJURE_NS.intern(Symbol.intern("*unchecked-math*")).bindRoot(Boolean.FALSE).setDynamic();
+    public static final Var WARN_ON_REFLECTION = CLOJURE_NS.intern(Symbol.intern("*warn-on-reflection*")).bindRoot(Boolean.FALSE).setDynamic();
+    public static final Var DATA_READERS = CLOJURE_NS.intern(Symbol.intern("*data-readers*")).bindRoot(PersistentHashMap.EMPTY).setDynamic();
+    public static final Var DEFAULT_DATA_READER_FN = CLOJURE_NS.intern(Symbol.intern("*default-data-reader-fn*")).bindRoot(null).setDynamic();
+    public static final PersistentHashMap DEFAULT_DATA_READERS_MAP = PersistentHashMap.create(
+            Symbol.intern("uuid"), Fn.of1("uuid-reader", s -> UUID.fromString(s.toString())),
+            Symbol.intern("inst"), Fn.of1("inst-reader", s -> Date.from(java.time.Instant.parse(normalizeInst(s.toString()))))
+    );
+    public static final Var DEFAULT_DATA_READERS = CLOJURE_NS.intern(Symbol.intern("default-data-readers")).bindRoot(DEFAULT_DATA_READERS_MAP);
+    public static final Var CLOJURE_VERSION = CLOJURE_NS.intern(Symbol.intern("*clojure-version*")).bindRoot(
+            PersistentHashMap.create(
+                    Keyword.intern("major"), 1L,
+                    Keyword.intern("minor"), 12L,
+                    Keyword.intern("incremental"), 0L,
+                    Keyword.intern("qualifier"), "lite"
+            )).setDynamic();
+
+    private static String normalizeInst(String s) {
+        if (s.indexOf('T') < 0 && s.length() == 10) return s + "T00:00:00Z";
+        if (!s.endsWith("Z") && !s.matches(".*[+-]\\d\\d:?\\d\\d$")) return s + "Z";
+        return s.replaceFirst("([+-]\\d\\d)(\\d\\d)$", "$1:$2");
+    }
 
     private static final AtomicInteger GENSYM_ID = new AtomicInteger(1000);
 
@@ -135,6 +169,12 @@ public final class RT {
             }
             return PersistentList.create(entries);
         }
+        if (coll instanceof Enumeration<?> en) {
+            return iteratorSeq(new Iterator<>() {
+                @Override public boolean hasNext() { return en.hasMoreElements(); }
+                @Override public Object next() { return en.nextElement(); }
+            });
+        }
         if (coll instanceof Iterator<?> iter) {
             return iteratorSeq(iter);
         }
@@ -222,12 +262,34 @@ public final class RT {
             throw new IllegalArgumentException("Cannot conj " + x + " onto map");
         }
         if (coll instanceof PersistentHashSet s) return s.conj(x);
+        if (coll instanceof PersistentTreeSet s) return s.conj(x);
+        if (coll instanceof PersistentTreeMap m) {
+            if (x instanceof Map.Entry<?, ?> e) return m.assoc(e.getKey(), e.getValue());
+            if (x instanceof PersistentVector v && v.count() == 2) return m.assoc(v.nth(0), v.nth(1));
+            if (x instanceof Seqable || x instanceof Map<?, ?>) {
+                PersistentTreeMap ret = m;
+                for (ISeq s = seq(x); s != null; s = s.next()) {
+                    Object elem = s.first();
+                    if (elem instanceof Map.Entry<?, ?> e) ret = ret.assoc(e.getKey(), e.getValue());
+                    else if (elem instanceof PersistentVector v && v.count() == 2) ret = ret.assoc(v.nth(0), v.nth(1));
+                    else throw new IllegalArgumentException("Cannot conj " + elem + " onto map");
+                }
+                return ret;
+            }
+            throw new IllegalArgumentException("Cannot conj " + x + " onto map");
+        }
+        if (coll instanceof PersistentRecord rec) {
+            if (x instanceof Map.Entry<?, ?> e) return rec.assoc(e.getKey(), e.getValue());
+            if (x instanceof PersistentVector v && v.count() == 2) return rec.assoc(v.nth(0), v.nth(1));
+            throw new IllegalArgumentException("Cannot conj " + x + " onto record");
+        }
         if (coll instanceof ISeq s) return cons(x, s);
         if (coll instanceof Set<?> s) {
             Set<Object> copy = new LinkedHashSet<>(s);
             copy.add(x);
             return copy;
         }
+        if (coll instanceof PersistentColl pc) return pc.cons(x);
         if (coll instanceof List<?> l) {
             List<Object> copy = new ArrayList<>(l);
             copy.add(x);
@@ -246,6 +308,9 @@ public final class RT {
     public static Object dissoc(Object coll, Object key) {
         if (coll == null) return null;
         if (coll instanceof PersistentHashMap m) return m.without(key);
+        if (coll instanceof PersistentTreeMap m) return m.without(key);
+        if (coll instanceof PersistentRecord rec) return rec.without(key);
+        if (coll instanceof PersistentColl pc) return pc.without(key);
         if (coll instanceof Map<?, ?> m) return PersistentHashMap.createFromMap(m).without(key);
         throw new IllegalArgumentException("dissoc not supported on: " + coll.getClass().getName());
     }
@@ -259,6 +324,7 @@ public final class RT {
         if (coll instanceof PersistentHashMap m) return m.valAt(key, notFound);
         if (coll instanceof Associative a) return a.valAt(key, notFound);
         if (coll instanceof PersistentHashSet s) return s.get(key, notFound);
+        if (coll instanceof PersistentTreeSet s) return s.get(key, notFound);
         if (coll instanceof Map<?, ?> m) {
             if (m.containsKey(key)) return m.get(key);
             return notFound;
@@ -291,6 +357,7 @@ public final class RT {
         if (coll == null) return false;
         if (coll instanceof Associative a) return a.containsKey(key);
         if (coll instanceof PersistentHashSet s) return s.contains(key);
+        if (coll instanceof PersistentTreeSet s) return s.contains(key);
         if (coll instanceof Map<?, ?> m) return m.containsKey(key);
         if (coll instanceof Set<?> s) return s.contains(key);
         if (coll instanceof CharSequence cs && key instanceof Number n) {
@@ -307,6 +374,8 @@ public final class RT {
     public static Object find(Object coll, Object key) {
         if (coll == null) return null;
         if (coll instanceof PersistentHashMap m) return m.entryAt(key);
+        if (coll instanceof PersistentTreeMap m) return m.entryAt(key);
+        if (coll instanceof PersistentRecord r) return r.entryAt(key);
         if (coll instanceof PersistentVector v && key instanceof Number n) {
             int i = n.intValue();
             if (i >= 0 && i < v.count()) return new PersistentHashMap.MapEntry(i, v.nth(i));
@@ -433,9 +502,21 @@ public final class RT {
     }
 
     public static void print(Object x, StringBuilder sb, boolean readably) {
+        int maxLen = PRINT_LENGTH.get() instanceof Number n ? n.intValue() : -1;
+        int maxLevel = PRINT_LEVEL.get() instanceof Number n ? n.intValue() : -1;
+        boolean printMeta = truthy(PRINT_META.get()) && readably;
+        printDepth(x, sb, readably, printMeta, maxLen, maxLevel, 0);
+    }
+
+    private static void printDepth(Object x, StringBuilder sb, boolean readably, boolean printMeta, int maxLen, int maxLevel, int level) {
         if (x == null) {
             sb.append("nil");
             return;
+        }
+        if (printMeta && x instanceof IMeta im && im.meta() != null && !im.meta().isEmpty()) {
+            sb.append('^');
+            printDepth(im.meta(), sb, true, printMeta, maxLen, maxLevel, level);
+            sb.append(' ');
         }
         if (x instanceof String s) {
             if (readably) {
@@ -491,55 +572,80 @@ public final class RT {
             return;
         }
         if (x instanceof PersistentVector v) {
+            if (maxLevel >= 0 && level >= maxLevel) { sb.append('#'); return; }
             sb.append('[');
-            for (int i = 0; i < v.cnt; i++) {
+            int lim = maxLen >= 0 ? Math.min(maxLen, v.cnt) : v.cnt;
+            for (int i = 0; i < lim; i++) {
                 if (i > 0) sb.append(' ');
-                print(v.nth(i), sb, readably);
+                printDepth(v.nth(i), sb, readably, printMeta, maxLen, maxLevel, level + 1);
+            }
+            if (maxLen >= 0 && v.cnt > maxLen) {
+                if (lim > 0) sb.append(' ');
+                sb.append("...");
             }
             sb.append(']');
             return;
         }
         if (x instanceof PersistentHashMap.MapEntry me) {
+            if (maxLevel >= 0 && level >= maxLevel) { sb.append('#'); return; }
             sb.append('[');
-            print(me.key, sb, readably);
+            printDepth(me.key, sb, readably, printMeta, maxLen, maxLevel, level + 1);
             sb.append(' ');
-            print(me.val, sb, readably);
+            printDepth(me.val, sb, readably, printMeta, maxLen, maxLevel, level + 1);
             sb.append(']');
             return;
         }
         if (x instanceof Map<?, ?> m) {
+            if (maxLevel >= 0 && level >= maxLevel) { sb.append('#'); return; }
             sb.append('{');
-            boolean first = true;
+            int count = 0;
             for (Map.Entry<?, ?> e : m.entrySet()) {
-                if (!first) sb.append(", ");
-                first = false;
-                print(e.getKey(), sb, readably);
+                if (maxLen >= 0 && count >= maxLen) {
+                    if (count > 0) sb.append(", ");
+                    sb.append("...");
+                    break;
+                }
+                if (count > 0) sb.append(", ");
+                printDepth(e.getKey(), sb, readably, printMeta, maxLen, maxLevel, level + 1);
                 sb.append(' ');
-                print(e.getValue(), sb, readably);
+                printDepth(e.getValue(), sb, readably, printMeta, maxLen, maxLevel, level + 1);
+                count++;
             }
             sb.append('}');
             return;
         }
         if (x instanceof Set<?> set) {
+            if (maxLevel >= 0 && level >= maxLevel) { sb.append('#'); return; }
             sb.append("#{");
-            boolean first = true;
+            int count = 0;
             for (Object item : set) {
-                if (!first) sb.append(' ');
-                first = false;
-                print(item, sb, readably);
+                if (maxLen >= 0 && count >= maxLen) {
+                    if (count > 0) sb.append(' ');
+                    sb.append("...");
+                    break;
+                }
+                if (count > 0) sb.append(' ');
+                printDepth(item, sb, readably, printMeta, maxLen, maxLevel, level + 1);
+                count++;
             }
             sb.append('}');
             return;
         }
         if (x instanceof ISeq || x instanceof Seqable || x instanceof List<?>) {
+            if (maxLevel >= 0 && level >= maxLevel) { sb.append('#'); return; }
             sb.append('(');
             ISeq s = seq(x);
-            boolean first = true;
+            int count = 0;
             while (s != null) {
-                if (!first) sb.append(' ');
-                first = false;
-                print(s.first(), sb, readably);
+                if (maxLen >= 0 && count >= maxLen) {
+                    if (count > 0) sb.append(' ');
+                    sb.append("...");
+                    break;
+                }
+                if (count > 0) sb.append(' ');
+                printDepth(s.first(), sb, readably, printMeta, maxLen, maxLevel, level + 1);
                 s = s.next();
+                count++;
             }
             sb.append(')');
             return;

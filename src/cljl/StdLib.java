@@ -2,6 +2,10 @@ package cljl;
 
 import cljl.lang.*;
 import java.io.*;
+import java.net.MalformedURLException;
+import java.net.URI;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -31,7 +35,7 @@ public final class StdLib {
             case "clojure.java.io" -> { initJavaIo(); yield true; }
             case "clojure.test" -> { initTest(); yield true; }
             case "clojure.repl" -> { initRepl(); yield true; }
-            default -> false;
+            default -> StdLibMore.ensureLoaded(nsName);
         };
     }
 
@@ -129,6 +133,20 @@ public final class StdLib {
             }
             throw new IllegalArgumentException("Invalid match type for replace-first: " + match);
         }));
+        ns.intern("escape", Fn.of2("escape", (s, cmap) -> {
+            String str = s.toString();
+            StringBuilder sb = new StringBuilder(str.length());
+            Fn fn = cmap instanceof Fn f ? f : null;
+            for (int i = 0; i < str.length(); i++) {
+                char c = str.charAt(i);
+                Object rep = fn != null ? fn.invoke(c) : RT.get(cmap, c);
+                if (rep != null) sb.append(rep);
+                else sb.append(c);
+            }
+            return sb.toString();
+        }));
+        ns.intern("re-quote-replacement", Fn.of1("re-quote-replacement",
+                s -> Matcher.quoteReplacement(s.toString())));
 
         LOADED.add("clojure.string");
     }
@@ -219,21 +237,114 @@ public final class StdLib {
             }
             return t.persistent();
         }));
-        ns.intern("rename-keys", Fn.of2("rename-keys", (m, kmap) -> {
-            PersistentHashMap ret = (PersistentHashMap) m;
-            for (ISeq s = RT.seq(kmap); s != null; s = s.next()) {
-                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
-                Object oldk = e.getKey();
-                Object newk = e.getValue();
-                if (ret.containsKey(oldk)) {
-                    Object val = ret.valAt(oldk);
-                    ret = ret.without(oldk).assoc(newk, val);
-                }
+        ns.intern("rename-keys", Fn.of2("rename-keys", (m, kmap) -> renameKeysImpl(m, kmap)));
+        ns.intern("project", Fn.of2("project", (xrel, ks) -> {
+            Set<Object> keySet = toKeySet(ks);
+            PersistentHashSet.TransientHashSet t = PersistentHashSet.EMPTY.asTransient();
+            for (ISeq s = RT.seq(xrel); s != null; s = s.next()) {
+                t = t.conj(selectKeysSet(s.first(), keySet));
             }
-            return ret;
+            return t.persistent();
         }));
+        ns.intern("rename", Fn.of2("rename", (xrel, kmap) -> {
+            PersistentHashSet.TransientHashSet t = PersistentHashSet.EMPTY.asTransient();
+            for (ISeq s = RT.seq(xrel); s != null; s = s.next()) {
+                t = t.conj(renameKeysImpl(s.first(), kmap));
+            }
+            return t.persistent();
+        }));
+        ns.intern("index", Fn.of2("index", (xrel, ks) -> {
+            Set<Object> keySet = toKeySet(ks);
+            Map<Object, PersistentHashSet.TransientHashSet> groups = new LinkedHashMap<>();
+            for (ISeq s = RT.seq(xrel); s != null; s = s.next()) {
+                Object row = s.first();
+                Object ik = selectKeysSet(row, keySet);
+                groups.computeIfAbsent(ik, k -> PersistentHashSet.EMPTY.asTransient()).conj(row);
+            }
+            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
+            for (Map.Entry<Object, PersistentHashSet.TransientHashSet> e : groups.entrySet()) {
+                ret = ret.assoc(e.getKey(), e.getValue().persistent());
+            }
+            return ret.persistent();
+        }));
+        ns.intern("join", Fn.of23("join",
+                (xrel, yrel) -> joinImpl(xrel, yrel, null),
+                (xrel, yrel, km) -> joinImpl(xrel, yrel, km)));
 
         LOADED.add("clojure.set");
+    }
+
+    private static Object joinImpl(Object xrel, Object yrel, Object km) {
+        if (RT.seq(xrel) == null || RT.seq(yrel) == null) return PersistentHashSet.EMPTY;
+        Set<Object> xKeys = new LinkedHashSet<>();
+        for (ISeq s = RT.keys(RT.first(xrel)); s != null; s = s.next()) xKeys.add(s.first());
+        Set<Object> yKeys = new LinkedHashSet<>();
+        for (ISeq s = RT.keys(RT.first(yrel)); s != null; s = s.next()) yKeys.add(s.first());
+        Map<Object, Object> keyMap = new LinkedHashMap<>();
+        if (km != null) {
+            for (ISeq s = RT.seq(km); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                keyMap.put(e.getKey(), e.getValue());
+            }
+        } else {
+            for (Object k : xKeys) if (yKeys.contains(k)) keyMap.put(k, k);
+        }
+        Set<Object> xJoinKeys = keyMap.keySet();
+        Set<Object> yJoinKeys = new LinkedHashSet<>(keyMap.values());
+        Map<Object, List<Object>> idx = new LinkedHashMap<>();
+        for (ISeq s = RT.seq(yrel); s != null; s = s.next()) {
+            Object yr = s.first();
+            Object yk = selectKeysSet(yr, yJoinKeys);
+            idx.computeIfAbsent(yk, k -> new ArrayList<>()).add(yr);
+        }
+        PersistentHashSet.TransientHashSet out = PersistentHashSet.EMPTY.asTransient();
+        for (ISeq s = RT.seq(xrel); s != null; s = s.next()) {
+            Object xr = s.first();
+            PersistentHashMap.TransientHashMap lookup = PersistentHashMap.EMPTY.asTransient();
+            for (Map.Entry<Object, Object> e : keyMap.entrySet()) {
+                if (RT.contains(xr, e.getKey())) lookup = lookup.assoc(e.getValue(), RT.get(xr, e.getKey()));
+            }
+            List<Object> matches = idx.get(lookup.persistent());
+            if (matches != null) {
+                for (Object yr : matches) {
+                    Object merged = xr;
+                    for (ISeq ys = RT.seq(yr); ys != null; ys = ys.next()) {
+                        Map.Entry<?, ?> me = (Map.Entry<?, ?>) ys.first();
+                        merged = RT.assoc(merged, me.getKey(), me.getValue());
+                    }
+                    out = out.conj(merged);
+                }
+            }
+        }
+        return out.persistent();
+    }
+
+    private static Set<Object> toKeySet(Object ks) {
+        Set<Object> set = new LinkedHashSet<>();
+        for (ISeq s = RT.seq(ks); s != null; s = s.next()) set.add(s.first());
+        return set;
+    }
+
+    private static Object selectKeysSet(Object m, Set<Object> ks) {
+        PersistentHashMap.TransientHashMap t = PersistentHashMap.EMPTY.asTransient();
+        for (Object k : ks) {
+            if (RT.contains(m, k)) t = t.assoc(k, RT.get(m, k));
+        }
+        return t.persistent();
+    }
+
+    private static Object renameKeysImpl(Object m, Object kmap) {
+        Object ret = m;
+        for (ISeq s = RT.seq(kmap); s != null; s = s.next()) {
+            Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+            Object oldk = e.getKey();
+            Object newk = e.getValue();
+            if (RT.contains(ret, oldk)) {
+                Object val = RT.get(ret, oldk);
+                ret = RT.assoc(RT.dissoc(ret, oldk), newk, val);
+            }
+        }
+        return ret;
     }
 
     private static synchronized void initWalk() {
@@ -268,6 +379,30 @@ public final class StdLib {
             }
             return x;
         }), m)));
+        ns.intern("postwalk-demo", Fn.of1("postwalk-demo", form -> postwalkImpl(Fn.of1("postwalk-demo-fn", x -> {
+            System.out.println("Walked: " + RT.printString(x));
+            return x;
+        }), form)));
+        ns.intern("prewalk-demo", Fn.of1("prewalk-demo", form -> prewalkImpl(Fn.of1("prewalk-demo-fn", x -> {
+            System.out.println("Walked: " + RT.printString(x));
+            return x;
+        }), form)));
+        Object notFound = new Object();
+        ns.intern("postwalk-replace", Fn.of2("postwalk-replace", (smap, form) ->
+                postwalkImpl(Fn.of1("postwalk-replace-fn", x -> {
+                    Object v = RT.get(smap, x, notFound);
+                    return v == notFound ? x : v;
+                }), form)));
+        ns.intern("prewalk-replace", Fn.of2("prewalk-replace", (smap, form) ->
+                prewalkImpl(Fn.of1("prewalk-replace-fn", x -> {
+                    Object v = RT.get(smap, x, notFound);
+                    return v == notFound ? x : v;
+                }), form)));
+        ns.intern("macroexpand-all", Fn.of1("macroexpand-all", form -> {
+            Var mx = RT.CLOJURE_NS.findInternedVar(Symbol.intern("macroexpand"));
+            Fn mxFn = mx != null ? (Fn) mx.deref() : null;
+            return prewalkImpl(Fn.of1("mx-all", x -> x instanceof ISeq && mxFn != null ? mxFn.invoke(x) : x), form);
+        }));
 
         LOADED.add("clojure.walk");
     }
@@ -318,6 +453,17 @@ public final class StdLib {
     private static synchronized void initEdn() {
         if (LOADED.contains("clojure.edn")) return;
         Namespace ns = Namespace.findOrCreate("clojure.edn");
+        ns.intern("read", new Fn.NamedFn("read") {
+            @Override public Object invoke() {
+                return Reader.readFromStream((java.io.Reader) RT.IN.get(), true, null, null);
+            }
+            @Override public Object invoke(Object stream) {
+                return Reader.readFromStream((java.io.Reader) stream, true, null, null);
+            }
+            @Override public Object invoke(Object opts, Object stream) {
+                return Reader.readFromStream(opts instanceof Map<?, ?> m ? m : null, (java.io.Reader) stream);
+            }
+        });
         ns.intern("read-string", Fn.of12("read-string",
                 s -> s == null ? null : Reader.readString((String) s, false, null),
                 (opts, s) -> {
@@ -330,33 +476,213 @@ public final class StdLib {
     private static synchronized void initJavaIo() {
         if (LOADED.contains("clojure.java.io")) return;
         Namespace ns = Namespace.findOrCreate("clojure.java.io");
+        ns.intern("as-file", Fn.of1("as-file", StdLib::asFileImpl));
+        ns.intern("as-url", Fn.of1("as-url", StdLib::asUrlImpl));
+        ns.intern("as-relative-path", Fn.of1("as-relative-path", x -> {
+            File f = asFileImpl(x);
+            if (f == null) throw new IllegalArgumentException("Cannot coerce to File: null");
+            if (f.isAbsolute()) throw new IllegalArgumentException(f + " is not a relative path");
+            return f.getPath();
+        }));
+        ns.intern("resource", Fn.of12("resource",
+                n -> StdLib.class.getClassLoader().getResource(n.toString()),
+                (n, loader) -> ((ClassLoader) loader).getResource(n.toString())));
         ns.intern("file", Fn.ofVarargs("file", args -> {
-            if (args.length == 1) return new File(args[0].toString());
-            File f = args[0] instanceof File file ? file : new File(args[0].toString());
+            if (args.length == 1) return asFileImpl(args[0]);
+            File f = asFileImpl(args[0]);
             for (int i = 1; i < args.length; i++) f = new File(f, args[i].toString());
             return f;
         }));
-        ns.intern("reader", Fn.of1("reader", x -> {
+        ns.intern("input-stream", Fn.ofVarargs("input-stream", args -> {
             try {
-                if (x instanceof File f) return new BufferedReader(new FileReader(f));
-                return Files.newBufferedReader(Path.of(x.toString()));
+                return openInputStream(args[0]);
             } catch (IOException e) {
                 throw RT.sneakyThrow(e);
             }
         }));
-        ns.intern("writer", Fn.of1("writer", x -> {
+        ns.intern("output-stream", Fn.ofVarargs("output-stream", args -> {
             try {
-                if (x instanceof File f) return new BufferedWriter(new FileWriter(f));
-                return Files.newBufferedWriter(Path.of(x.toString()));
+                boolean append = hasAppendOpt(args, 1);
+                return openOutputStream(args[0], append);
             } catch (IOException e) {
                 throw RT.sneakyThrow(e);
             }
         }));
-        ns.intern("delete-file", Fn.of1("delete-file", f -> {
-            File file = f instanceof File fl ? fl : new File(f.toString());
-            return file.delete();
+        ns.intern("reader", Fn.ofVarargs("reader", args -> {
+            try {
+                Object x = args[0];
+                if (x instanceof java.io.Reader r) return r instanceof BufferedReader ? r : new BufferedReader(r);
+                return new BufferedReader(new InputStreamReader(openInputStream(x), StandardCharsets.UTF_8));
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
         }));
+        ns.intern("writer", Fn.ofVarargs("writer", args -> {
+            try {
+                Object x = args[0];
+                if (x instanceof Writer w) return w instanceof BufferedWriter ? w : new BufferedWriter(w);
+                boolean append = hasAppendOpt(args, 1);
+                return new BufferedWriter(new OutputStreamWriter(openOutputStream(x, append), StandardCharsets.UTF_8));
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        }));
+        ns.intern("copy", Fn.ofVarargs("copy", args -> {
+            try {
+                Object in = args[0];
+                Object out = args[1];
+                int bufSize = 8192;
+                if (in instanceof InputStream is) {
+                    if (out instanceof OutputStream os) {
+                        is.transferTo(os);
+                    } else if (out instanceof File || out instanceof Path || out instanceof String || out instanceof URI || out instanceof URL) {
+                        try (OutputStream os = openOutputStream(out, false)) { is.transferTo(os); }
+                    } else if (out instanceof Writer w) {
+                        new InputStreamReader(is, StandardCharsets.UTF_8).transferTo(w);
+                        w.flush();
+                    }
+                    return null;
+                }
+                if (in instanceof java.io.Reader r) {
+                    if (out instanceof Writer w) {
+                        r.transferTo(w);
+                        w.flush();
+                    } else if (out instanceof OutputStream os) {
+                        Writer w = new OutputStreamWriter(os, StandardCharsets.UTF_8);
+                        r.transferTo(w);
+                        w.flush();
+                    } else {
+                        try (Writer w = new BufferedWriter(new OutputStreamWriter(openOutputStream(out, false), StandardCharsets.UTF_8))) {
+                            r.transferTo(w);
+                        }
+                    }
+                    return null;
+                }
+                if (in instanceof byte[] bytes) {
+                    if (out instanceof OutputStream os) {
+                        os.write(bytes);
+                    } else {
+                        try (OutputStream os = openOutputStream(out, false)) { os.write(bytes); }
+                    }
+                    return null;
+                }
+                if (in instanceof File f) {
+                    if (out instanceof OutputStream os) {
+                        Files.copy(f.toPath(), os);
+                    } else if (out instanceof File of) {
+                        Files.copy(f.toPath(), of.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    } else if (out instanceof Writer w) {
+                        try (java.io.Reader r = Files.newBufferedReader(f.toPath(), StandardCharsets.UTF_8)) { r.transferTo(w); w.flush(); }
+                    } else {
+                        try (OutputStream os = openOutputStream(out, false)) { Files.copy(f.toPath(), os); }
+                    }
+                    return null;
+                }
+                if (in instanceof CharSequence cs) {
+                    if (out instanceof Writer w) {
+                        w.write(cs.toString());
+                        w.flush();
+                    } else if (out instanceof OutputStream os) {
+                        os.write(cs.toString().getBytes(StandardCharsets.UTF_8));
+                    } else {
+                        try (Writer w = new BufferedWriter(new OutputStreamWriter(openOutputStream(out, false), StandardCharsets.UTF_8))) {
+                            w.write(cs.toString());
+                        }
+                    }
+                    return null;
+                }
+                try (InputStream is = openInputStream(in); OutputStream os = openOutputStream(out, false)) {
+                    byte[] buf = new byte[bufSize];
+                    int n;
+                    while ((n = is.read(buf)) >= 0) os.write(buf, 0, n);
+                }
+                return null;
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        }));
+        ns.intern("delete-file", Fn.of12("delete-file",
+                f -> {
+                    File file = asFileImpl(f);
+                    if (file != null && !file.delete()) {
+                        throw new RuntimeException(new IOException("Couldn't delete " + file));
+                    }
+                    return Boolean.TRUE;
+                },
+                (f, silently) -> {
+                    File file = asFileImpl(f);
+                    if (file == null) return Boolean.FALSE;
+                    if (!file.delete()) {
+                        if (RT.truthy(silently)) return Boolean.FALSE;
+                        throw new RuntimeException(new IOException("Couldn't delete " + file));
+                    }
+                    return Boolean.TRUE;
+                }));
         LOADED.add("clojure.java.io");
+    }
+
+    private static File asFileImpl(Object x) {
+        if (x == null) return null;
+        if (x instanceof File f) return f;
+        if (x instanceof Path p) return p.toFile();
+        if (x instanceof URI u) return new File(u);
+        if (x instanceof URL url) {
+            try {
+                return new File(url.toURI());
+            } catch (Exception e) {
+                return new File(url.getPath());
+            }
+        }
+        String s = x.toString();
+        if (s.startsWith("file:")) {
+            try { return new File(URI.create(s)); } catch (Exception ignored) {}
+        }
+        return new File(s);
+    }
+
+    private static URL asUrlImpl(Object x) {
+        if (x == null) return null;
+        try {
+            if (x instanceof URL u) return u;
+            if (x instanceof URI u) return u.toURL();
+            if (x instanceof File f) return f.toURI().toURL();
+            if (x instanceof Path p) return p.toUri().toURL();
+            return URI.create(x.toString()).toURL();
+        } catch (MalformedURLException | IllegalArgumentException e) {
+            throw RT.sneakyThrow(e);
+        }
+    }
+
+    private static boolean hasAppendOpt(Object[] args, int startIdx) {
+        Keyword appendKw = Keyword.intern("append");
+        for (int i = startIdx; i + 1 < args.length; i += 2) {
+            if (appendKw.equals(args[i])) return RT.truthy(args[i + 1]);
+        }
+        return false;
+    }
+
+    private static InputStream openInputStream(Object x) throws IOException {
+        if (x instanceof InputStream is) return is instanceof BufferedInputStream ? is : new BufferedInputStream(is);
+        if (x instanceof byte[] bytes) return new ByteArrayInputStream(bytes);
+        if (x instanceof File f) return new BufferedInputStream(new FileInputStream(f));
+        if (x instanceof Path p) return new BufferedInputStream(Files.newInputStream(p));
+        if (x instanceof URL u) return new BufferedInputStream(u.openStream());
+        if (x instanceof URI u) return new BufferedInputStream(u.toURL().openStream());
+        String s = x.toString();
+        try {
+            if (s.contains("://") || s.startsWith("file:") || s.startsWith("jar:")) {
+                return new BufferedInputStream(URI.create(s).toURL().openStream());
+            }
+        } catch (Exception ignored) {}
+        return new BufferedInputStream(new FileInputStream(s));
+    }
+
+    private static OutputStream openOutputStream(Object x, boolean append) throws IOException {
+        if (x instanceof OutputStream os) return os instanceof BufferedOutputStream ? os : new BufferedOutputStream(os);
+        if (x instanceof File f) return new BufferedOutputStream(new FileOutputStream(f, append));
+        if (x instanceof Path p) return new BufferedOutputStream(new FileOutputStream(p.toFile(), append));
+        File f = asFileImpl(x);
+        return new BufferedOutputStream(new FileOutputStream(f, append));
     }
 
     private static synchronized void initTest() {
@@ -482,6 +808,185 @@ public final class StdLib {
         if (docVar != null) ns.refer(Symbol.intern("doc"), docVar);
         Var printDocVar = RT.CLOJURE_NS.findInternedVar(Symbol.intern("print-doc"));
         if (printDocVar != null) ns.refer(Symbol.intern("print-doc"), printDocVar);
+
+        ns.intern("apropos", Fn.of1("apropos", strOrPat -> {
+            Pattern p = strOrPat instanceof Pattern pat ? pat : Pattern.compile(Pattern.quote(strOrPat.toString()));
+            boolean strMatch = !(strOrPat instanceof Pattern);
+            List<Symbol> found = new ArrayList<>();
+            for (Namespace n : Namespace.all()) {
+                for (Map.Entry<Symbol, Object> e : n.getMappings().entrySet()) {
+                    if (e.getValue() instanceof Var v && v.ns == n) {
+                        String symName = e.getKey().name;
+                        boolean matches = strMatch ? symName.contains(strOrPat.toString()) : p.matcher(symName).find();
+                        if (matches) found.add(Symbol.intern(n.name.name, symName));
+                    }
+                }
+            }
+            found.sort(Comparator.comparing(s -> s.ns + "/" + s.name));
+            return PersistentList.create(found);
+        }));
+
+        ns.intern("dir-fn", Fn.of1("dir-fn", nsSym -> {
+            Namespace target = nsSym instanceof Namespace n ? n : Namespace.find((Symbol) nsSym);
+            if (target == null) return PersistentList.EMPTY;
+            List<Symbol> syms = new ArrayList<>();
+            for (Map.Entry<Symbol, Object> e : target.getMappings().entrySet()) {
+                if (e.getValue() instanceof Var v && v.ns == target) {
+                    syms.add(e.getKey());
+                }
+            }
+            syms.sort(Comparator.comparing(s -> s.name));
+            return PersistentList.create(syms);
+        }));
+
+        ns.internMacro("dir", Fn.of1("dir", nsSym ->
+                PersistentList.createFromArray(
+                        Symbol.intern("doseq"),
+                        PersistentVector.createOwning(
+                                Symbol.intern("v__"),
+                                PersistentList.createFromArray(Symbol.intern("clojure.repl", "dir-fn"),
+                                        PersistentList.createFromArray(Symbol.intern("quote"), nsSym))),
+                        PersistentList.createFromArray(Symbol.intern("println"), Symbol.intern("v__")))));
+
+        ns.intern("find-doc", Fn.of1("find-doc", reOrStr -> {
+            Pattern p = reOrStr instanceof Pattern pat ? pat : Pattern.compile(reOrStr.toString(), Pattern.CASE_INSENSITIVE);
+            PrintWriter out = outWriter();
+            Keyword docKw = Keyword.intern("doc");
+            for (Namespace n : Namespace.all()) {
+                List<Var> matched = new ArrayList<>();
+                for (Map.Entry<Symbol, Object> e : n.getMappings().entrySet()) {
+                    if (e.getValue() instanceof Var v && v.ns == n) {
+                        String name = v.sym.name;
+                        Object d = v.meta().valAt(docKw);
+                        String doc = d == null ? "" : d.toString();
+                        if (p.matcher(name).find() || (!doc.isEmpty() && p.matcher(doc).find())) {
+                            matched.add(v);
+                        }
+                    }
+                }
+                matched.sort(Comparator.comparing(v -> v.sym.name));
+                for (Var v : matched) {
+                    if (printDocVar != null && printDocVar.deref() instanceof Fn pd) {
+                        pd.invoke(v);
+                    } else {
+                        out.println("-------------------------");
+                        out.println(v.ns.name.name + "/" + v.sym.name);
+                        Object d = v.meta().valAt(docKw);
+                        if (d != null) out.println("  " + d);
+                    }
+                }
+            }
+            out.flush();
+            return null;
+        }));
+
+        ns.intern("pst", new Fn.NamedFn("pst") {
+            @Override public Object invoke() { return pstImpl(RT.STAR_E.deref(), 12); }
+            @Override public Object invoke(Object eOrDepth) {
+                if (eOrDepth instanceof Number n) return pstImpl(RT.STAR_E.deref(), n.intValue());
+                return pstImpl(eOrDepth, 12);
+            }
+            @Override public Object invoke(Object e, Object depth) { return pstImpl(e, toInt(depth)); }
+        });
+
+        ns.intern("source-fn", Fn.of1("source-fn", sym -> {
+            Var v = resolveVarForRepl(sym);
+            if (v == null) return null;
+            Object fileObj = v.meta().valAt(Keyword.intern("file"));
+            Object lineObj = v.meta().valAt(Keyword.intern("line"));
+            if (fileObj == null || lineObj == null) return null;
+            int line = toInt(lineObj);
+            if (line <= 0) return null;
+            String file = fileObj.toString();
+            try (InputStream is = Files.exists(Path.of(file)) ? Files.newInputStream(Path.of(file))
+                    : StdLib.class.getClassLoader().getResourceAsStream(file)) {
+                if (is == null) return null;
+                List<String> lines = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8)).lines().toList();
+                if (line > lines.size()) return null;
+                StringBuilder sb = new StringBuilder();
+                int depth = 0;
+                boolean started = false;
+                for (int i = line - 1; i < lines.size(); i++) {
+                    String l = lines.get(i);
+                    if (i > line - 1) sb.append('\n');
+                    sb.append(l);
+                    boolean inStr = false;
+                    for (int j = 0; j < l.length(); j++) {
+                        char c = l.charAt(j);
+                        if (c == '"' && (j == 0 || l.charAt(j - 1) != '\\')) inStr = !inStr;
+                        if (inStr) continue;
+                        if (c == ';') break;
+                        if (c == '(' || c == '[' || c == '{') { depth++; started = true; }
+                        else if (c == ')' || c == ']' || c == '}') depth--;
+                    }
+                    if (started && depth <= 0) break;
+                }
+                return sb.toString();
+            } catch (IOException e) {
+                return null;
+            }
+        }));
+
+        ns.internMacro("source", Fn.of1("source", n ->
+                PersistentList.createFromArray(
+                        Symbol.intern("println"),
+                        PersistentList.createFromArray(
+                                Symbol.intern("or"),
+                                PersistentList.createFromArray(Symbol.intern("clojure.repl", "source-fn"),
+                                        PersistentList.createFromArray(Symbol.intern("quote"), n)),
+                                "Source not found"))));
+
         LOADED.add("clojure.repl");
+    }
+
+    private static Var resolveVarForRepl(Object sym) {
+        if (sym instanceof Var v) return v;
+        if (sym instanceof Symbol s) {
+            Namespace cur = RT.currentNS();
+            if (s.ns != null) {
+                Namespace target = cur.lookupAlias(Symbol.intern(s.ns));
+                if (target == null) target = Namespace.find(Symbol.intern(s.ns));
+                return target != null ? target.findInternedVar(Symbol.intern(s.name)) : null;
+            }
+            Object mapped = cur.getMappings().get(s);
+            if (mapped instanceof Var v) return v;
+            return RT.CLOJURE_NS.findInternedVar(s);
+        }
+        return null;
+    }
+
+    static PrintWriter outWriter() {
+        return toPrintWriter(RT.OUT.get());
+    }
+
+    static PrintWriter errWriter() {
+        return toPrintWriter(RT.ERR.get());
+    }
+
+    static PrintWriter toPrintWriter(Object w) {
+        if (w instanceof PrintWriter pw) return pw;
+        if (w instanceof Writer wr) return new PrintWriter(wr, true);
+        return new PrintWriter(System.out, true);
+    }
+
+    static int toInt(Object o) {
+        return (int) Numbers.toLong(o);
+    }
+
+    private static Object pstImpl(Object tObj, int depth) {
+        if (!(tObj instanceof Throwable t)) return null;
+        PrintWriter err = errWriter();
+        err.println(t.getClass().getName() + (t.getMessage() != null ? ": " + t.getMessage() : ""));
+        StackTraceElement[] st = t.getStackTrace();
+        int lim = Math.min(depth, st.length);
+        for (int i = 0; i < lim; i++) {
+            err.println("\t" + st[i]);
+        }
+        if (t.getCause() != null) {
+            err.println("Caused by:");
+            pstImpl(t.getCause(), depth);
+        }
+        err.flush();
+        return null;
     }
 }

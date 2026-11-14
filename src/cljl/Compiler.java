@@ -38,7 +38,9 @@ public final class Compiler {
             Symbol.intern("new"),
             Symbol.intern("."),
             Symbol.intern("set!"),
-            Symbol.intern("case*")
+            Symbol.intern("case*"),
+            Symbol.intern("monitor-enter"),
+            Symbol.intern("monitor-exit")
     );
 
     public static boolean isSpecial(Symbol sym) {
@@ -55,12 +57,17 @@ public final class Compiler {
     }
 
     public static Object load(String src, String filename) {
-        List<Object> forms = Reader.readAll(src, filename);
-        Object last = null;
-        for (Object form : forms) {
-            last = eval(form);
+        Var.pushThreadBindings(Map.of(RT.FILE, filename != null ? filename : "NO_SOURCE_PATH"));
+        try {
+            List<Object> forms = Reader.readAll(src, filename);
+            Object last = null;
+            for (Object form : forms) {
+                last = eval(form);
+            }
+            return last;
+        } finally {
+            Var.popThreadBindings();
         }
-        return last;
     }
 
     // ========================================================================
@@ -534,6 +541,12 @@ public final class Compiler {
                     }
                     case "case*" -> {
                         return compileCase(args, scope);
+                    }
+                    case "monitor-enter" -> {
+                        return new MonitorNode(compile(RT.first(args), scope), true);
+                    }
+                    case "monitor-exit" -> {
+                        return new MonitorNode(compile(RT.first(args), scope), false);
                     }
                 }
             }
@@ -1194,6 +1207,25 @@ public final class Compiler {
             var.bindRoot(fnNode.eval(frame));
             var.setMacro();
             return var;
+        }
+    }
+
+    private static final Map<Object, java.util.concurrent.locks.ReentrantLock> MONITORS =
+            Collections.synchronizedMap(new IdentityHashMap<>());
+
+    public static final class MonitorNode extends Node {
+        public final Node target;
+        public final boolean enter;
+        public MonitorNode(Node target, boolean enter) { this.target = target; this.enter = enter; }
+        @Override
+        public Object eval(Object[] frame) {
+            Object obj = target.eval(frame);
+            if (obj == null) throw new NullPointerException("Cannot lock nil");
+            java.util.concurrent.locks.ReentrantLock lock = MONITORS.computeIfAbsent(obj,
+                    k -> new java.util.concurrent.locks.ReentrantLock());
+            if (enter) lock.lock();
+            else lock.unlock();
+            return null;
         }
     }
 
