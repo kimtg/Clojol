@@ -665,9 +665,13 @@ public final class Compiler {
         }
         Namespace ns = RT.currentNS();
         Var v = ns.intern(sym);
+        PersistentHashMap meta = v.meta()
+                .assoc(Keyword.intern("ns"), ns)
+                .assoc(Keyword.intern("name"), sym.withMeta(null));
         if (doc != null) {
-            v.setMeta(v.meta().assoc(Keyword.intern("doc"), doc));
+            meta = meta.assoc(Keyword.intern("doc"), doc);
         }
+        v.setMeta(meta);
         return new DefNode(v, initNode);
     }
 
@@ -926,14 +930,48 @@ public final class Compiler {
             doc = s;
             rest = rest.next();
         }
+        PersistentHashMap attrMap = null;
+        if (rest.first() instanceof PersistentHashMap m && rest.next() != null) {
+            attrMap = m;
+            rest = rest.next();
+        }
+        ISeq arglists = extractArglists(rest);
         Object fnForm = RT.cons(Symbol.intern("fn*"), RT.cons(name, rest));
         Node fnNode = compile(fnForm, scope);
-        Var v = RT.currentNS().intern(name);
+        Namespace ns = RT.currentNS();
+        Var v = ns.intern(name);
         v.setMacro();
-        if (doc != null) {
-            v.setMeta(v.meta().assoc(Keyword.intern("doc"), doc));
+        PersistentHashMap meta = v.meta()
+                .assoc(Keyword.intern("ns"), ns)
+                .assoc(Keyword.intern("name"), name.withMeta(null));
+        if (attrMap != null) {
+            for (ISeq s = attrMap.seq(); s != null; s = s.next()) {
+                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                meta = meta.assoc(me.key, me.val);
+            }
         }
+        if (doc != null) {
+            meta = meta.assoc(Keyword.intern("doc"), doc);
+        }
+        if (arglists != null) {
+            meta = meta.assoc(Keyword.intern("arglists"), arglists);
+        }
+        v.setMeta(meta);
         return new DefMacroNode(v, fnNode);
+    }
+
+    private static ISeq extractArglists(ISeq bodyForms) {
+        if (bodyForms == null) return null;
+        if (bodyForms.first() instanceof PersistentVector vec) {
+            return PersistentList.createFromArray(vec);
+        }
+        List<Object> lists = new ArrayList<>();
+        for (ISeq s = bodyForms; s != null; s = s.next()) {
+            if (s.first() instanceof ISeq clause && clause.first() != null) {
+                lists.add(clause.first());
+            }
+        }
+        return lists.isEmpty() ? null : PersistentList.create(lists);
     }
 
     private static Node compileTry(ISeq args, Scope scope) {

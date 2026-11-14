@@ -30,6 +30,7 @@ public final class StdLib {
             case "clojure.edn" -> { initEdn(); yield true; }
             case "clojure.java.io" -> { initJavaIo(); yield true; }
             case "clojure.test" -> { initTest(); yield true; }
+            case "clojure.repl" -> { initRepl(); yield true; }
             default -> false;
         };
     }
@@ -472,5 +473,15 @@ public final class StdLib {
         }));
 
         LOADED.add("clojure.test");
+    }
+
+    private static synchronized void initRepl() {
+        if (LOADED.contains("clojure.repl")) return;
+        Namespace ns = Namespace.findOrCreate("clojure.repl");
+        Var docVar = RT.CLOJURE_NS.findInternedVar(Symbol.intern("doc"));
+        if (docVar != null) ns.refer(Symbol.intern("doc"), docVar);
+        Var printDocVar = RT.CLOJURE_NS.findInternedVar(Symbol.intern("print-doc"));
+        if (printDocVar != null) ns.refer(Symbol.intern("print-doc"), printDocVar);
+        LOADED.add("clojure.repl");
     }
 }

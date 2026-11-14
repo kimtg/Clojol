@@ -300,6 +300,55 @@
         (finally
           (.delete tmp))))))
 
+(defn doc-test-foo "foo" [x] x)
+(defn doc-test-multi
+  "multi doc"
+  ([a] a)
+  ([a b] (+ a b))
+  {:added "1.0"})
+(defmacro doc-test-mac "mac doc" [x] x)
+
+(deftest doc-test
+  (let [nl (System/lineSeparator)]
+    (testing "defn docstring and arglists"
+      (is (= (str "-------------------------" nl
+                  "cljl.core-test/doc-test-foo" nl
+                  "([x])" nl
+                  "  foo" nl)
+             (with-out-str (is (nil? (doc doc-test-foo))))))
+      (is (= (str "-------------------------" nl
+                  "cljl.core-test/doc-test-foo" nl
+                  "([x])" nl
+                  "  foo" nl)
+             (with-out-str (doc #'doc-test-foo)))))
+    (testing "multi-arity defn with attr-map"
+      (is (= "1.0" (:added (meta #'doc-test-multi))))
+      (is (= (str "-------------------------" nl
+                  "cljl.core-test/doc-test-multi" nl
+                  "([a] [a b])" nl
+                  "  multi doc" nl)
+             (with-out-str (doc doc-test-multi)))))
+    (testing "defmacro, special forms, and clojure.repl"
+      (is (= (str "-------------------------" nl
+                  "cljl.core-test/doc-test-mac" nl
+                  "([x])" nl
+                  "Macro" nl
+                  "  mac doc" nl)
+             (with-out-str (doc doc-test-mac))))
+      (is (= (str "-------------------------" nl
+                  "clojure.core/doc" nl
+                  "([name])" nl
+                  "Macro" nl
+                  "  Prints documentation for a var or special form given its name" nl)
+             (with-out-str (doc doc))))
+      (is (= (str "-------------------------" nl
+                  "if" nl
+                  "Special Form" nl
+                  "  Evaluates test. If not nil or false, evaluates and yields then, otherwise else or nil." nl)
+             (with-out-str (doc if))))
+      (require '[clojure.repl :as repl])
+      (is (some? (resolve 'repl/doc))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

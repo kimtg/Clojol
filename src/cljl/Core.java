@@ -2101,6 +2101,14 @@ public final class Core {
         def(ns, "methods", Fn.of1("methods", mf -> ((MultiFn) mf).getMethodTable()));
         def(ns, "get-method", Fn.of2("get-method", (mf, val) -> ((MultiFn) mf).getMethod(val)));
         def(ns, "remove-method", Fn.of2("remove-method", (mf, val) -> ((MultiFn) mf).removeMethod(val)));
+
+        Var printDocVar = ns.intern("print-doc", Fn.of1("print-doc", Core::printDocValue));
+        printDocVar.setMeta(PersistentHashMap.EMPTY
+                .assoc(Keyword.intern("ns"), ns)
+                .assoc(Keyword.intern("name"), Symbol.intern("print-doc"))
+                .assoc(Keyword.intern("arglists"), PersistentList.createFromArray(
+                        PersistentVector.createOwning(Symbol.intern("m"))))
+                .assoc(Keyword.intern("doc"), "Prints documentation for a var, namespace, symbol, or metadata map."));
     }
 
     private static Symbol processRequireSpec(Object spec) {
@@ -2319,13 +2327,52 @@ public final class Core {
                 }
                 idx++;
             }
+            int endIdx = args.length;
+            if (idx < endIdx && !(args[idx] instanceof PersistentVector)) {
+                if (args[endIdx - 1] instanceof PersistentHashMap tailAttr) {
+                    for (ISeq s = tailAttr.seq(); s != null; s = s.next()) {
+                        PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                        meta = meta.assoc(me.key, me.val);
+                    }
+                    endIdx--;
+                }
+                List<Object> arglists = new ArrayList<>();
+                for (int i = idx; i < endIdx; i++) {
+                    if (args[i] instanceof ISeq clause && clause.first() != null) {
+                        arglists.add(clause.first());
+                    }
+                }
+                if (!arglists.isEmpty()) {
+                    meta = meta.assoc(Keyword.intern("arglists"), PersistentList.create(arglists));
+                }
+            } else if (idx < endIdx && args[idx] instanceof PersistentVector paramsVec) {
+                meta = meta.assoc(Keyword.intern("arglists"), PersistentList.createFromArray(paramsVec));
+            }
             Symbol namedSym = meta.count() > 0 ? name.withMeta(meta) : name;
             List<Object> fnArgs = new ArrayList<>();
             fnArgs.add(fnStar);
             fnArgs.add(name);
-            for (int i = idx; i < args.length; i++) fnArgs.add(args[i]);
+            for (int i = idx; i < endIdx; i++) fnArgs.add(args[i]);
             return PersistentList.createFromArray(defSym, namedSym, PersistentList.create(fnArgs));
         }));
+
+        Var docVar = ns.internMacro("doc", Fn.ofVarargs("doc", args -> {
+            if (args.length != 1) {
+                throw new IllegalArgumentException("doc requires 1 argument");
+            }
+            Object target = args[0];
+            Object argExpr = (target instanceof ISeq s
+                    && (Symbol.intern("var").equals(s.first()) || quoteSym.equals(s.first())))
+                    ? target
+                    : PersistentList.createFromArray(quoteSym, target);
+            return PersistentList.createFromArray(Symbol.intern("clojure.core", "print-doc"), argExpr);
+        }));
+        docVar.setMeta(docVar.meta()
+                .assoc(Keyword.intern("ns"), ns)
+                .assoc(Keyword.intern("name"), Symbol.intern("doc"))
+                .assoc(Keyword.intern("arglists"), PersistentList.createFromArray(
+                        PersistentVector.createOwning(Symbol.intern("name"))))
+                .assoc(Keyword.intern("doc"), "Prints documentation for a var or special form given its name"));
 
         defMacro(ns, "defn-", Fn.ofVarargs("defn-", args -> {
             Symbol name = (Symbol) args[0];
@@ -3073,5 +3120,114 @@ public final class Core {
                                                 PersistentVector.createOwning(k, PersistentList.createFromArray(Symbol.intern("clojure.core", "first"), s)),
                                                 combined)))),
                 v);
+    }
+
+    private static Object printDocValue(Object target) {
+        if (target instanceof Var v) {
+            printVarDoc(v);
+        } else if (target instanceof PersistentHashMap m) {
+            printMetaDoc(m, null, null);
+        } else if (target instanceof Namespace nsObj) {
+            printNamespaceDoc(nsObj);
+        } else if (target instanceof Symbol sym) {
+            if (sym.ns == null) {
+                PersistentHashMap sf = specialFormMeta(sym.name);
+                if (sf != null) {
+                    printMetaDoc(sf, null, sym);
+                    return null;
+                }
+            }
+            Var v = Compiler.lookupVar(RT.currentNS(), sym, false);
+            if (v != null) {
+                printVarDoc(v);
+                return null;
+            }
+            if (sym.ns == null) {
+                Namespace foundNs = Namespace.find(sym);
+                if (foundNs != null) {
+                    printNamespaceDoc(foundNs);
+                }
+            }
+        }
+        return null;
+    }
+
+    private static void printVarDoc(Var v) {
+        PersistentHashMap meta = v.meta();
+        if (v.isMacro() && !RT.truthy(meta.valAt(Keyword.intern("macro")))) {
+            meta = meta.assoc(Keyword.intern("macro"), Boolean.TRUE);
+        }
+        printMetaDoc(meta, v.ns, v.sym);
+    }
+
+    private static void printNamespaceDoc(Namespace nsObj) {
+        writeOut("-------------------------", true);
+        writeOut(nsObj.name.toString(), true);
+        Object doc = nsObj.meta() != null ? nsObj.meta().valAt(Keyword.intern("doc")) : null;
+        if (doc != null) {
+            writeOut("  " + doc, true);
+        }
+    }
+
+    private static void printMetaDoc(PersistentHashMap meta, Namespace fallbackNs, Symbol fallbackName) {
+        Object nsObj = meta.valAt(Keyword.intern("ns"), fallbackNs);
+        Object nameObj = meta.valAt(Keyword.intern("name"), fallbackName);
+        String header;
+        if (nsObj != null && nameObj != null) {
+            String nsName = (nsObj instanceof Namespace n) ? n.name.toString() : nsObj.toString();
+            header = nsName + "/" + nameObj;
+        } else {
+            header = nameObj != null ? nameObj.toString() : null;
+        }
+
+        writeOut("-------------------------", true);
+        if (header != null) {
+            writeOut(header, true);
+        }
+        Object forms = meta.valAt(Keyword.intern("forms"));
+        if (forms != null) {
+            for (ISeq s = RT.seq(forms); s != null; s = s.next()) {
+                writeOut("  " + joinPrint(new Object[]{s.first()}, true), true);
+            }
+        }
+        Object arglists = meta.valAt(Keyword.intern("arglists"));
+        if (arglists != null) {
+            writeOut(joinPrint(new Object[]{arglists}, true), true);
+        }
+        if (RT.truthy(meta.valAt(Keyword.intern("macro")))) {
+            writeOut("Macro", true);
+        }
+        if (RT.truthy(meta.valAt(Keyword.intern("special-form")))) {
+            writeOut("Special Form", true);
+        }
+        Object doc = meta.valAt(Keyword.intern("doc"));
+        if (doc != null) {
+            writeOut("  " + doc, true);
+        }
+    }
+
+    private static PersistentHashMap specialFormMeta(String name) {
+        String doc = switch (name) {
+            case "def" -> "Creates and interns a global var with the name of symbol in the current namespace.";
+            case "if" -> "Evaluates test. If not nil or false, evaluates and yields then, otherwise else or nil.";
+            case "do" -> "Evaluates the expressions in order and returns the value of the last.";
+            case "let*" -> "Evaluates the exprs in a lexical context in which the symbols are bound to their values.";
+            case "loop*" -> "Evaluates the exprs in a lexical context and establishes a recursion point for recur.";
+            case "recur" -> "Evaluates the exprs in order, then rebinds the recursion point bindings and jumps back.";
+            case "fn*" -> "Defines an anonymous function.";
+            case "quote" -> "Yields the unevaluated form.";
+            case "var" -> "The symbol must resolve to a var, and the Var object itself (not its value) is returned.";
+            case "try" -> "Evaluates exprs and catches exceptions matching catch clauses, running finally for side effects.";
+            case "throw" -> "Throws an exception.";
+            case "set!" -> "Assignments to thread-local var bindings or Java fields.";
+            case "new" -> "Creates a new instance of a Java class.";
+            case "." -> "Java interop member access and method invocation.";
+            default -> null;
+        };
+        if (doc == null) return null;
+        return PersistentHashMap.EMPTY
+                .assoc(Keyword.intern("name"), Symbol.intern(name))
+                .assoc(Keyword.intern("special-form"), Boolean.TRUE)
+                .assoc(Keyword.intern("doc"), doc);
     }
 }
