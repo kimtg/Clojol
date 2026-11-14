@@ -342,6 +342,141 @@ public final class Interop {
         return null;
     }
 
+    public static Method findPublicMethodForTypes(Class<?> clazz, String name, ValType[] argTypes, boolean isStatic) {
+        if (clazz == null || !Modifier.isPublic(clazz.getModifiers())) return null;
+        int arity = argTypes == null ? 0 : argTypes.length;
+        Method best = null;
+        int bestScore = Integer.MAX_VALUE;
+        boolean ambiguous = false;
+        int candidateCount = 0;
+        Method singleCandidate = null;
+
+        for (Method m : clazz.getMethods()) {
+            if (!m.getName().equals(name)) continue;
+            if (Modifier.isStatic(m.getModifiers()) != isStatic) continue;
+            if (m.isVarArgs() || m.getParameterCount() != arity) continue;
+            candidateCount++;
+            singleCandidate = m;
+            int s = staticMatchScore(m.getParameterTypes(), argTypes);
+            if (s >= 0) {
+                if (s < bestScore) {
+                    bestScore = s;
+                    best = m;
+                    ambiguous = false;
+                } else if (s == bestScore) {
+                    ambiguous = true;
+                }
+            }
+        }
+        if (candidateCount == 1 && singleCandidate != null && staticCompatibleWithUnknown(singleCandidate.getParameterTypes(), argTypes)) {
+            best = singleCandidate;
+            ambiguous = false;
+        }
+        if (best == null || ambiguous) return null;
+        if (!Modifier.isPublic(best.getModifiers())) return null;
+        if (!Modifier.isPublic(best.getDeclaringClass().getModifiers())) {
+            Method pub = findPublicMethodOnHierarchy(clazz, best.getName(), best.getParameterTypes());
+            if (pub == null) return null;
+            best = pub;
+        }
+        return best;
+    }
+
+    public static Constructor<?> findPublicConstructorForTypes(Class<?> clazz, ValType[] argTypes) {
+        if (clazz == null || !Modifier.isPublic(clazz.getModifiers())) return null;
+        int arity = argTypes == null ? 0 : argTypes.length;
+        Constructor<?> best = null;
+        int bestScore = Integer.MAX_VALUE;
+        boolean ambiguous = false;
+        int candidateCount = 0;
+        Constructor<?> singleCandidate = null;
+
+        for (Constructor<?> c : clazz.getConstructors()) {
+            if (c.isVarArgs() || c.getParameterCount() != arity) continue;
+            candidateCount++;
+            singleCandidate = c;
+            int s = staticMatchScore(c.getParameterTypes(), argTypes);
+            if (s >= 0) {
+                if (s < bestScore) {
+                    bestScore = s;
+                    best = c;
+                    ambiguous = false;
+                } else if (s == bestScore) {
+                    ambiguous = true;
+                }
+            }
+        }
+        if (candidateCount == 1 && singleCandidate != null && staticCompatibleWithUnknown(singleCandidate.getParameterTypes(), argTypes)) {
+            best = singleCandidate;
+            ambiguous = false;
+        }
+        return (best != null && !ambiguous && Modifier.isPublic(best.getModifiers())) ? best : null;
+    }
+
+    private static boolean staticCompatibleWithUnknown(Class<?>[] paramTypes, ValType[] argTypes) {
+        for (int i = 0; i < paramTypes.length; i++) {
+            ValType at = argTypes[i];
+            if (at == null || at.kind == ValType.Kind.ANY || at.kind == ValType.Kind.BOTTOM) {
+                continue;
+            }
+            if (staticMatchScore(new Class<?>[]{paramTypes[i]}, new ValType[]{at}) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static Field findPublicField(Class<?> clazz, String fieldName, boolean isStatic) {
+        if (clazz == null || !Modifier.isPublic(clazz.getModifiers())) return null;
+        try {
+            Field f = clazz.getField(fieldName);
+            if (Modifier.isStatic(f.getModifiers()) == isStatic
+                    && Modifier.isPublic(f.getModifiers())
+                    && Modifier.isPublic(f.getDeclaringClass().getModifiers())) {
+                return f;
+            }
+        } catch (NoSuchFieldException ignored) {}
+        return null;
+    }
+
+    private static int staticMatchScore(Class<?>[] paramTypes, ValType[] argTypes) {
+        int score = 0;
+        for (int i = 0; i < paramTypes.length; i++) {
+            Class<?> p = paramTypes[i];
+            ValType at = argTypes[i];
+            if (at == null || at.kind == ValType.Kind.ANY || at.kind == ValType.Kind.BOTTOM) {
+                if (p == Object.class) score += 2;
+                else return -1;
+            } else if (at.kind == ValType.Kind.NIL) {
+                if (p.isPrimitive()) return -1;
+                score += 1;
+            } else if (at.kind == ValType.Kind.LONG) {
+                if (p == long.class || p == Long.class) score += 0;
+                else if (p == int.class || p == Integer.class) score += 1;
+                else if (p == double.class || p == Double.class || p == float.class || p == Float.class
+                        || p == short.class || p == Short.class || p == byte.class || p == Byte.class) score += 2;
+                else if (p == Number.class || p == Object.class) score += 3;
+                else return -1;
+            } else if (at.kind == ValType.Kind.DOUBLE) {
+                if (p == double.class || p == Double.class) score += 0;
+                else if (p == float.class || p == Float.class) score += 1;
+                else if (p == Number.class || p == Object.class) score += 3;
+                else return -1;
+            } else if (at.kind == ValType.Kind.BOOL) {
+                if (p == boolean.class || p == Boolean.class) score += 0;
+                else if (p == Object.class) score += 3;
+                else return -1;
+            } else if (at.kind == ValType.Kind.REF) {
+                Class<?> ac = at.refClass;
+                if (p == ac) score += 0;
+                else if (p.isAssignableFrom(ac)) score += (p == Object.class ? 3 : 1);
+                else if (p == Comparator.class && Fn.class.isAssignableFrom(ac)) score += 1;
+                else return -1;
+            }
+        }
+        return score;
+    }
+
     private static int matchScore(Class<?>[] paramTypes, boolean varArgs, Object[] args) {
         int argCount = args == null ? 0 : args.length;
         if (!varArgs) {

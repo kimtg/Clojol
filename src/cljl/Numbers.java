@@ -28,6 +28,12 @@ public final class Numbers {
         throw new ClassCastException("Cannot cast " + (o == null ? "nil" : o.getClass().getName()) + " to Number");
     }
 
+    public static long longCast(Object o) {
+        if (o instanceof Long l) return l;
+        if (o instanceof Character c) return (long) c;
+        return toLong(o);
+    }
+
     public static double toDouble(Object o) {
         if (o instanceof Double d) return d;
         if (o instanceof Number n) return n.doubleValue();
@@ -70,6 +76,13 @@ public final class Numbers {
             return Math.addExact(lx, y);
         }
         return addSlow(x, Long.valueOf(y));
+    }
+
+    public static Number add(long x, Object y) {
+        if (y instanceof Long ly) {
+            return Math.addExact(x, ly);
+        }
+        return addSlow(Long.valueOf(x), y);
     }
 
     private static Number addSlow(Object x, Object y) {
@@ -149,6 +162,13 @@ public final class Numbers {
         return minusSlow(x, Long.valueOf(y));
     }
 
+    public static Number minus(long x, Object y) {
+        if (y instanceof Long ly) {
+            return Math.subtractExact(x, ly);
+        }
+        return minusSlow(Long.valueOf(x), y);
+    }
+
     private static Number minusSlow(Object x, Object y) {
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
             return toDouble(x) - toDouble(y);
@@ -194,6 +214,13 @@ public final class Numbers {
             return Math.multiplyExact(lx, y);
         }
         return multiplySlow(x, Long.valueOf(y));
+    }
+
+    public static Number multiply(long x, Object y) {
+        if (y instanceof Long ly) {
+            return Math.multiplyExact(x, ly);
+        }
+        return multiplySlow(Long.valueOf(x), y);
     }
 
     private static Number multiplySlow(Object x, Object y) {
@@ -385,6 +412,60 @@ public final class Numbers {
         return toDouble(x) < 0.0;
     }
 
+    public static boolean isEven(Object x) {
+        if (x instanceof Long lx) return (lx & 1L) == 0L;
+        if (!isInteger(x)) throw new IllegalArgumentException("Argument must be an integer: " + x);
+        return (toLong(x) & 1L) == 0L;
+    }
+
+    public static boolean isOdd(Object x) {
+        if (x instanceof Long lx) return (lx & 1L) != 0L;
+        if (!isInteger(x)) throw new IllegalArgumentException("Argument must be an integer: " + x);
+        return (toLong(x) & 1L) != 0L;
+    }
+
+    public static Number uncheckedAdd(Object a, Object b) {
+        if (a instanceof Long la && b instanceof Long lb) return la + lb;
+        if (a instanceof Double || b instanceof Double || a instanceof Float || b instanceof Float) {
+            return ((Number) a).doubleValue() + ((Number) b).doubleValue();
+        }
+        return ((Number) a).longValue() + ((Number) b).longValue();
+    }
+
+    public static Number uncheckedSubtract(Object a, Object b) {
+        if (a instanceof Long la && b instanceof Long lb) return la - lb;
+        if (a instanceof Double || b instanceof Double || a instanceof Float || b instanceof Float) {
+            return ((Number) a).doubleValue() - ((Number) b).doubleValue();
+        }
+        return ((Number) a).longValue() - ((Number) b).longValue();
+    }
+
+    public static Number uncheckedMultiply(Object a, Object b) {
+        if (a instanceof Long la && b instanceof Long lb) return la * lb;
+        if (a instanceof Double || b instanceof Double || a instanceof Float || b instanceof Float) {
+            return ((Number) a).doubleValue() * ((Number) b).doubleValue();
+        }
+        return ((Number) a).longValue() * ((Number) b).longValue();
+    }
+
+    public static Number uncheckedInc(Object a) {
+        if (a instanceof Long la) return la + 1L;
+        if (a instanceof Double || a instanceof Float) return ((Number) a).doubleValue() + 1.0;
+        return ((Number) a).longValue() + 1L;
+    }
+
+    public static Number uncheckedDec(Object a) {
+        if (a instanceof Long la) return la - 1L;
+        if (a instanceof Double || a instanceof Float) return ((Number) a).doubleValue() - 1.0;
+        return ((Number) a).longValue() - 1L;
+    }
+
+    public static Number uncheckedNegate(Object a) {
+        if (a instanceof Long la) return -la;
+        if (a instanceof Double || a instanceof Float) return -((Number) a).doubleValue();
+        return -((Number) a).longValue();
+    }
+
     private static boolean isNaN(Object x) {
         return (x instanceof Double dx && Double.isNaN(dx))
                 || (x instanceof Float fx && Float.isNaN(fx));
@@ -398,6 +479,11 @@ public final class Numbers {
     public static boolean lt(Object x, long y) {
         if (x instanceof Long lx) return lx < y;
         return ltSlow(x, Long.valueOf(y));
+    }
+
+    public static boolean lt(long x, Object y) {
+        if (y instanceof Long ly) return x < ly;
+        return ltSlow(Long.valueOf(x), y);
     }
 
     private static boolean ltSlow(Object x, Object y) {
@@ -417,6 +503,11 @@ public final class Numbers {
         return lteSlow(x, Long.valueOf(y));
     }
 
+    public static boolean lte(long x, Object y) {
+        if (y instanceof Long ly) return x <= ly;
+        return lteSlow(Long.valueOf(x), y);
+    }
+
     private static boolean lteSlow(Object x, Object y) {
         Number nx = num(x);
         Number ny = num(y);
@@ -432,6 +523,11 @@ public final class Numbers {
     public static boolean gt(Object x, long y) {
         if (x instanceof Long lx) return lx > y;
         return gtSlow(x, Long.valueOf(y));
+    }
+
+    public static boolean gt(long x, Object y) {
+        if (y instanceof Long ly) return x > ly;
+        return gtSlow(Long.valueOf(x), y);
     }
 
     private static boolean gtSlow(Object x, Object y) {
@@ -451,6 +547,11 @@ public final class Numbers {
         return gteSlow(x, Long.valueOf(y));
     }
 
+    public static boolean gte(long x, Object y) {
+        if (y instanceof Long ly) return x >= ly;
+        return gteSlow(Long.valueOf(x), y);
+    }
+
     private static boolean gteSlow(Object x, Object y) {
         Number nx = num(x);
         Number ny = num(y);
@@ -467,6 +568,16 @@ public final class Numbers {
             return nx.doubleValue() == ny.doubleValue();
         }
         return compare(nx, ny) == 0;
+    }
+
+    public static boolean equal(Object x, long y) {
+        if (x instanceof Long lx) return lx == y;
+        return equal(x, Long.valueOf(y));
+    }
+
+    public static boolean equal(long x, Object y) {
+        if (y instanceof Long ly) return x == ly;
+        return equal(Long.valueOf(x), y);
     }
 
     /**

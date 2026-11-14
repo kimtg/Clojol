@@ -375,6 +375,48 @@ public final class RT {
         throw new IllegalArgumentException("dissoc not supported on: " + coll.getClass().getName());
     }
 
+    public static Object transientColl(Object coll) {
+        if (coll instanceof PersistentVector pv) return pv.asTransient();
+        if (coll instanceof PersistentHashMap pm) return pm.asTransient();
+        if (coll instanceof PersistentHashSet ps) return ps.asTransient();
+        throw new IllegalArgumentException("Cannot create transient from: " + coll);
+    }
+
+    public static Object persistentBang(Object t) {
+        if (t instanceof PersistentVector.TransientVector tv) return tv.persistent();
+        if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.persistent();
+        if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.persistent();
+        throw new IllegalArgumentException("Not a transient: " + t);
+    }
+
+    public static Object conjBang(Object t, Object x) {
+        if (t instanceof PersistentVector.TransientVector tv) return tv.conj(x);
+        if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.conj(x);
+        if (t instanceof PersistentHashMap.TransientHashMap tm) {
+            if (x == null) return tm;
+            if (x instanceof Map.Entry<?, ?> e) return tm.assoc(e.getKey(), e.getValue());
+            if (x instanceof PersistentVector v && v.cnt == 2) return tm.assoc(v.nth(0), v.nth(1));
+            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return tm.assoc(sv.nth(0), sv.nth(1));
+            if (x instanceof Map<?, ?> m) {
+                for (Map.Entry<?, ?> e : m.entrySet()) tm = tm.assoc(e.getKey(), e.getValue());
+                return tm;
+            }
+            throw new IllegalArgumentException("Cannot conj onto transient map: " + x);
+        }
+        throw new IllegalArgumentException("Not a transient: " + t);
+    }
+
+    public static Object assocBang(Object t, Object k, Object v) {
+        if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.assoc(k, v);
+        if (t instanceof PersistentVector.TransientVector tv) return tv.assocN((int) Numbers.toLong(k), v);
+        throw new IllegalArgumentException("Not an associative transient: " + t);
+    }
+
+    public static boolean isVector(Object x) {
+        return x instanceof PersistentVector || x instanceof PersistentVector.SubVec
+                || x instanceof PersistentHashMap.MapEntry;
+    }
+
     public static Object get(Object coll, Object key) {
         return get(coll, key, null);
     }

@@ -611,6 +611,124 @@
       (is (= 2 (.incAndGet c)))
       (is (= 2 (.getVal c))))))
 
+(defn ti-fib [n]
+  (if (< n 2)
+    n
+    (+ (ti-fib (- n 1)) (ti-fib (- n 2)))))
+
+(defn ti-ack [m n]
+  (cond
+    (= m 0) (inc n)
+    (= n 0) (ti-ack (dec m) 1)
+    :else (ti-ack (dec m) (ti-ack m (dec n)))))
+
+(defn ti-mixed-arith [x]
+  (+ x 1))
+
+(defn ti-hinted-fn ^long [^long x ^double y]
+  (+ x (long y)))
+
+(defn ti-hypot [x y]
+  (Math/sqrt (+ (* x x) (* y y))))
+
+(defn ti-loop-recur [n]
+  (loop [i 0 acc 0]
+    (if (< i n)
+      (recur (inc i) (+ acc i))
+      acc)))
+
+(defn ti-double-loop [n]
+  (loop [i 0 acc 0.0]
+    (if (< i n)
+      (recur (inc i) (+ acc (double i)))
+      acc)))
+
+(deftest type-inference-and-specialization-test
+  (testing "Recursive numeric specialization & heterogeneous fallback"
+    (is (seq (cljl.TypeAnalyzer/discoverPrimSpecs
+               (aget (.getFixedMethods ^cljl.Compiler$CompiledFn ti-fib) 1)
+               ^cljl.Compiler$CompiledFn ti-fib)))
+    (is (= 6765 (ti-fib 20)))
+    (is (= 5.0 (ti-fib 5.0)))
+    (is (= 55N (ti-fib 10N)))
+    (is (= 3/2 (ti-fib 3/2)))
+    (is (= 125 (ti-ack 3 4)))
+    (is (= 11 (ti-mixed-arith 10)))
+    (is (= 11.5 (ti-mixed-arith 10.5)))
+    (is (= 10000000000000000000001N (ti-mixed-arith 10000000000000000000000N)))
+    (is (= 3/2 (ti-mixed-arith 1/2))))
+
+  (testing "Explicit type hints and direct Java interop"
+    (is (= 13 (ti-hinted-fn 10 3.9)))
+    (is (= 5.0 (ti-hypot 3 4)))
+    (is (= 5.0 (ti-hypot 3.0 4.0)))
+    (let [sb-fn (fn [x]
+                  (let [^String s (str "hi-" x)
+                        sb (StringBuilder. s)]
+                    (.append sb "!")
+                    [(.length s) (.toString sb)]))
+          str-upper (fn [x] (.toUpperCase ^String x))]
+      (is (true? (cljl.BytecodeJIT/canCompile sb-fn)))
+      (is (some? (cljl.BytecodeJIT/compile sb-fn)))
+      (is (= [5 "hi-42!"] (sb-fn 42)))
+      (is (= "ABC" (str-upper "abc")))))
+
+  (testing "Unboxed loop/recur, unchecked arithmetic, bit ops, and even?/odd?"
+    (is (= 499500 (ti-loop-recur 1000)))
+    (is (= 45.0 (ti-double-loop 10)))
+    (let [f-bits (fn [x]
+                   (let [a (bit-shift-left x 3)
+                         b (bit-or a 5)
+                         c (bit-and b 255)
+                         d (bit-xor c 15)]
+                     [(bit-shift-right d 1) (even? d) (odd? d) (bit-not 0)]))]
+      (is (some? (cljl.BytecodeJIT/compile f-bits)))
+      (is (= [1 true false -1] (f-bits 1)))))
+
+  (testing "Exact overflow vs unchecked wrapping"
+    (let [f-checked (fn [x] (+ x 1))
+          f-inc (fn [x] (inc x))
+          f-unchecked (fn [x] (unchecked-add x 1))
+          f-uinc (fn [x] (unchecked-inc x))]
+      (is (thrown? ArithmeticException (f-checked Long/MAX_VALUE)))
+      (is (thrown? ArithmeticException (f-inc Long/MAX_VALUE)))
+      (is (= Long/MIN_VALUE (f-unchecked Long/MAX_VALUE)))
+      (is (= Long/MIN_VALUE (f-uinc Long/MAX_VALUE)))))
+
+  (testing "NaN comparisons and equality semantics"
+    (let [nan (/ 0.0 0.0)
+          f-cmp (fn [a b] [(< a b) (<= a b) (> a b) (>= a b) (== a b) (= a b)
+                           (zero? a) (pos? a) (neg? a)])]
+      (is (= [false false false false false false false false false] (f-cmp nan 1.0)))
+      (is (= [false false false false false false false true false] (f-cmp 1.0 nan)))
+      (is (= [false false false false false true false false false] (f-cmp nan nan)))
+      (is (false? (= (+ nan 0.0) (+ nan 0.0))))
+      (is (false? (== (+ nan 0.0) (+ nan 0.0))))
+      (is (= [false true false true true false false true false] (f-cmp 1 1.0)))))
+
+  (testing "nil safety on type-hinted refs and collection intrinsics"
+    (let [f-cnt (fn [^String s] (count s))
+          f-len (fn [^String s] (.length s))
+          f-first (fn [xs] (first xs))]
+      (is (= 3 (f-cnt "abc")))
+      (is (= 0 (f-cnt nil)))
+      (is (= 3 (f-len "abc")))
+      (is (thrown? NullPointerException (f-len nil)))
+      (is (nil? (f-first nil)))
+      (is (= 1 (f-first [1 2 3])))))
+
+  (testing "with-redefs on self-recursive specialized Var calls"
+    (is (= 21 (ti-fib 8)))
+    (with-redefs [ti-fib (fn [n] (+ n 100))]
+      (is (= 108 (ti-fib 8))))
+    (let [orig ti-fib
+          f-redef-rec (fn [n]
+                        (if (< n 2) n (ti-fib (- n 1))))]
+      (with-redefs [ti-fib (fn [n] (* n 10))]
+        (is (= 40 (f-redef-rec 5))))
+      (is (= orig ti-fib)))
+    (is (= 21 (ti-fib 8)))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

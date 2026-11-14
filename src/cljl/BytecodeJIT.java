@@ -1,23 +1,28 @@
 package cljl;
 
 import cljl.Compiler.*;
+import cljl.TypeAnalyzer.*;
+import cljl.lang.*;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Tier-1 JVM Bytecode JIT Compiler for ClojureLite.
+ * Tier-1 Type-Specializing JVM Bytecode JIT Compiler for ClojureLite.
  *
  * Compiles hot CompiledFn instances directly to JVM classfile (v49.0) bytecode at runtime
- * with zero external dependencies, turning Clojure locals into JVM local variable slots,
- * loop/recur into direct JVM goto loops, and core arithmetic/comparisons into inlineable
- * fast paths. Cold code stays on the zero-startup-overhead AST interpreter.
+ * with zero external dependencies, using TypeAnalyzer's fixpoint type inference and :tag hints
+ * to unbox primitive locals/loops/arithmetic, emit specialized invokePrim_* overloads,
+ * inline direct collection/transient virtual calls, and emit direct typed Java interop.
  */
 public final class BytecodeJIT {
 
+    private static final boolean STRICT_JIT = Boolean.getBoolean("cljl.jit.strict");
     private static final AtomicInteger CLASS_ID = new AtomicInteger(0);
     private static final JitClassLoader LOADER = new JitClassLoader();
 
@@ -25,30 +30,78 @@ public final class BytecodeJIT {
     private static final int ACONST_NULL = 0x01;
     private static final int ICONST_0 = 0x03;
     private static final int ICONST_1 = 0x04;
+    private static final int LCONST_0 = 0x09;
+    private static final int LCONST_1 = 0x0a;
+    private static final int DCONST_0 = 0x0e;
+    private static final int DCONST_1 = 0x0f;
     private static final int BIPUSH = 0x10;
     private static final int SIPUSH = 0x11;
     private static final int LDC = 0x12;
     private static final int LDC_W = 0x13;
     private static final int LDC2_W = 0x14;
+    private static final int ILOAD = 0x15;
+    private static final int LLOAD = 0x16;
+    private static final int DLOAD = 0x18;
     private static final int ALOAD = 0x19;
     private static final int ALOAD_0 = 0x2a;
-    private static final int ALOAD_1 = 0x2b;
-    private static final int ALOAD_2 = 0x2c;
-    private static final int ALOAD_3 = 0x2d;
     private static final int AALOAD = 0x32;
+    private static final int ISTORE = 0x36;
+    private static final int LSTORE = 0x37;
+    private static final int DSTORE = 0x39;
     private static final int ASTORE = 0x3a;
     private static final int AASTORE = 0x53;
     private static final int POP = 0x57;
+    private static final int POP2 = 0x58;
     private static final int DUP = 0x59;
+    private static final int LADD = 0x61;
+    private static final int DADD = 0x63;
+    private static final int LSUB = 0x65;
+    private static final int DSUB = 0x67;
+    private static final int LMUL = 0x69;
+    private static final int DMUL = 0x6b;
+    private static final int LDIV = 0x6d;
+    private static final int DDIV = 0x6f;
+    private static final int LREM = 0x71;
+    private static final int DREM = 0x73;
+    private static final int LNEG = 0x75;
+    private static final int DNEG = 0x77;
+    private static final int LSHL = 0x79;
+    private static final int LSHR = 0x7b;
+    private static final int LUSHR = 0x7d;
+    private static final int LAND = 0x7f;
+    private static final int LOR = 0x81;
     private static final int IXOR = 0x82;
+    private static final int LXOR = 0x83;
+    private static final int I2L = 0x85;
+    private static final int L2I = 0x88;
+    private static final int L2D = 0x8a;
+    private static final int F2D = 0x8d;
+    private static final int D2L = 0x8f;
+    private static final int D2F = 0x90;
+    private static final int I2B = 0x91;
+    private static final int I2S = 0x93;
+    private static final int LCMP = 0x94;
+    private static final int DCMPL = 0x97;
+    private static final int DCMPG = 0x98;
     private static final int IFEQ = 0x99;
     private static final int IFNE = 0x9a;
+    private static final int IFLT = 0x9b;
+    private static final int IFGE = 0x9c;
+    private static final int IFGT = 0x9d;
+    private static final int IFLE = 0x9e;
     private static final int IF_ICMPEQ = 0x9f;
     private static final int IF_ICMPNE = 0xa0;
+    private static final int IF_ICMPLT = 0xa1;
+    private static final int IF_ICMPGE = 0xa2;
+    private static final int IF_ICMPGT = 0xa3;
+    private static final int IF_ICMPLE = 0xa4;
     private static final int IF_ACMPEQ = 0xa5;
     private static final int IF_ACMPNE = 0xa6;
     private static final int GOTO = 0xa7;
     private static final int TABLESWITCH = 0xaa;
+    private static final int IRETURN = 0xac;
+    private static final int LRETURN = 0xad;
+    private static final int DRETURN = 0xaf;
     private static final int ARETURN = 0xb0;
     private static final int RETURN = 0xb1;
     private static final int GETSTATIC = 0xb2;
@@ -57,11 +110,16 @@ public final class BytecodeJIT {
     private static final int INVOKEVIRTUAL = 0xb6;
     private static final int INVOKESPECIAL = 0xb7;
     private static final int INVOKESTATIC = 0xb8;
+    private static final int INVOKEINTERFACE = 0xb9;
+    private static final int NEW = 0xbb;
     private static final int ANEWARRAY = 0xbd;
+    private static final int ARRAYLENGTH = 0xbe;
     private static final int ATHROW = 0xbf;
     private static final int CHECKCAST = 0xc0;
+    private static final int INSTANCEOF = 0xc1;
     private static final int MONITORENTER = 0xc2;
     private static final int MONITOREXIT = 0xc3;
+    private static final int WIDE = 0xc4;
     private static final int IFNULL = 0xc6;
     private static final int IFNONNULL = 0xc7;
 
@@ -171,11 +229,44 @@ public final class BytecodeJIT {
         if (n instanceof Add2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
         if (n instanceof Sub2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
         if (n instanceof Mul2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof Div2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
         if (n instanceof NegateNode a) return canCompileNode(a.a, false);
         if (n instanceof IncNode a) return canCompileNode(a.a, false);
         if (n instanceof DecNode a) return canCompileNode(a.a, false);
         if (n instanceof Rem2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
         if (n instanceof Quot2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof UncheckedAdd2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof UncheckedSub2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof UncheckedMul2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof UncheckedIncNode a) return canCompileNode(a.a, false);
+        if (n instanceof UncheckedDecNode a) return canCompileNode(a.a, false);
+        if (n instanceof UncheckedNegateNode a) return canCompileNode(a.a, false);
+        if (n instanceof BitOp2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof BitNotNode a) return canCompileNode(a.a, false);
+        if (n instanceof LongCastNode a) return canCompileNode(a.a, false);
+        if (n instanceof DoubleCastNode a) return canCompileNode(a.a, false);
+        if (n instanceof CountNode a) return canCompileNode(a.coll, false);
+        if (n instanceof NthNode a) {
+            return canCompileNode(a.coll, false) && canCompileNode(a.idx, false)
+                    && (a.notFound == null || canCompileNode(a.notFound, false));
+        }
+        if (n instanceof GetNode a) {
+            return canCompileNode(a.coll, false) && canCompileNode(a.key, false)
+                    && (a.notFound == null || canCompileNode(a.notFound, false));
+        }
+        if (n instanceof TransientNode a) return canCompileNode(a.coll, false);
+        if (n instanceof PersistentBangNode a) return canCompileNode(a.target, false);
+        if (n instanceof ConjBangNode a) return canCompileNode(a.target, false) && canCompileNode(a.val, false);
+        if (n instanceof AssocBangNode a) return canCompileNode(a.target, false) && canCompileNode(a.key, false) && canCompileNode(a.val, false);
+        if (n instanceof ConjNode a) return canCompileNode(a.coll, false) && canCompileNode(a.val, false);
+        if (n instanceof AssocNode a) return canCompileNode(a.coll, false) && canCompileNode(a.key, false) && canCompileNode(a.val, false);
+        if (n instanceof FirstNode a) return canCompileNode(a.coll, false);
+        if (n instanceof NextNode a) return canCompileNode(a.coll, false);
+        if (n instanceof RestNode a) return canCompileNode(a.coll, false);
+        if (n instanceof SeqNode a) return canCompileNode(a.coll, false);
+        if (n instanceof EvenPNode a) return canCompileNode(a.a, false);
+        if (n instanceof OddPNode a) return canCompileNode(a.a, false);
+        if (n instanceof TypePredNode a) return canCompileNode(a.a, false);
         if (n instanceof Lt2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
         if (n instanceof Lte2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
         if (n instanceof Gt2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
@@ -221,9 +312,13 @@ public final class BytecodeJIT {
             byte[] bytecode = ce.toByteArray();
 
             Class<?> cls = LOADER.define(binaryName, bytecode);
-            Constructor<?> ctor = cls.getConstructor(Object[].class, Object[][].class, String.class);
-            return (Fn) ctor.newInstance(ce.constObjects.toArray(), cf.getCaptured(), cf.getName());
+            Constructor<?> ctor = cls.getConstructor(
+                    Object[].class, Object[][].class, String.class, CompiledFn.class);
+            return (Fn) ctor.newInstance(ce.constObjects.toArray(), cf.getCaptured(), cf.getName(), cf);
         } catch (Throwable t) {
+            if (STRICT_JIT) {
+                throw new RuntimeException("BytecodeJIT compilation failed for " + cf.getName(), t);
+            }
             return null;
         }
     }
@@ -262,20 +357,83 @@ public final class BytecodeJIT {
         return lock;
     }
 
+    public static char toChar(Object o) {
+        if (o instanceof Character c) return c;
+        if (o instanceof Number n) return (char) n.intValue();
+        throw new ClassCastException("Cannot cast " + (o == null ? "nil" : o.getClass().getName()) + " to char");
+    }
+
+    public static boolean isMap(Object x) {
+        return x instanceof PersistentHashMap || x instanceof Map<?, ?>;
+    }
+
+    public static boolean isSet(Object x) {
+        return x instanceof PersistentHashSet || x instanceof Set<?>;
+    }
+
+    // ========================================================================
+    // Method & Specialization Planning
+    // ========================================================================
+
+    private static final class SlotLayout {
+        final ValType[] slotTypes;
+        final int[] jvmSlot;
+        final int totalLocals;
+
+        SlotLayout(FnMethod m, ValType[] slotTypes, int baseSlot) {
+            this.slotTypes = slotTypes;
+            this.jvmSlot = new int[m.maxSlots];
+            int next = baseSlot;
+            for (int i = 0; i < m.maxSlots; i++) {
+                this.jvmSlot[i] = next;
+                ValType t = (i < slotTypes.length) ? slotTypes[i] : ValType.ANY;
+                next += (t == ValType.LONG || t == ValType.DOUBLE) ? 2 : 1;
+            }
+            this.totalLocals = next;
+        }
+    }
+
     private static void emitMethods(ClassEmitter ce, CompiledFn cf) {
         FnMethod[] fixed = cf.getFixedMethods();
         FnMethod variadic = cf.getVariadicMethod();
         ce.fixedMethods = fixed;
+        ce.ownerFn = cf;
+        ce.ownerVar = cf.getOwnerVar();
 
-        // Emit invoke()..invoke(Object,Object,Object,Object) for fixed arities 0..4
-        for (int arity = 0; arity <= 4; arity++) {
+        // Pass 1: discover primitive specializations and generic analyses for all arities
+        AnalysisResult[] genericFixed = new AnalysisResult[fixed.length];
+        for (int arity = 0; arity < fixed.length; arity++) {
             FnMethod m = fixed[arity];
             if (m != null) {
-                emitFixedInvoke(ce, m, arity, arity);
+                genericFixed[arity] = TypeAnalyzer.analyzeGeneric(m, cf);
+                if (arity >= 1 && arity <= 3) {
+                    List<PrimSpec> specs = TypeAnalyzer.discoverPrimSpecs(m, cf);
+                    if (!specs.isEmpty()) {
+                        ce.primSpecsByArity.put(arity, specs);
+                    }
+                }
+            }
+        }
+        AnalysisResult genericVariadic = variadic != null ? TypeAnalyzer.analyzeGeneric(variadic, cf) : null;
+
+        // Pass 2: emit primitive specialized methods
+        for (Map.Entry<Integer, List<PrimSpec>> e : ce.primSpecsByArity.entrySet()) {
+            int arity = e.getKey();
+            FnMethod m = fixed[arity];
+            for (PrimSpec ps : e.getValue()) {
+                emitPrimInvoke(ce, m, arity, arity, ps);
             }
         }
 
-        // Emit invokeVarargs([Ljava/lang/Object;)Ljava/lang/Object; if needed
+        // Pass 3: emit invoke()..invoke(Object,Object,Object,Object) for fixed arities 0..4
+        for (int arity = 0; arity <= 4; arity++) {
+            FnMethod m = fixed[arity];
+            if (m != null) {
+                emitFixedInvoke(ce, m, arity, arity, genericFixed[arity], ce.primSpecsByArity.get(arity));
+            }
+        }
+
+        // Pass 4: emit invokeVarargs([Ljava/lang/Object;)Ljava/lang/Object; if needed
         boolean hasHighFixed = false;
         for (int i = 5; i < fixed.length; i++) {
             if (fixed[i] != null) {
@@ -284,47 +442,134 @@ public final class BytecodeJIT {
             }
         }
         if (hasHighFixed || variadic != null) {
-            emitVarargsInvoke(ce, fixed, variadic);
+            emitVarargsInvoke(ce, fixed, genericFixed, variadic, genericVariadic);
         }
     }
 
-    private static void emitFixedInvoke(ClassEmitter ce, FnMethod m, int arity, int methodCaptureIdx) {
-        StringBuilder desc = new StringBuilder("(");
-        for (int i = 0; i < arity; i++) desc.append("Ljava/lang/Object;");
-        desc.append(")Ljava/lang/Object;");
+    private static void emitPrimInvoke(
+            ClassEmitter ce, FnMethod m, int arity, int methodCaptureIdx, PrimSpec ps) {
+        int[] argJvmSlots = new int[arity];
+        int nextArgSlot = 1;
+        for (int i = 0; i < arity; i++) {
+            argJvmSlots[i] = nextArgSlot;
+            ValType pt = ps.paramTypes[i];
+            nextArgSlot += (pt == ValType.LONG || pt == ValType.DOUBLE) ? 2 : 1;
+        }
 
-        CodeGen cg = ce.beginMethod("invoke", desc.toString(), 1 + arity + m.maxSlots);
-        cg.selfSlot = m.selfSlot;
-        int baseSlot = 1 + arity;
+        SlotLayout layout = new SlotLayout(m, ps.analysis.slotTypes, nextArgSlot);
+        CodeGen cg = ce.beginMethod(ps.methodName, ps.descriptor, layout.totalLocals);
+        cg.setContext(m, ps.analysis, layout);
 
-        // Initialize selfSlot if present
+        // Initialize selfSlot
         if (m.selfSlot != -1) {
             cg.aload(0);
-            cg.astore(baseSlot + m.selfSlot);
+            cg.astore(layout.jvmSlot[m.selfSlot]);
         }
         // Initialize captured locals
-        if (m.capturedLocalSlots.length > 0) {
-            cg.aload(0);
-            cg.getfield(ce.className, "captured", "[[Ljava/lang/Object;");
-            cg.iconst(methodCaptureIdx);
-            cg.aaload();
-            for (int i = 0; i < m.capturedLocalSlots.length; i++) {
-                if (i + 1 < m.capturedLocalSlots.length) cg.dup();
-                cg.iconst(i);
-                cg.aaload();
-                cg.astore(baseSlot + m.capturedLocalSlots[i]);
-            }
-        }
-        // Copy parameters into local slots
+        emitInitCaptured(ce, cg, m, methodCaptureIdx, layout);
+        // Copy specialized arguments into logical slots
         for (int i = 0; i < arity; i++) {
-            cg.aload(1 + i);
-            cg.astore(baseSlot + m.paramSlots[i]);
+            ValType entryT = ps.paramTypes[i];
+            int logicalSlot = m.paramSlots[i];
+            ValType targetT = layout.slotTypes[logicalSlot];
+            cg.loadJvmLocal(argJvmSlots[i], entryT);
+            cg.convertValue(entryT, targetT);
+            cg.storeLogicalSlot(logicalSlot);
         }
 
         Label fnLoopStart = new Label();
         cg.markLabel(fnLoopStart);
         cg.pushLoopTarget(m.paramSlots, fnLoopStart);
-        boolean terminated = cg.emitBoxed(m.body, baseSlot);
+        ValType retT = ps.analysis.returnType;
+        boolean terminated = cg.emitReturnTyped(m.body, retT);
+        cg.popLoopTarget();
+        if (!terminated) {
+            cg.emitReturnInstruction(retT);
+        }
+        cg.finish();
+    }
+
+    private static void emitFixedInvoke(
+            ClassEmitter ce, FnMethod m, int arity, int methodCaptureIdx,
+            AnalysisResult analysis, List<PrimSpec> specs) {
+        StringBuilder desc = new StringBuilder("(");
+        for (int i = 0; i < arity; i++) desc.append("Ljava/lang/Object;");
+        desc.append(")Ljava/lang/Object;");
+
+        int baseSlot = 1 + arity;
+        SlotLayout layout = new SlotLayout(m, analysis.slotTypes, baseSlot);
+        CodeGen cg = ce.beginMethod("invoke", desc.toString(), layout.totalLocals);
+        cg.setContext(m, analysis, layout);
+
+        // Fast guarded dispatch to primitive-specialized overloads
+        if (specs != null && !specs.isEmpty()) {
+            for (PrimSpec ps : specs) {
+                Label nextSpec = new Label();
+                for (int i = 0; i < arity; i++) {
+                    ValType pt = ps.paramTypes[i];
+                    if (pt == ValType.LONG) {
+                        cg.aload(1 + i);
+                        cg.emitInstanceof("java/lang/Long");
+                        cg.ifeq(nextSpec);
+                    } else if (pt == ValType.DOUBLE) {
+                        cg.aload(1 + i);
+                        cg.emitInstanceof("java/lang/Double");
+                        cg.ifeq(nextSpec);
+                    } else if (pt == ValType.BOOL) {
+                        cg.aload(1 + i);
+                        cg.emitInstanceof("java/lang/Boolean");
+                        cg.ifeq(nextSpec);
+                    }
+                }
+                cg.aload(0);
+                int argWords = 1;
+                for (int i = 0; i < arity; i++) {
+                    ValType pt = ps.paramTypes[i];
+                    cg.aload(1 + i);
+                    if (pt == ValType.LONG) {
+                        cg.checkcast("java/lang/Long");
+                        cg.invokevirtual("java/lang/Long", "longValue", "()J", 1, 2);
+                        argWords += 2;
+                    } else if (pt == ValType.DOUBLE) {
+                        cg.checkcast("java/lang/Double");
+                        cg.invokevirtual("java/lang/Double", "doubleValue", "()D", 1, 2);
+                        argWords += 2;
+                    } else if (pt == ValType.BOOL) {
+                        cg.checkcast("java/lang/Boolean");
+                        cg.invokevirtual("java/lang/Boolean", "booleanValue", "()Z", 1, 1);
+                        argWords += 1;
+                    } else {
+                        argWords += 1;
+                    }
+                }
+                ValType retT = ps.analysis.returnType;
+                int retWords = (retT == ValType.LONG || retT == ValType.DOUBLE) ? 2 : 1;
+                cg.invokevirtual(ce.className, ps.methodName, ps.descriptor, argWords, retWords);
+                cg.boxValue(retT);
+                cg.areturn();
+                cg.markLabel(nextSpec);
+                cg.curStack = 0;
+            }
+        }
+
+        // Generic body fallback
+        if (m.selfSlot != -1) {
+            cg.aload(0);
+            cg.astore(layout.jvmSlot[m.selfSlot]);
+        }
+        emitInitCaptured(ce, cg, m, methodCaptureIdx, layout);
+        for (int i = 0; i < arity; i++) {
+            int logicalSlot = m.paramSlots[i];
+            ValType targetT = layout.slotTypes[logicalSlot];
+            cg.aload(1 + i);
+            cg.unboxFromObject(targetT);
+            cg.storeLogicalSlot(logicalSlot);
+        }
+
+        Label fnLoopStart = new Label();
+        cg.markLabel(fnLoopStart);
+        cg.pushLoopTarget(m.paramSlots, fnLoopStart);
+        boolean terminated = cg.emitBoxed(m.body);
         cg.popLoopTarget();
         if (!terminated) {
             cg.areturn();
@@ -332,15 +577,26 @@ public final class BytecodeJIT {
         cg.finish();
     }
 
-    private static void emitVarargsInvoke(ClassEmitter ce, FnMethod[] fixed, FnMethod variadic) {
-        int maxMethodSlots = 0;
-        for (FnMethod m : fixed) if (m != null && m.maxSlots > maxMethodSlots) maxMethodSlots = m.maxSlots;
-        if (variadic != null && variadic.maxSlots > maxMethodSlots) maxMethodSlots = variadic.maxSlots;
-
-        CodeGen cg = ce.beginMethod("invokeVarargs", "([Ljava/lang/Object;)Ljava/lang/Object;", 3 + maxMethodSlots);
-        // local 0: this, local 1: Object[] args, local 2: int len
-        int lenLocal = 2;
+    private static void emitVarargsInvoke(
+            ClassEmitter ce, FnMethod[] fixed, AnalysisResult[] genericFixed,
+            FnMethod variadic, AnalysisResult genericVariadic) {
         int baseSlot = 3;
+        int maxNeededLocals = baseSlot;
+        SlotLayout[] fixedLayouts = new SlotLayout[fixed.length];
+        for (int i = 5; i < fixed.length; i++) {
+            if (fixed[i] != null) {
+                fixedLayouts[i] = new SlotLayout(fixed[i], genericFixed[i].slotTypes, baseSlot);
+                maxNeededLocals = Math.max(maxNeededLocals, fixedLayouts[i].totalLocals);
+            }
+        }
+        SlotLayout varLayout = null;
+        if (variadic != null) {
+            varLayout = new SlotLayout(variadic, genericVariadic.slotTypes, baseSlot);
+            maxNeededLocals = Math.max(maxNeededLocals, varLayout.totalLocals);
+        }
+
+        CodeGen cg = ce.beginMethod("invokeVarargs", "([Ljava/lang/Object;)Ljava/lang/Object;", maxNeededLocals);
+        int lenLocal = 2;
 
         cg.aload(1);
         cg.arraylength();
@@ -367,7 +623,7 @@ public final class BytecodeJIT {
                 cg.invokevirtual(ce.className, "invoke", desc.toString(), 1 + i, 1);
                 cg.areturn();
             } else {
-                emitVarargsMethodBody(ce, cg, m, i, baseSlot, false);
+                emitVarargsMethodBody(ce, cg, m, genericFixed[i], fixedLayouts[i], i, false);
             }
             cg.markLabel(nextCheck);
             cg.curStack = 0;
@@ -378,7 +634,7 @@ public final class BytecodeJIT {
             cg.iload(lenLocal);
             cg.iconst(variadic.fixedArity);
             cg.ifIcmpLt(errLabel);
-            emitVarargsMethodBody(ce, cg, variadic, fixed.length, baseSlot, true);
+            emitVarargsMethodBody(ce, cg, variadic, genericVariadic, varLayout, fixed.length, true);
             cg.markLabel(errLabel);
             cg.curStack = 0;
         }
@@ -392,38 +648,28 @@ public final class BytecodeJIT {
     }
 
     private static void emitVarargsMethodBody(
-            ClassEmitter ce, CodeGen cg, FnMethod m, int captureIdx, int baseSlot, boolean isVariadic) {
-        int prevSelf = cg.selfSlot;
-        cg.selfSlot = m.selfSlot;
+            ClassEmitter ce, CodeGen cg, FnMethod m, AnalysisResult analysis, SlotLayout layout,
+            int captureIdx, boolean isVariadic) {
+        cg.setContext(m, analysis, layout);
         if (m.selfSlot != -1) {
             cg.aload(0);
-            cg.astore(baseSlot + m.selfSlot);
+            cg.astore(layout.jvmSlot[m.selfSlot]);
         }
-        if (m.capturedLocalSlots.length > 0) {
-            cg.aload(0);
-            cg.getfield(ce.className, "captured", "[[Ljava/lang/Object;");
-            cg.iconst(captureIdx);
-            cg.aaload();
-            for (int i = 0; i < m.capturedLocalSlots.length; i++) {
-                if (i + 1 < m.capturedLocalSlots.length) cg.dup();
-                cg.iconst(i);
-                cg.aaload();
-                cg.astore(baseSlot + m.capturedLocalSlots[i]);
-            }
-        }
+        emitInitCaptured(ce, cg, m, captureIdx, layout);
         for (int i = 0; i < m.fixedArity; i++) {
+            int logicalSlot = m.paramSlots[i];
+            ValType targetT = layout.slotTypes[logicalSlot];
             cg.aload(1);
             cg.iconst(i);
             cg.aaload();
-            cg.astore(baseSlot + m.paramSlots[i]);
+            cg.unboxFromObject(targetT);
+            cg.storeLogicalSlot(logicalSlot);
         }
         if (isVariadic) {
             cg.aload(1);
             cg.iconst(m.fixedArity);
             cg.invokestatic("cljl/lang/PersistentList", "createFromArraySlice",
                     "([Ljava/lang/Object;I)Lcljl/lang/ISeq;", 2, 1);
-            // If empty list returned for 0 rest args, Clojure passes nil
-            // Note: createFromArraySlice returns EMPTY when offset >= len; Clojure rest param is nil when no rest args
             Label nonEmpty = new Label();
             Label doneRest = new Label();
             cg.iload(2);
@@ -434,18 +680,36 @@ public final class BytecodeJIT {
             cg.gotoLabel(doneRest);
             cg.markLabel(nonEmpty);
             cg.markLabel(doneRest);
-            cg.astore(baseSlot + m.paramSlots[m.fixedArity]);
+            int restSlot = m.paramSlots[m.fixedArity];
+            cg.unboxFromObject(layout.slotTypes[restSlot]);
+            cg.storeLogicalSlot(restSlot);
         }
 
         Label loopStart = new Label();
         cg.markLabel(loopStart);
         cg.pushLoopTarget(m.paramSlots, loopStart);
-        boolean terminated = cg.emitBoxed(m.body, baseSlot);
+        boolean terminated = cg.emitBoxed(m.body);
         cg.popLoopTarget();
         if (!terminated) {
             cg.areturn();
         }
-        cg.selfSlot = prevSelf;
+    }
+
+    private static void emitInitCaptured(
+            ClassEmitter ce, CodeGen cg, FnMethod m, int methodCaptureIdx, SlotLayout layout) {
+        if (m.capturedLocalSlots.length == 0) return;
+        cg.aload(0);
+        cg.getfield(ce.className, "captured", "[[Ljava/lang/Object;", 1);
+        cg.iconst(methodCaptureIdx);
+        cg.aaload();
+        for (int i = 0; i < m.capturedLocalSlots.length; i++) {
+            if (i + 1 < m.capturedLocalSlots.length) cg.dup();
+            cg.iconst(i);
+            cg.aaload();
+            int logicalSlot = m.capturedLocalSlots[i];
+            cg.unboxFromObject(layout.slotTypes[logicalSlot]);
+            cg.storeLogicalSlot(logicalSlot);
+        }
     }
 
     // ========================================================================
@@ -454,8 +718,8 @@ public final class BytecodeJIT {
 
     private static final class Label {
         int pos = -1;
-        final List<int[]> fixups = new ArrayList<>(); // {opcodePos, operandPos}
-        final List<int[]> wideFixups = new ArrayList<>(); // {opcodePos, operandPos} for 32-bit offsets
+        final List<int[]> fixups = new ArrayList<>();
+        final List<int[]> wideFixups = new ArrayList<>();
     }
 
     private record LoopTarget(int[] slots, Label start) {}
@@ -465,6 +729,9 @@ public final class BytecodeJIT {
     private static final class ClassEmitter {
         final String className;
         FnMethod[] fixedMethods;
+        CompiledFn ownerFn;
+        Var ownerVar;
+        final Map<Integer, List<PrimSpec>> primSpecsByArity = new LinkedHashMap<>();
         final ConstantPool cp = new ConstantPool();
         final List<Object> constObjects = new ArrayList<>();
         final IdentityHashMap<Object, Integer> constIndexMap = new IdentityHashMap<>();
@@ -473,18 +740,16 @@ public final class BytecodeJIT {
         final int thisClassIdx;
         final int superClassIdx;
         final int codeAttrNameIdx;
-        final int constsFieldIdx;
-        final int capturedFieldIdx;
-        final int nameFieldIdx;
 
         ClassEmitter(String className) {
             this.className = className;
             this.thisClassIdx = cp.addClass(className);
             this.superClassIdx = cp.addClass("cljl/Fn");
             this.codeAttrNameIdx = cp.addUtf8("Code");
-            this.constsFieldIdx = cp.addFieldref(className, "consts", "[Ljava/lang/Object;");
-            this.capturedFieldIdx = cp.addFieldref(className, "captured", "[[Ljava/lang/Object;");
-            this.nameFieldIdx = cp.addFieldref(className, "name", "Ljava/lang/String;");
+            cp.addFieldref(className, "consts", "[Ljava/lang/Object;");
+            cp.addFieldref(className, "captured", "[[Ljava/lang/Object;");
+            cp.addFieldref(className, "name", "Ljava/lang/String;");
+            cp.addFieldref(className, "outerFn", "Lcljl/Compiler$CompiledFn;");
 
             emitConstructor();
             emitGetName();
@@ -504,7 +769,10 @@ public final class BytecodeJIT {
         }
 
         private void emitConstructor() {
-            CodeGen cg = beginMethod("<init>", "([Ljava/lang/Object;[[Ljava/lang/Object;Ljava/lang/String;)V", 4);
+            CodeGen cg = beginMethod(
+                    "<init>",
+                    "([Ljava/lang/Object;[[Ljava/lang/Object;Ljava/lang/String;Lcljl/Compiler$CompiledFn;)V",
+                    5);
             cg.aload(0);
             cg.invokespecial("cljl/Fn", "<init>", "()V", 1, 0);
             cg.aload(0);
@@ -516,6 +784,9 @@ public final class BytecodeJIT {
             cg.aload(0);
             cg.aload(3);
             cg.putfield(className, "name", "Ljava/lang/String;");
+            cg.aload(0);
+            cg.aload(4);
+            cg.putfield(className, "outerFn", "Lcljl/Compiler$CompiledFn;");
             cg.vreturn();
             cg.finish();
         }
@@ -523,7 +794,7 @@ public final class BytecodeJIT {
         private void emitGetName() {
             CodeGen cg = beginMethod("getName", "()Ljava/lang/String;", 1);
             cg.aload(0);
-            cg.getfield(className, "name", "Ljava/lang/String;");
+            cg.getfield(className, "name", "Ljava/lang/String;", 1);
             cg.areturn();
             cg.finish();
         }
@@ -534,7 +805,7 @@ public final class BytecodeJIT {
 
             out.writeInt(0xCAFEBABE);
             out.writeShort(0);   // minor
-            out.writeShort(49);  // major (Java 5 — standard verifier, no StackMapTable needed)
+            out.writeShort(49);  // major (Java 5 — no StackMapTable needed)
 
             cp.writeTo(out);
 
@@ -543,19 +814,19 @@ public final class BytecodeJIT {
             out.writeShort(superClassIdx);
             out.writeShort(0); // interfaces count
 
-            // 3 fields: consts, captured, name
-            out.writeShort(3);
-            writeField(out, 0x0012, "consts", "[Ljava/lang/Object;");   // private final
+            // 4 fields: consts, captured, name, outerFn
+            out.writeShort(4);
+            writeField(out, 0x0012, "consts", "[Ljava/lang/Object;");
             writeField(out, 0x0012, "captured", "[[Ljava/lang/Object;");
             writeField(out, 0x0012, "name", "Ljava/lang/String;");
+            writeField(out, 0x0012, "outerFn", "Lcljl/Compiler$CompiledFn;");
 
-            // methods
             out.writeShort(methodInfos.size());
             for (byte[] m : methodInfos) {
                 out.write(m);
             }
 
-            out.writeShort(0); // class attributes count
+            out.writeShort(0);
             out.flush();
             return baos.toByteArray();
         }
@@ -664,6 +935,10 @@ public final class BytecodeJIT {
             return addRef(10, owner, name, desc);
         }
 
+        int addInterfaceMethodref(String owner, String name, String desc) {
+            return addRef(11, owner, name, desc);
+        }
+
         private int addRef(int tag, String owner, String name, String desc) {
             String key = tag + "\0" + owner + "\0" + name + "\0" + desc;
             return refMap.computeIfAbsent(key, k -> {
@@ -701,9 +976,14 @@ public final class BytecodeJIT {
         final ByteArrayOutputStream code = new ByteArrayOutputStream(256);
         final Deque<LoopTarget> loopTargets = new ArrayDeque<>();
         final List<ExceptionEntry> exceptionTable = new ArrayList<>();
+        final List<Label> allLabels = new ArrayList<>();
+
+        FnMethod currentMethod;
+        AnalysisResult analysis;
+        SlotLayout layout;
+        int selfSlot = -1;
         int curTempLocals = 0;
         int maxTempLocals = 0;
-        int selfSlot = -1;
         int curStack = 0;
         int maxStack = 0;
 
@@ -712,6 +992,17 @@ public final class BytecodeJIT {
             this.nameIdx = ce.cp.addUtf8(name);
             this.descIdx = ce.cp.addUtf8(desc);
             this.maxLocals = maxLocals;
+        }
+
+        void setContext(FnMethod method, AnalysisResult analysis, SlotLayout layout) {
+            this.currentMethod = method;
+            this.analysis = analysis;
+            this.layout = layout;
+            this.selfSlot = method != null ? method.selfSlot : -1;
+        }
+
+        ValType typeOf(Node n) {
+            return analysis != null ? analysis.typeOf(n) : ValType.ANY;
         }
 
         int allocTempLocal() {
@@ -745,7 +1036,11 @@ public final class BytecodeJIT {
         private void emitJump(int opcode, Label target) {
             int opcodePos = code.size();
             code.write(opcode);
-            adjStack(opcode == GOTO ? 0 : (opcode >= IF_ICMPEQ && opcode <= IF_ACMPNE ? -2 : -1));
+            int delta;
+            if (opcode == GOTO) delta = 0;
+            else if (opcode >= IF_ICMPEQ && opcode <= IF_ACMPNE) delta = -2;
+            else delta = -1;
+            adjStack(delta);
             int operandPos = code.size();
             code.write(0);
             code.write(0);
@@ -779,28 +1074,20 @@ public final class BytecodeJIT {
         void gotoLabel(Label l) { emitJump(GOTO, l); }
         void ifeq(Label l) { emitJump(IFEQ, l); }
         void ifne(Label l) { emitJump(IFNE, l); }
+        void iflt(Label l) { emitJump(IFLT, l); }
+        void ifge(Label l) { emitJump(IFGE, l); }
+        void ifgt(Label l) { emitJump(IFGT, l); }
+        void ifle(Label l) { emitJump(IFLE, l); }
         void ifIcmpNe(Label l) { emitJump(IF_ICMPNE, l); }
-        void ifIcmpGt(Label l) {
-            int opcodePos = code.size();
-            code.write(0xa3); // IF_ICMPGT
-            adjStack(-2);
-            int operandPos = code.size();
-            code.write(0); code.write(0);
-            l.fixups.add(new int[]{opcodePos, operandPos});
-        }
-        void ifIcmpLt(Label l) {
-            int opcodePos = code.size();
-            code.write(0xa1); // IF_ICMPLT
-            adjStack(-2);
-            int operandPos = code.size();
-            code.write(0); code.write(0);
-            l.fixups.add(new int[]{opcodePos, operandPos});
-        }
+        void ifIcmpLt(Label l) { emitJump(IF_ICMPLT, l); }
+        void ifIcmpGt(Label l) { emitJump(IF_ICMPGT, l); }
         void ifnull(Label l) { emitJump(IFNULL, l); }
         void ifnonnull(Label l) { emitJump(IFNONNULL, l); }
         void ifAcmpNe(Label l) { emitJump(IF_ACMPNE, l); }
+        void ifAcmpEq(Label l) { emitJump(IF_ACMPEQ, l); }
 
         void aconstNull() { code.write(ACONST_NULL); adjStack(1); }
+
         void iconst(int v) {
             if (v >= -1 && v <= 5) {
                 code.write(ICONST_0 + v);
@@ -839,6 +1126,16 @@ public final class BytecodeJIT {
         }
 
         void ldcLong(long v) {
+            if (v == 0L) {
+                code.write(LCONST_0);
+                adjStack(2);
+                return;
+            }
+            if (v == 1L) {
+                code.write(LCONST_1);
+                adjStack(2);
+                return;
+            }
             int idx = ce.cp.addLong(v);
             code.write(LDC2_W);
             code.write((idx >>> 8) & 0xff);
@@ -847,6 +1144,16 @@ public final class BytecodeJIT {
         }
 
         void ldcDouble(double v) {
+            if (Double.doubleToRawLongBits(v) == 0L) {
+                code.write(DCONST_0);
+                adjStack(2);
+                return;
+            }
+            if (v == 1.0) {
+                code.write(DCONST_1);
+                adjStack(2);
+                return;
+            }
             int idx = ce.cp.addDouble(v);
             code.write(LDC2_W);
             code.write((idx >>> 8) & 0xff);
@@ -854,84 +1161,109 @@ public final class BytecodeJIT {
             adjStack(2);
         }
 
-        void aload(int idx) {
+        private void emitLocalOp(int baseShort, int wideOp, int idx, int stackDelta) {
             if (idx <= 3) {
-                code.write(ALOAD_0 + idx);
+                code.write(baseShort + idx);
             } else if (idx <= 255) {
-                code.write(ALOAD);
+                code.write(wideOp);
                 code.write(idx);
             } else {
-                code.write(0xc4); // WIDE
-                code.write(ALOAD);
+                code.write(WIDE);
+                code.write(wideOp);
                 code.write((idx >>> 8) & 0xff);
                 code.write(idx & 0xff);
             }
-            adjStack(1);
+            adjStack(stackDelta);
         }
 
-        void astore(int idx) {
-            if (idx <= 3) {
-                code.write(0x4b + idx); // ASTORE_0..3
-            } else if (idx <= 255) {
-                code.write(ASTORE);
-                code.write(idx);
-            } else {
-                code.write(0xc4); // WIDE
-                code.write(ASTORE);
-                code.write((idx >>> 8) & 0xff);
-                code.write(idx & 0xff);
-            }
-            adjStack(-1);
+        void aload(int idx) { emitLocalOp(ALOAD_0, ALOAD, idx, 1); }
+        void astore(int idx) { emitLocalOp(0x4b, ASTORE, idx, -1); }
+        void iload(int idx) { emitLocalOp(0x1a, ILOAD, idx, 1); }
+        void istore(int idx) { emitLocalOp(0x3b, ISTORE, idx, -1); }
+        void lload(int idx) { emitLocalOp(0x1e, LLOAD, idx, 2); }
+        void lstore(int idx) { emitLocalOp(0x3f, LSTORE, idx, -2); }
+        void dload(int idx) { emitLocalOp(0x26, DLOAD, idx, 2); }
+        void dstore(int idx) { emitLocalOp(0x47, DSTORE, idx, -2); }
+
+        void loadJvmLocal(int phys, ValType t) {
+            if (t == ValType.LONG) lload(phys);
+            else if (t == ValType.DOUBLE) dload(phys);
+            else if (t == ValType.BOOL) iload(phys);
+            else aload(phys);
         }
 
-        void iload(int idx) {
-            if (idx <= 3) {
-                code.write(0x1a + idx);
-            } else if (idx <= 255) {
-                code.write(0x15);
-                code.write(idx);
-            } else {
-                code.write(0xc4); // WIDE
-                code.write(0x15);
-                code.write((idx >>> 8) & 0xff);
-                code.write(idx & 0xff);
-            }
-            adjStack(1);
+        void storeLogicalSlot(int logicalSlot) {
+            int phys = layout.jvmSlot[logicalSlot];
+            ValType st = layout.slotTypes[logicalSlot];
+            if (st == ValType.LONG) lstore(phys);
+            else if (st == ValType.DOUBLE) dstore(phys);
+            else if (st == ValType.BOOL) istore(phys);
+            else astore(phys);
         }
 
-        void istore(int idx) {
-            if (idx <= 3) {
-                code.write(0x3b + idx);
-            } else if (idx <= 255) {
-                code.write(0x36);
-                code.write(idx);
-            } else {
-                code.write(0xc4); // WIDE
-                code.write(0x36);
-                code.write((idx >>> 8) & 0xff);
-                code.write(idx & 0xff);
-            }
-            adjStack(-1);
+        void loadLogicalSlot(int logicalSlot) {
+            int phys = layout.jvmSlot[logicalSlot];
+            loadJvmLocal(phys, layout.slotTypes[logicalSlot]);
         }
 
         void aaload() { code.write(AALOAD); adjStack(-1); }
         void aastore() { code.write(AASTORE); adjStack(-3); }
-        void arraylength() { code.write(0xbe); } // ARRAYLENGTH: -1 + 1 = 0
+        void arraylength() { code.write(ARRAYLENGTH); }
         void pop() { code.write(POP); adjStack(-1); }
+        void pop2() { code.write(POP2); adjStack(-2); }
         void dup() { code.write(DUP); adjStack(1); }
         void ixor() { code.write(IXOR); adjStack(-1); }
+        void ladd() { code.write(LADD); adjStack(-2); }
+        void lsub() { code.write(LSUB); adjStack(-2); }
+        void lmul() { code.write(LMUL); adjStack(-2); }
+        void ldiv() { code.write(LDIV); adjStack(-2); }
+        void lrem() { code.write(LREM); adjStack(-2); }
+        void lneg() { code.write(LNEG); }
+        void lshl() { code.write(LSHL); adjStack(-1); }
+        void lshr() { code.write(LSHR); adjStack(-1); }
+        void lushr() { code.write(LUSHR); adjStack(-1); }
+        void land() { code.write(LAND); adjStack(-2); }
+        void lor() { code.write(LOR); adjStack(-2); }
+        void lxor() { code.write(LXOR); adjStack(-2); }
+        void dadd() { code.write(DADD); adjStack(-2); }
+        void dsub() { code.write(DSUB); adjStack(-2); }
+        void dmul() { code.write(DMUL); adjStack(-2); }
+        void ddiv() { code.write(DDIV); adjStack(-2); }
+        void drem() { code.write(DREM); adjStack(-2); }
+        void dneg() { code.write(DNEG); }
+        void i2l() { code.write(I2L); adjStack(1); }
+        void l2i() { code.write(L2I); adjStack(-1); }
+        void l2d() { code.write(L2D); }
+        void f2d() { code.write(F2D); adjStack(1); }
+        void d2l() { code.write(D2L); }
+        void d2f() { code.write(D2F); adjStack(-1); }
+        void i2b() { code.write(I2B); }
+        void i2s() { code.write(I2S); }
+        void lcmp() { code.write(LCMP); adjStack(-3); }
+        void dcmpl() { code.write(DCMPL); adjStack(-3); }
+        void dcmpg() { code.write(DCMPG); adjStack(-3); }
+        void ireturn() { code.write(IRETURN); adjStack(-1); }
+        void lreturn() { code.write(LRETURN); adjStack(-2); }
+        void dreturn() { code.write(DRETURN); adjStack(-2); }
         void areturn() { code.write(ARETURN); adjStack(-1); }
         void vreturn() { code.write(RETURN); }
         void athrow() { code.write(ATHROW); adjStack(-1); }
         void monitorenter() { code.write(MONITORENTER); adjStack(-1); }
         void monitorexit() { code.write(MONITOREXIT); adjStack(-1); }
 
+        void newInst(String internalName) {
+            int idx = ce.cp.addClass(internalName);
+            code.write(NEW);
+            code.write((idx >>> 8) & 0xff);
+            code.write(idx & 0xff);
+            adjStack(1);
+        }
+
         void anewarray(String internalName) {
             int idx = ce.cp.addClass(internalName);
             code.write(ANEWARRAY);
             code.write((idx >>> 8) & 0xff);
             code.write(idx & 0xff);
-            // pops int count (-1), pushes array (+1) => 0
         }
 
         void checkcast(String internalName) {
@@ -941,20 +1273,27 @@ public final class BytecodeJIT {
             code.write(idx & 0xff);
         }
 
-        void getstatic(String owner, String name, String desc) {
+        void emitInstanceof(String internalName) {
+            int idx = ce.cp.addClass(internalName);
+            code.write(INSTANCEOF);
+            code.write((idx >>> 8) & 0xff);
+            code.write(idx & 0xff);
+        }
+
+        void getstatic(String owner, String name, String desc, int width) {
             int idx = ce.cp.addFieldref(owner, name, desc);
             code.write(GETSTATIC);
             code.write((idx >>> 8) & 0xff);
             code.write(idx & 0xff);
-            adjStack(1);
+            adjStack(width);
         }
 
-        void getfield(String owner, String name, String desc) {
+        void getfield(String owner, String name, String desc, int width) {
             int idx = ce.cp.addFieldref(owner, name, desc);
             code.write(GETFIELD);
             code.write((idx >>> 8) & 0xff);
             code.write(idx & 0xff);
-            // pops obj (-1), pushes val (+1) => 0
+            adjStack(width - 1);
         }
 
         void putfield(String owner, String name, String desc) {
@@ -989,27 +1328,1554 @@ public final class BytecodeJIT {
             adjStack(retSlots - argSlots);
         }
 
+        void invokeinterface(String owner, String name, String desc, int argSlots, int retSlots) {
+            int idx = ce.cp.addInterfaceMethodref(owner, name, desc);
+            code.write(INVOKEINTERFACE);
+            code.write((idx >>> 8) & 0xff);
+            code.write(idx & 0xff);
+            code.write(argSlots & 0xff);
+            code.write(0);
+            adjStack(retSlots - argSlots);
+        }
+
         void loadConstObj(Object obj) {
             int cIdx = ce.addConstObject(obj);
             aload(0);
-            getfield(ce.className, "consts", "[Ljava/lang/Object;");
+            getfield(ce.className, "consts", "[Ljava/lang/Object;", 1);
             iconst(cIdx);
             aaload();
         }
 
         // ====================================================================
-        // AST -> Bytecode Compilation
+        // Type Conversion Helpers
         // ====================================================================
 
-        boolean emitBoxed(Node node, int baseSlot) {
+        void boxValue(ValType t) {
+            if (t == ValType.LONG) {
+                invokestatic("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", 2, 1);
+            } else if (t == ValType.DOUBLE) {
+                invokestatic("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", 2, 1);
+            } else if (t == ValType.BOOL) {
+                invokestatic("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", 1, 1);
+            }
+        }
+
+        void unboxFromObject(ValType targetT) {
+            if (targetT == ValType.LONG) {
+                invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J", 1, 2);
+            } else if (targetT == ValType.DOUBLE) {
+                invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D", 1, 2);
+            } else if (targetT == ValType.BOOL) {
+                invokestatic("cljl/RT", "truthy", "(Ljava/lang/Object;)Z", 1, 1);
+            }
+        }
+
+        void convertValue(ValType from, ValType to) {
+            if (from == to) return;
+            if (from == ValType.LONG && to == ValType.DOUBLE) {
+                l2d();
+                return;
+            }
+            if (from == ValType.DOUBLE && to == ValType.LONG) {
+                d2l();
+                return;
+            }
+            if (from.isPrimitive() && !to.isPrimitive()) {
+                boxValue(from);
+            } else if (!from.isPrimitive() && to.isPrimitive()) {
+                unboxFromObject(to);
+            }
+        }
+
+        boolean emitReturnTyped(Node body, ValType retT) {
+            if (retT == ValType.LONG) return emitLong(body);
+            if (retT == ValType.DOUBLE) return emitDouble(body);
+            if (retT == ValType.BOOL) return emitBoolean(body);
+            return emitBoxed(body);
+        }
+
+        void emitReturnInstruction(ValType retT) {
+            if (retT == ValType.LONG) lreturn();
+            else if (retT == ValType.DOUBLE) dreturn();
+            else if (retT == ValType.BOOL) ireturn();
+            else areturn();
+        }
+
+        boolean emitDiscard(Node n) {
+            ValType t = typeOf(n);
+            if (n instanceof StaticMethodNode sm && analysis != null) {
+                Method m = analysis.resolvedMethods.get(sm);
+                if (m != null && m.getReturnType() == void.class) {
+                    emitResolvedStaticCallRaw(sm, m);
+                    return false;
+                }
+            }
+            if (n instanceof InstanceMethodNode im && analysis != null) {
+                Method m = analysis.resolvedMethods.get(im);
+                if (m != null && m.getReturnType() == void.class) {
+                    emitResolvedInstanceCallRaw(im, m);
+                    return false;
+                }
+            }
+            if (t == ValType.LONG) {
+                if (emitLong(n)) return true;
+                pop2();
+                return false;
+            }
+            if (t == ValType.DOUBLE) {
+                if (emitDouble(n)) return true;
+                pop2();
+                return false;
+            }
+            if (t == ValType.BOOL) {
+                if (emitBoolean(n)) return true;
+                pop();
+                return false;
+            }
+            if (emitBoxed(n)) return true;
+            pop();
+            return false;
+        }
+
+        void emitRef(Node n, Class<?> expected) {
+            emitBoxed(n);
+            if (expected != null && expected != Object.class) {
+                checkcast(expected.getName().replace('.', '/'));
+            }
+        }
+
+        // ====================================================================
+        // Typed Self-Call Lookup
+        // ====================================================================
+
+        private PrimSpec findMatchingPrimSpec(int arity, Node[] args) {
+            List<PrimSpec> specs = ce.primSpecsByArity.get(arity);
+            if (specs == null || specs.isEmpty()) return null;
+            for (PrimSpec ps : specs) {
+                boolean match = true;
+                for (int i = 0; i < arity; i++) {
+                    ValType pt = ps.paramTypes[i];
+                    if (pt == ValType.ANY) continue;
+                    if (!pt.equals(typeOf(args[i]))) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) return ps;
+            }
+            return null;
+        }
+
+        private boolean isDirectSelf(Node fnNode, int arity) {
+            return selfSlot != -1 && fnNode instanceof LocalNode ln && ln.slot == selfSlot
+                    && ce.fixedMethods != null && arity < ce.fixedMethods.length && ce.fixedMethods[arity] != null;
+        }
+
+        private boolean isOwnerVarCall(Var v, int arity) {
+            return ce.ownerVar != null && v == ce.ownerVar && ce.ownerFn != null
+                    && ce.fixedMethods != null && arity < ce.fixedMethods.length && ce.fixedMethods[arity] != null;
+        }
+
+        // ====================================================================
+        // Long Emission (2 stack words, returns true if terminated)
+        // ====================================================================
+
+        boolean emitLong(Node node) {
+            if (node instanceof ConstNode cn) {
+                if (cn.isLong) {
+                    ldcLong(cn.longVal);
+                } else if (cn.val instanceof Number num) {
+                    ldcLong(num.longValue());
+                } else if (cn.val instanceof Character ch) {
+                    ldcLong((long) ch);
+                } else {
+                    emitBoxedImpl(node);
+                    invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J", 1, 2);
+                }
+                return false;
+            }
+            if (node instanceof LocalNode ln) {
+                ValType st = layout.slotTypes[ln.slot];
+                if (st == ValType.LONG) {
+                    loadLogicalSlot(ln.slot);
+                } else if (st == ValType.DOUBLE) {
+                    loadLogicalSlot(ln.slot);
+                    d2l();
+                } else {
+                    loadLogicalSlot(ln.slot);
+                    invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J", 1, 2);
+                }
+                return false;
+            }
+            if (node instanceof VarRefNode) {
+                emitBoxedImpl(node);
+                invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J", 1, 2);
+                return false;
+            }
+            if (node instanceof IfNode iff) {
+                return emitIfTyped(iff, ValType.LONG);
+            }
+            if (node instanceof DoNode dn) {
+                return emitDoTyped(dn, ValType.LONG);
+            }
+            if (node instanceof LetNode ln) {
+                return emitLetTyped(ln, ValType.LONG);
+            }
+            if (node instanceof LoopNode lp) {
+                return emitLoopTyped(lp, ValType.LONG);
+            }
+            if (node instanceof LockingNode ln) {
+                return emitLockingTyped(ln, ValType.LONG);
+            }
+            if (node instanceof CaseNode cn) {
+                return emitCaseTyped(cn, ValType.LONG);
+            }
+            if (node instanceof Recur0Node || node instanceof Recur1Node
+                    || node instanceof Recur2Node || node instanceof RecurNNode) {
+                return emitRecur(node);
+            }
+            if (node instanceof ThrowNode tn) {
+                return emitThrow(tn);
+            }
+            if (node instanceof LongCastNode lc) {
+                ValType at = typeOf(lc.a);
+                if (at == ValType.LONG) return emitLong(lc.a);
+                if (at == ValType.DOUBLE) {
+                    if (emitDouble(lc.a)) return true;
+                    d2l();
+                    return false;
+                }
+                if (emitBoxed(lc.a)) return true;
+                invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J", 1, 2);
+                return false;
+            }
+            if (node instanceof Add2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                if (emitLong(a.b)) return true;
+                invokestatic("java/lang/Math", "addExact", "(JJ)J", 4, 2);
+                return false;
+            }
+            if (node instanceof Sub2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                if (emitLong(a.b)) return true;
+                invokestatic("java/lang/Math", "subtractExact", "(JJ)J", 4, 2);
+                return false;
+            }
+            if (node instanceof Mul2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                if (emitLong(a.b)) return true;
+                invokestatic("java/lang/Math", "multiplyExact", "(JJ)J", 4, 2);
+                return false;
+            }
+            if (node instanceof IncNode a && typeOf(a.a) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                invokestatic("java/lang/Math", "incrementExact", "(J)J", 2, 2);
+                return false;
+            }
+            if (node instanceof DecNode a && typeOf(a.a) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                invokestatic("java/lang/Math", "decrementExact", "(J)J", 2, 2);
+                return false;
+            }
+            if (node instanceof NegateNode a && typeOf(a.a) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                invokestatic("java/lang/Math", "negateExact", "(J)J", 2, 2);
+                return false;
+            }
+            if (node instanceof Rem2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                if (emitLong(a.b)) return true;
+                lrem();
+                return false;
+            }
+            if (node instanceof Quot2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                if (emitLong(a.b)) return true;
+                ldiv();
+                return false;
+            }
+            if (node instanceof UncheckedAdd2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                if (emitLong(a.b)) return true;
+                ladd();
+                return false;
+            }
+            if (node instanceof UncheckedSub2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                if (emitLong(a.b)) return true;
+                lsub();
+                return false;
+            }
+            if (node instanceof UncheckedMul2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                if (emitLong(a.b)) return true;
+                lmul();
+                return false;
+            }
+            if (node instanceof UncheckedIncNode a && typeOf(a.a) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                ldcLong(1L);
+                ladd();
+                return false;
+            }
+            if (node instanceof UncheckedDecNode a && typeOf(a.a) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                ldcLong(1L);
+                lsub();
+                return false;
+            }
+            if (node instanceof UncheckedNegateNode a && typeOf(a.a) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                lneg();
+                return false;
+            }
+            if (node instanceof BitOp2Node b) {
+                if (emitLong(b.a)) return true;
+                if (emitLong(b.b)) return true;
+                switch (b.op) {
+                    case AND -> land();
+                    case OR -> lor();
+                    case XOR -> lxor();
+                    case AND_NOT -> { ldcLong(-1L); lxor(); land(); }
+                    case SHL -> { l2i(); lshl(); }
+                    case SHR -> { l2i(); lshr(); }
+                    case USHR -> { l2i(); lushr(); }
+                }
+                return false;
+            }
+            if (node instanceof BitNotNode b) {
+                if (emitLong(b.a)) return true;
+                ldcLong(-1L);
+                lxor();
+                return false;
+            }
+            if (node instanceof CountNode c) {
+                ValType ct = typeOf(c.coll);
+                if (ct.isRef() && ct.nonNull) {
+                    if (ct.refClass == PersistentVector.class) {
+                        emitRef(c.coll, PersistentVector.class);
+                        getfield("cljl/lang/PersistentVector", "cnt", "I", 1);
+                        i2l();
+                        return false;
+                    }
+                    if (ct.refClass == PersistentHashMap.class) {
+                        emitRef(c.coll, PersistentHashMap.class);
+                        getfield("cljl/lang/PersistentHashMap", "count", "I", 1);
+                        i2l();
+                        return false;
+                    }
+                    if (ct.refClass == String.class) {
+                        emitRef(c.coll, String.class);
+                        invokevirtual("java/lang/String", "length", "()I", 1, 1);
+                        i2l();
+                        return false;
+                    }
+                }
+                emitBoxed(c.coll);
+                invokestatic("cljl/RT", "count", "(Ljava/lang/Object;)I", 1, 1);
+                i2l();
+                return false;
+            }
+            if (node instanceof StaticMethodNode sm && analysis != null) {
+                Method m = analysis.resolvedMethods.get(sm);
+                if (m != null && ValType.fromJavaReturn(m.getReturnType()) == ValType.LONG) {
+                    emitResolvedStaticCallRaw(sm, m);
+                    coerceJavaReturnToStack(m.getReturnType(), ValType.LONG);
+                    return false;
+                }
+            }
+            if (node instanceof InstanceMethodNode im && analysis != null) {
+                Method m = analysis.resolvedMethods.get(im);
+                if (m != null && ValType.fromJavaReturn(m.getReturnType()) == ValType.LONG) {
+                    emitResolvedInstanceCallRaw(im, m);
+                    coerceJavaReturnToStack(m.getReturnType(), ValType.LONG);
+                    return false;
+                }
+            }
+            if (node instanceof StaticFieldNode sf && analysis != null) {
+                Field f = analysis.resolvedFields.get(sf);
+                if (f != null && ValType.fromJavaReturn(f.getType()) == ValType.LONG) {
+                    emitResolvedStaticFieldRaw(f);
+                    coerceJavaReturnToStack(f.getType(), ValType.LONG);
+                    return false;
+                }
+            }
+            if (node instanceof InstanceFieldNode inf && analysis != null) {
+                Field f = analysis.resolvedFields.get(inf);
+                if (f != null && ValType.fromJavaReturn(f.getType()) == ValType.LONG) {
+                    emitResolvedInstanceFieldRaw(inf, f);
+                    coerceJavaReturnToStack(f.getType(), ValType.LONG);
+                    return false;
+                }
+            }
+            // Self-calls returning unboxed long
+            if (tryEmitSelfCall(node, ValType.LONG)) {
+                return false;
+            }
+
+            if (emitBoxedImpl(node)) return true;
+            invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J", 1, 2);
+            return false;
+        }
+
+        // ====================================================================
+        // Double Emission (2 stack words, returns true if terminated)
+        // ====================================================================
+
+        boolean emitDouble(Node node) {
+            if (node instanceof ConstNode cn) {
+                if (cn.isDouble) {
+                    ldcDouble(cn.doubleVal);
+                } else if (cn.isLong) {
+                    ldcDouble((double) cn.longVal);
+                } else if (cn.val instanceof Number num) {
+                    ldcDouble(num.doubleValue());
+                } else {
+                    emitBoxedImpl(node);
+                    invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D", 1, 2);
+                }
+                return false;
+            }
+            if (node instanceof LocalNode ln) {
+                ValType st = layout.slotTypes[ln.slot];
+                if (st == ValType.DOUBLE) {
+                    loadLogicalSlot(ln.slot);
+                } else if (st == ValType.LONG) {
+                    loadLogicalSlot(ln.slot);
+                    l2d();
+                } else {
+                    loadLogicalSlot(ln.slot);
+                    invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D", 1, 2);
+                }
+                return false;
+            }
+            if (node instanceof VarRefNode) {
+                emitBoxedImpl(node);
+                invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D", 1, 2);
+                return false;
+            }
+            if (node instanceof IfNode iff) return emitIfTyped(iff, ValType.DOUBLE);
+            if (node instanceof DoNode dn) return emitDoTyped(dn, ValType.DOUBLE);
+            if (node instanceof LetNode ln) return emitLetTyped(ln, ValType.DOUBLE);
+            if (node instanceof LoopNode lp) return emitLoopTyped(lp, ValType.DOUBLE);
+            if (node instanceof LockingNode ln) return emitLockingTyped(ln, ValType.DOUBLE);
+            if (node instanceof CaseNode cn) return emitCaseTyped(cn, ValType.DOUBLE);
+            if (node instanceof Recur0Node || node instanceof Recur1Node
+                    || node instanceof Recur2Node || node instanceof RecurNNode) {
+                return emitRecur(node);
+            }
+            if (node instanceof ThrowNode tn) return emitThrow(tn);
+
+            if (node instanceof DoubleCastNode dc) {
+                ValType at = typeOf(dc.a);
+                if (at == ValType.DOUBLE) return emitDouble(dc.a);
+                if (at == ValType.LONG) {
+                    if (emitLong(dc.a)) return true;
+                    l2d();
+                    return false;
+                }
+                if (emitBoxed(dc.a)) return true;
+                invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D", 1, 2);
+                return false;
+            }
+            if (node instanceof Add2Node a && isDoubleOrLongPair(a.a, a.b)) {
+                if (emitDouble(a.a)) return true;
+                if (emitDouble(a.b)) return true;
+                dadd();
+                return false;
+            }
+            if (node instanceof Sub2Node a && isDoubleOrLongPair(a.a, a.b)) {
+                if (emitDouble(a.a)) return true;
+                if (emitDouble(a.b)) return true;
+                dsub();
+                return false;
+            }
+            if (node instanceof Mul2Node a && isDoubleOrLongPair(a.a, a.b)) {
+                if (emitDouble(a.a)) return true;
+                if (emitDouble(a.b)) return true;
+                dmul();
+                return false;
+            }
+            if (node instanceof Div2Node a && isDoubleOrLongPair(a.a, a.b)
+                    && (typeOf(a.a) == ValType.DOUBLE || typeOf(a.b) == ValType.DOUBLE)) {
+                if (emitDouble(a.a)) return true;
+                if (emitDouble(a.b)) return true;
+                ddiv();
+                return false;
+            }
+            if (node instanceof Rem2Node a && isDoubleOrLongPair(a.a, a.b)
+                    && (typeOf(a.a) == ValType.DOUBLE || typeOf(a.b) == ValType.DOUBLE)) {
+                if (emitDouble(a.a)) return true;
+                if (emitDouble(a.b)) return true;
+                drem();
+                return false;
+            }
+            if (node instanceof UncheckedAdd2Node a && isDoubleOrLongPair(a.a, a.b)) {
+                if (emitDouble(a.a)) return true;
+                if (emitDouble(a.b)) return true;
+                dadd();
+                return false;
+            }
+            if (node instanceof UncheckedSub2Node a && isDoubleOrLongPair(a.a, a.b)) {
+                if (emitDouble(a.a)) return true;
+                if (emitDouble(a.b)) return true;
+                dsub();
+                return false;
+            }
+            if (node instanceof UncheckedMul2Node a && isDoubleOrLongPair(a.a, a.b)) {
+                if (emitDouble(a.a)) return true;
+                if (emitDouble(a.b)) return true;
+                dmul();
+                return false;
+            }
+            if (node instanceof IncNode a && typeOf(a.a) == ValType.DOUBLE) {
+                if (emitDouble(a.a)) return true;
+                ldcDouble(1.0);
+                dadd();
+                return false;
+            }
+            if (node instanceof UncheckedIncNode a && typeOf(a.a) == ValType.DOUBLE) {
+                if (emitDouble(a.a)) return true;
+                ldcDouble(1.0);
+                dadd();
+                return false;
+            }
+            if (node instanceof DecNode a && typeOf(a.a) == ValType.DOUBLE) {
+                if (emitDouble(a.a)) return true;
+                ldcDouble(1.0);
+                dsub();
+                return false;
+            }
+            if (node instanceof UncheckedDecNode a && typeOf(a.a) == ValType.DOUBLE) {
+                if (emitDouble(a.a)) return true;
+                ldcDouble(1.0);
+                dsub();
+                return false;
+            }
+            if (node instanceof NegateNode a && typeOf(a.a) == ValType.DOUBLE) {
+                if (emitDouble(a.a)) return true;
+                dneg();
+                return false;
+            }
+            if (node instanceof UncheckedNegateNode a && typeOf(a.a) == ValType.DOUBLE) {
+                if (emitDouble(a.a)) return true;
+                dneg();
+                return false;
+            }
+            if (node instanceof StaticMethodNode sm && analysis != null) {
+                Method m = analysis.resolvedMethods.get(sm);
+                if (m != null && ValType.fromJavaReturn(m.getReturnType()) == ValType.DOUBLE) {
+                    emitResolvedStaticCallRaw(sm, m);
+                    coerceJavaReturnToStack(m.getReturnType(), ValType.DOUBLE);
+                    return false;
+                }
+            }
+            if (node instanceof InstanceMethodNode im && analysis != null) {
+                Method m = analysis.resolvedMethods.get(im);
+                if (m != null && ValType.fromJavaReturn(m.getReturnType()) == ValType.DOUBLE) {
+                    emitResolvedInstanceCallRaw(im, m);
+                    coerceJavaReturnToStack(m.getReturnType(), ValType.DOUBLE);
+                    return false;
+                }
+            }
+            if (node instanceof StaticFieldNode sf && analysis != null) {
+                Field f = analysis.resolvedFields.get(sf);
+                if (f != null && ValType.fromJavaReturn(f.getType()) == ValType.DOUBLE) {
+                    emitResolvedStaticFieldRaw(f);
+                    coerceJavaReturnToStack(f.getType(), ValType.DOUBLE);
+                    return false;
+                }
+            }
+            if (node instanceof InstanceFieldNode inf && analysis != null) {
+                Field f = analysis.resolvedFields.get(inf);
+                if (f != null && ValType.fromJavaReturn(f.getType()) == ValType.DOUBLE) {
+                    emitResolvedInstanceFieldRaw(inf, f);
+                    coerceJavaReturnToStack(f.getType(), ValType.DOUBLE);
+                    return false;
+                }
+            }
+            if (tryEmitSelfCall(node, ValType.DOUBLE)) {
+                return false;
+            }
+            // If typeOf(node) == LONG, emitLong then L2D
+            if (typeOf(node) == ValType.LONG) {
+                if (emitLong(node)) return true;
+                l2d();
+                return false;
+            }
+            if (emitBoxedImpl(node)) return true;
+            invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D", 1, 2);
+            return false;
+        }
+
+        private boolean isDoubleOrLongPair(Node a, Node b) {
+            ValType ta = typeOf(a);
+            ValType tb = typeOf(b);
+            return (ta == ValType.DOUBLE || ta == ValType.LONG) && (tb == ValType.DOUBLE || tb == ValType.LONG);
+        }
+
+        // ====================================================================
+        // Boolean Emission & Direct Branching
+        // ====================================================================
+
+        void emitBranchIfFalse(Node test, Label falseLabel) {
+            if (test instanceof ConstNode cn) {
+                if (!cn.boolVal) gotoLabel(falseLabel);
+                return;
+            }
+            if (test instanceof NotNode n) {
+                emitBranchIfTrue(n.a, falseLabel);
+                return;
+            }
+            if (test instanceof NilPNode np) {
+                if (typeOf(np.a).isPrimitive()) {
+                    // Primitives are never nil
+                    emitDiscard(np.a);
+                    gotoLabel(falseLabel);
+                } else {
+                    emitBoxed(np.a);
+                    ifnonnull(falseLabel);
+                }
+                return;
+            }
+            if (test instanceof IdenticalNode id) {
+                if (!typeOf(id.a).isPrimitive() && !typeOf(id.b).isPrimitive()) {
+                    emitBoxed(id.a);
+                    emitBoxed(id.b);
+                    ifAcmpNe(falseLabel);
+                    return;
+                }
+            }
+            if (test instanceof Lt2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if (ta == ValType.LONG && tb == ValType.LONG) {
+                    emitLong(a.a); emitLong(a.b); lcmp(); ifge(falseLabel); return;
+                }
+                if (isDoubleOrLongPair(a.a, a.b)) {
+                    emitDouble(a.a); emitDouble(a.b); dcmpg(); ifge(falseLabel); return;
+                }
+            }
+            if (test instanceof Lte2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if (ta == ValType.LONG && tb == ValType.LONG) {
+                    emitLong(a.a); emitLong(a.b); lcmp(); ifgt(falseLabel); return;
+                }
+                if (isDoubleOrLongPair(a.a, a.b)) {
+                    emitDouble(a.a); emitDouble(a.b); dcmpg(); ifgt(falseLabel); return;
+                }
+            }
+            if (test instanceof Gt2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if (ta == ValType.LONG && tb == ValType.LONG) {
+                    emitLong(a.a); emitLong(a.b); lcmp(); ifle(falseLabel); return;
+                }
+                if (isDoubleOrLongPair(a.a, a.b)) {
+                    emitDouble(a.a); emitDouble(a.b); dcmpl(); ifle(falseLabel); return;
+                }
+            }
+            if (test instanceof Gte2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if (ta == ValType.LONG && tb == ValType.LONG) {
+                    emitLong(a.a); emitLong(a.b); lcmp(); iflt(falseLabel); return;
+                }
+                if (isDoubleOrLongPair(a.a, a.b)) {
+                    emitDouble(a.a); emitDouble(a.b); dcmpl(); iflt(falseLabel); return;
+                }
+            }
+            if (test instanceof Equiv2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if (ta == ValType.LONG && tb == ValType.LONG) {
+                    emitLong(a.a); emitLong(a.b); lcmp(); ifne(falseLabel); return;
+                }
+                if (ta == ValType.BOOL && tb == ValType.BOOL) {
+                    emitBoolean(a.a); emitBoolean(a.b); ifIcmpNe(falseLabel); return;
+                }
+            }
+            if (test instanceof NumEq2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if (ta == ValType.LONG && tb == ValType.LONG) {
+                    emitLong(a.a); emitLong(a.b); lcmp(); ifne(falseLabel); return;
+                }
+                if (isDoubleOrLongPair(a.a, a.b)) {
+                    emitDouble(a.a); emitDouble(a.b); dcmpl(); ifne(falseLabel); return;
+                }
+            }
+            if (test instanceof ZeroPNode z) {
+                ValType ta = typeOf(z.a);
+                if (ta == ValType.LONG) {
+                    emitLong(z.a); ldcLong(0L); lcmp(); ifne(falseLabel); return;
+                }
+                if (ta == ValType.DOUBLE) {
+                    emitDouble(z.a); ldcDouble(0.0); dcmpl(); ifne(falseLabel); return;
+                }
+            }
+            if (test instanceof PosPNode p) {
+                ValType ta = typeOf(p.a);
+                if (ta == ValType.LONG) {
+                    emitLong(p.a); ldcLong(0L); lcmp(); ifle(falseLabel); return;
+                }
+                if (ta == ValType.DOUBLE) {
+                    emitDouble(p.a); ldcDouble(0.0); dcmpl(); ifle(falseLabel); return;
+                }
+            }
+            if (test instanceof NegPNode ng) {
+                ValType ta = typeOf(ng.a);
+                if (ta == ValType.LONG) {
+                    emitLong(ng.a); ldcLong(0L); lcmp(); ifge(falseLabel); return;
+                }
+                if (ta == ValType.DOUBLE) {
+                    emitDouble(ng.a); ldcDouble(0.0); dcmpg(); ifge(falseLabel); return;
+                }
+            }
+            if (test instanceof EvenPNode ev && typeOf(ev.a) == ValType.LONG) {
+                emitLong(ev.a); ldcLong(1L); land(); ldcLong(0L); lcmp(); ifne(falseLabel); return;
+            }
+            if (test instanceof OddPNode od && typeOf(od.a) == ValType.LONG) {
+                emitLong(od.a); ldcLong(1L); land(); ldcLong(0L); lcmp(); ifeq(falseLabel); return;
+            }
+
+            emitBoolean(test);
+            ifeq(falseLabel);
+        }
+
+        void emitBranchIfTrue(Node test, Label trueLabel) {
+            if (test instanceof NilPNode np && !typeOf(np.a).isPrimitive()) {
+                emitBoxed(np.a);
+                ifnull(trueLabel);
+                return;
+            }
+            if (test instanceof IdenticalNode id && !typeOf(id.a).isPrimitive() && !typeOf(id.b).isPrimitive()) {
+                emitBoxed(id.a);
+                emitBoxed(id.b);
+                ifAcmpEq(trueLabel);
+                return;
+            }
+            emitBoolean(test);
+            ifne(trueLabel);
+        }
+
+        boolean emitBoolean(Node node) {
+            if (node instanceof ConstNode cn) {
+                iconst(cn.boolVal ? 1 : 0);
+                return false;
+            }
+            if (node instanceof LocalNode ln) {
+                ValType st = layout.slotTypes[ln.slot];
+                if (st == ValType.BOOL) {
+                    loadLogicalSlot(ln.slot);
+                    return false;
+                }
+                if (st == ValType.LONG || st == ValType.DOUBLE) {
+                    // Long and Double are always truthy in Clojure
+                    loadLogicalSlot(ln.slot);
+                    pop2();
+                    iconst(1);
+                    return false;
+                }
+                loadLogicalSlot(ln.slot);
+                invokestatic("cljl/RT", "truthy", "(Ljava/lang/Object;)Z", 1, 1);
+                return false;
+            }
+            if (node instanceof IfNode iff) return emitIfTyped(iff, ValType.BOOL);
+            if (node instanceof DoNode dn) return emitDoTyped(dn, ValType.BOOL);
+            if (node instanceof LetNode ln) return emitLetTyped(ln, ValType.BOOL);
+            if (node instanceof LoopNode lp) return emitLoopTyped(lp, ValType.BOOL);
+            if (node instanceof LockingNode ln) return emitLockingTyped(ln, ValType.BOOL);
+            if (node instanceof CaseNode cn) return emitCaseTyped(cn, ValType.BOOL);
+            if (node instanceof Recur0Node || node instanceof Recur1Node
+                    || node instanceof Recur2Node || node instanceof RecurNNode) {
+                return emitRecur(node);
+            }
+            if (node instanceof ThrowNode tn) return emitThrow(tn);
+
+            if (node instanceof NotNode a) {
+                if (emitBoolean(a.a)) return true;
+                iconst(1);
+                ixor();
+                return false;
+            }
+            if (node instanceof Lt2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if ((ta == ValType.LONG && tb == ValType.LONG) || isDoubleOrLongPair(a.a, a.b)) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitCompareViaNumbers(a.a, a.b, "lt");
+                return false;
+            }
+            if (node instanceof Lte2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if ((ta == ValType.LONG && tb == ValType.LONG) || isDoubleOrLongPair(a.a, a.b)) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitCompareViaNumbers(a.a, a.b, "lte");
+                return false;
+            }
+            if (node instanceof Gt2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if ((ta == ValType.LONG && tb == ValType.LONG) || isDoubleOrLongPair(a.a, a.b)) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitCompareViaNumbers(a.a, a.b, "gt");
+                return false;
+            }
+            if (node instanceof Gte2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if ((ta == ValType.LONG && tb == ValType.LONG) || isDoubleOrLongPair(a.a, a.b)) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitCompareViaNumbers(a.a, a.b, "gte");
+                return false;
+            }
+            if (node instanceof Equiv2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if ((ta == ValType.LONG && tb == ValType.LONG) || (ta == ValType.BOOL && tb == ValType.BOOL)) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitBoxed(a.a);
+                emitBoxed(a.b);
+                invokestatic("cljl/RT", "equiv", "(Ljava/lang/Object;Ljava/lang/Object;)Z", 2, 1);
+                return false;
+            }
+            if (node instanceof NumEq2Node a) {
+                ValType ta = typeOf(a.a), tb = typeOf(a.b);
+                if ((ta == ValType.LONG && tb == ValType.LONG) || isDoubleOrLongPair(a.a, a.b)) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitCompareViaNumbers(a.a, a.b, "equal");
+                return false;
+            }
+            if (node instanceof ZeroPNode a) {
+                ValType ta = typeOf(a.a);
+                if (ta == ValType.LONG || ta == ValType.DOUBLE) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitBoxed(a.a);
+                invokestatic("cljl/Numbers", "isZero", "(Ljava/lang/Object;)Z", 1, 1);
+                return false;
+            }
+            if (node instanceof PosPNode a) {
+                ValType ta = typeOf(a.a);
+                if (ta == ValType.LONG || ta == ValType.DOUBLE) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitBoxed(a.a);
+                invokestatic("cljl/Numbers", "isPos", "(Ljava/lang/Object;)Z", 1, 1);
+                return false;
+            }
+            if (node instanceof NegPNode a) {
+                ValType ta = typeOf(a.a);
+                if (ta == ValType.LONG || ta == ValType.DOUBLE) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitBoxed(a.a);
+                invokestatic("cljl/Numbers", "isNeg", "(Ljava/lang/Object;)Z", 1, 1);
+                return false;
+            }
+            if (node instanceof NilPNode a) {
+                if (typeOf(a.a).isPrimitive()) {
+                    emitDiscard(a.a);
+                    iconst(0);
+                    return false;
+                }
+                emitBooleanFromBranch(node);
+                return false;
+            }
+            if (node instanceof IdenticalNode a) {
+                if (!typeOf(a.a).isPrimitive() && !typeOf(a.b).isPrimitive()) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitBoxed(a.a);
+                emitBoxed(a.b);
+                Label neL = new Label();
+                Label endL = new Label();
+                ifAcmpNe(neL);
+                iconst(1);
+                gotoLabel(endL);
+                curStack--;
+                markLabel(neL);
+                iconst(0);
+                markLabel(endL);
+                return false;
+            }
+            if (node instanceof EvenPNode a) {
+                if (typeOf(a.a) == ValType.LONG) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitBoxed(a.a);
+                invokestatic("cljl/Numbers", "isEven", "(Ljava/lang/Object;)Z", 1, 1);
+                return false;
+            }
+            if (node instanceof OddPNode a) {
+                if (typeOf(a.a) == ValType.LONG) {
+                    emitBooleanFromBranch(node);
+                    return false;
+                }
+                emitBoxed(a.a);
+                invokestatic("cljl/Numbers", "isOdd", "(Ljava/lang/Object;)Z", 1, 1);
+                return false;
+            }
+            if (node instanceof TypePredNode tp) {
+                emitBoxed(tp.a);
+                switch (tp.pred) {
+                    case STRING -> emitInstanceof("java/lang/String");
+                    case VECTOR -> invokestatic("cljl/RT", "isVector", "(Ljava/lang/Object;)Z", 1, 1);
+                    case MAP -> invokestatic("cljl/BytecodeJIT", "isMap", "(Ljava/lang/Object;)Z", 1, 1);
+                    case SET -> invokestatic("cljl/BytecodeJIT", "isSet", "(Ljava/lang/Object;)Z", 1, 1);
+                    case SEQ -> emitInstanceof("cljl/lang/ISeq");
+                    case NUMBER -> emitInstanceof("java/lang/Number");
+                    case INT -> invokestatic("cljl/Numbers", "isInteger", "(Ljava/lang/Object;)Z", 1, 1);
+                    case KEYWORD -> emitInstanceof("cljl/Keyword");
+                    case SYMBOL -> emitInstanceof("cljl/Symbol");
+                }
+                return false;
+            }
+            if (node instanceof StaticMethodNode sm && analysis != null) {
+                Method m = analysis.resolvedMethods.get(sm);
+                if (m != null && m.getReturnType() == boolean.class) {
+                    emitResolvedStaticCallRaw(sm, m);
+                    return false;
+                }
+            }
+            if (node instanceof InstanceMethodNode im && analysis != null) {
+                Method m = analysis.resolvedMethods.get(im);
+                if (m != null && m.getReturnType() == boolean.class) {
+                    emitResolvedInstanceCallRaw(im, m);
+                    return false;
+                }
+            }
+            if (node instanceof StaticFieldNode sf && analysis != null) {
+                Field f = analysis.resolvedFields.get(sf);
+                if (f != null && f.getType() == boolean.class) {
+                    emitResolvedStaticFieldRaw(f);
+                    return false;
+                }
+            }
+            if (node instanceof InstanceFieldNode inf && analysis != null) {
+                Field f = analysis.resolvedFields.get(inf);
+                if (f != null && f.getType() == boolean.class) {
+                    emitResolvedInstanceFieldRaw(inf, f);
+                    return false;
+                }
+            }
+            if (tryEmitSelfCall(node, ValType.BOOL)) {
+                return false;
+            }
+
+            if (emitBoxedImpl(node)) return true;
+            invokestatic("cljl/RT", "truthy", "(Ljava/lang/Object;)Z", 1, 1);
+            return false;
+        }
+
+        private void emitBooleanFromBranch(Node cond) {
+            Label falseL = new Label();
+            Label endL = new Label();
+            emitBranchIfFalse(cond, falseL);
+            iconst(1);
+            gotoLabel(endL);
+            curStack--;
+            markLabel(falseL);
+            iconst(0);
+            markLabel(endL);
+        }
+
+        private void emitCompareViaNumbers(Node a, Node b, String method) {
+            if (typeOf(b) == ValType.LONG || (b instanceof ConstNode cn && cn.isLong)) {
+                emitBoxed(a);
+                emitLong(b);
+                invokestatic("cljl/Numbers", method, "(Ljava/lang/Object;J)Z", 3, 1);
+            } else if (typeOf(a) == ValType.LONG || (a instanceof ConstNode cn && cn.isLong)) {
+                emitLong(a);
+                emitBoxed(b);
+                invokestatic("cljl/Numbers", method, "(JLjava/lang/Object;)Z", 3, 1);
+            } else {
+                emitBoxed(a);
+                emitBoxed(b);
+                invokestatic("cljl/Numbers", method, "(Ljava/lang/Object;Ljava/lang/Object;)Z", 2, 1);
+            }
+        }
+
+        // ====================================================================
+        // Control-Flow Shared Typed Emitters (If, Do, Let, Loop, Locking, Case)
+        // ====================================================================
+
+        private boolean emitTyped(Node n, ValType targetT) {
+            if (targetT == ValType.LONG) return emitLong(n);
+            if (targetT == ValType.DOUBLE) return emitDouble(n);
+            if (targetT == ValType.BOOL) return emitBoolean(n);
+            return emitBoxed(n);
+        }
+
+        private boolean emitIfTyped(IfNode iff, ValType targetT) {
+            int valWords = (targetT == ValType.LONG || targetT == ValType.DOUBLE) ? 2 : 1;
+            Label elseLabel = new Label();
+            Label endLabel = new Label();
+            emitBranchIfFalse(iff.test, elseLabel);
+            int stackAtIf = curStack;
+            boolean thenTerm = emitTyped(iff.thenNode, targetT);
+            if (!thenTerm) {
+                gotoLabel(endLabel);
+            }
+            curStack = stackAtIf;
+            markLabel(elseLabel);
+            boolean elseTerm = emitTyped(iff.elseNode, targetT);
+            markLabel(endLabel);
+            if (!thenTerm || !elseTerm) {
+                curStack = stackAtIf + valWords;
+            } else {
+                curStack = stackAtIf;
+            }
+            return thenTerm && elseTerm;
+        }
+
+        private boolean emitDoTyped(DoNode dn, ValType targetT) {
+            if (dn.nodes.length == 0) {
+                if (targetT == ValType.BOOL) {
+                    iconst(0);
+                    return false;
+                }
+                aconstNull();
+                if (targetT != ValType.ANY && targetT.isPrimitive()) unboxFromObject(targetT);
+                return false;
+            }
+            int last = dn.nodes.length - 1;
+            for (int i = 0; i < last; i++) {
+                if (emitDiscard(dn.nodes[i])) return true;
+            }
+            return emitTyped(dn.nodes[last], targetT);
+        }
+
+        private boolean emitLetTyped(LetNode ln, ValType targetT) {
+            for (int i = 0; i < ln.slots.length; i++) {
+                if (emitSlotInit(ln.slots[i], ln.inits[i])) return true;
+                storeLogicalSlot(ln.slots[i]);
+            }
+            return emitTyped(ln.body, targetT);
+        }
+
+        private boolean emitLoopTyped(LoopNode lp, ValType targetT) {
+            for (int i = 0; i < lp.slots.length; i++) {
+                if (emitSlotInit(lp.slots[i], lp.inits[i])) return true;
+                storeLogicalSlot(lp.slots[i]);
+            }
+            Label loopStart = new Label();
+            markLabel(loopStart);
+            pushLoopTarget(lp.slots, loopStart);
+            boolean term = emitTyped(lp.body, targetT);
+            popLoopTarget();
+            return term;
+        }
+
+        private boolean emitLockingTyped(LockingNode ln, ValType targetT) {
+            int valWords = (targetT == ValType.LONG || targetT == ValType.DOUBLE) ? 2 : 1;
+            int lockLocal = allocTempLocal();
+            int exLocal = allocTempLocal();
+            emitBoxed(ln.target);
+            invokestatic("cljl/BytecodeJIT", "requireNonNullLock", "(Ljava/lang/Object;)Ljava/lang/Object;", 1, 1);
+            dup();
+            astore(lockLocal);
+            monitorenter();
+
+            Label tryStart = new Label();
+            Label tryEnd = new Label();
+            Label catchStart = new Label();
+            Label done = new Label();
+
+            markLabel(tryStart);
+            boolean bodyTerm = emitTyped(ln.body, targetT);
+            markLabel(tryEnd);
+
+            if (!bodyTerm) {
+                aload(lockLocal);
+                monitorexit();
+                gotoLabel(done);
+            }
+
+            curStack = 1;
+            if (maxStack < 1) maxStack = 1;
+            markLabel(catchStart);
+            astore(exLocal);
+            aload(lockLocal);
+            monitorexit();
+            aload(exLocal);
+            athrow();
+
+            exceptionTable.add(new ExceptionEntry(tryStart, tryEnd, catchStart, 0));
+
+            freeTempLocals(2);
+            if (!bodyTerm) {
+                curStack = valWords;
+                markLabel(done);
+                return false;
+            } else {
+                curStack = 0;
+                return true;
+            }
+        }
+
+        private boolean emitCaseTyped(CaseNode cn, ValType targetT) {
+            int valWords = (targetT == ValType.LONG || targetT == ValType.DOUBLE) ? 2 : 1;
+            List<Node> branches = new ArrayList<>();
+            IdentityHashMap<Node, Integer> nodeToIdx = new IdentityHashMap<>();
+            Map<RT.EquivKey, Integer> keyToIdx = new HashMap<>(cn.table.size() * 2 + 1);
+            for (Map.Entry<RT.EquivKey, Node> e : cn.table.entrySet()) {
+                Integer idx = nodeToIdx.get(e.getValue());
+                if (idx == null) {
+                    idx = branches.size();
+                    nodeToIdx.put(e.getValue(), idx);
+                    branches.add(e.getValue());
+                }
+                keyToIdx.put(e.getKey(), idx);
+            }
+
+            if (branches.isEmpty()) {
+                emitBoxed(cn.expr);
+                if (cn.hasDefault) {
+                    pop();
+                    return emitTyped(cn.defaultNode, targetT);
+                }
+                invokestatic("cljl/BytecodeJIT", "throwNoMatchingClause", "(Ljava/lang/Object;)Ljava/lang/RuntimeException;", 1, 1);
+                athrow();
+                return true;
+            }
+
+            int stackAtEntry = curStack;
+            emitBoxed(cn.expr);
+            loadConstObj(keyToIdx);
+            checkcast("java/util/Map");
+            if (cn.hasDefault) {
+                invokestatic("cljl/BytecodeJIT", "caseLookup", "(Ljava/lang/Object;Ljava/util/Map;)I", 2, 1);
+            } else {
+                invokestatic("cljl/BytecodeJIT", "caseLookupOrThrow", "(Ljava/lang/Object;Ljava/util/Map;)I", 2, 1);
+            }
+
+            int n = branches.size();
+            Label[] branchLabels = new Label[n];
+            for (int i = 0; i < n; i++) branchLabels[i] = new Label();
+            Label defaultLabel = new Label();
+            Label endLabel = new Label();
+
+            tableswitch(0, n - 1, defaultLabel, branchLabels);
+
+            boolean anyNonTerm = false;
+            for (int i = 0; i < n; i++) {
+                curStack = stackAtEntry;
+                markLabel(branchLabels[i]);
+                boolean bTerm = emitTyped(branches.get(i), targetT);
+                if (!bTerm) {
+                    anyNonTerm = true;
+                    gotoLabel(endLabel);
+                }
+            }
+
+            curStack = stackAtEntry;
+            markLabel(defaultLabel);
+            if (cn.hasDefault) {
+                boolean dTerm = emitTyped(cn.defaultNode, targetT);
+                if (!dTerm) {
+                    anyNonTerm = true;
+                }
+            } else {
+                aconstNull();
+                invokestatic("cljl/BytecodeJIT", "throwNoMatchingClause", "(Ljava/lang/Object;)Ljava/lang/RuntimeException;", 1, 1);
+                athrow();
+            }
+
+            if (anyNonTerm) {
+                curStack = stackAtEntry + valWords;
+                markLabel(endLabel);
+                return false;
+            } else {
+                curStack = stackAtEntry;
+                return true;
+            }
+        }
+
+        private boolean emitSlotInit(int targetLogicalSlot, Node expr) {
+            ValType slotT = layout.slotTypes[targetLogicalSlot];
+            return emitTyped(expr, slotT);
+        }
+
+        private boolean emitRecur(Node node) {
+            LoopTarget target = loopTargets.peek();
+            if (node instanceof Recur0Node) {
+                gotoLabel(target.start);
+                return true;
+            }
+            if (node instanceof Recur1Node r1) {
+                if (emitSlotInit(target.slots[0], r1.expr0)) return true;
+                storeLogicalSlot(target.slots[0]);
+                gotoLabel(target.start);
+                return true;
+            }
+            if (node instanceof Recur2Node r2) {
+                if (emitSlotInit(target.slots[0], r2.expr0)) return true;
+                if (emitSlotInit(target.slots[1], r2.expr1)) return true;
+                storeLogicalSlot(target.slots[1]);
+                storeLogicalSlot(target.slots[0]);
+                gotoLabel(target.start);
+                return true;
+            }
+            RecurNNode rn = (RecurNNode) node;
+            for (int i = 0; i < rn.exprs.length; i++) {
+                if (emitSlotInit(target.slots[i], rn.exprs[i])) return true;
+            }
+            for (int i = rn.slots.length - 1; i >= 0; i--) {
+                storeLogicalSlot(target.slots[i]);
+            }
+            gotoLabel(target.start);
+            return true;
+        }
+
+        private boolean emitThrow(ThrowNode tn) {
+            emitBoxed(tn.expr);
+            invokestatic("cljl/BytecodeJIT", "throwObj", "(Ljava/lang/Object;)Ljava/lang/RuntimeException;", 1, 1);
+            athrow();
+            return true;
+        }
+
+        // ====================================================================
+        // Self-Call Emission (Direct & Guarded OwnerVar)
+        // ====================================================================
+
+        private boolean tryEmitSelfCall(Node node, ValType desiredT) {
+            Node fnNode = null;
+            Var var = null;
+            Node[] args = null;
+
+            if (node instanceof Call1Node c) { fnNode = c.fn; args = new Node[]{c.a}; }
+            else if (node instanceof Call2Node c) { fnNode = c.fn; args = new Node[]{c.a, c.b}; }
+            else if (node instanceof Call3Node c) { fnNode = c.fn; args = new Node[]{c.a, c.b, c.c}; }
+            else if (node instanceof VarCall1Node c) { var = c.v; args = new Node[]{c.a}; }
+            else if (node instanceof VarCall2Node c) { var = c.v; args = new Node[]{c.a, c.b}; }
+            else if (node instanceof VarCall3Node c) { var = c.v; args = new Node[]{c.a, c.b, c.c}; }
+            else return false;
+
+            int arity = args.length;
+            PrimSpec ps = findMatchingPrimSpec(arity, args);
+
+            if (fnNode != null && isDirectSelf(fnNode, arity)) {
+                if (ps != null && (desiredT == ValType.ANY || ps.analysis.returnType == desiredT)) {
+                    emitDirectPrimSelfCall(ps, args);
+                    if (desiredT == ValType.ANY) boxValue(ps.analysis.returnType);
+                    return true;
+                }
+                if (desiredT == ValType.ANY) {
+                    aload(0);
+                    for (Node a : args) emitBoxed(a);
+                    invokevirtual(ce.className, "invoke", boxedInvokeDesc(arity), 1 + arity, 1);
+                    return true;
+                }
+                return false;
+            }
+
+            if (var != null && isOwnerVarCall(var, arity)) {
+                if (ps != null && (desiredT == ValType.ANY || ps.analysis.returnType == desiredT)) {
+                    emitGuardedVarPrimSelfCall(var, ps, args, desiredT);
+                    return true;
+                }
+                if (desiredT == ValType.ANY) {
+                    emitGuardedVarBoxedSelfCall(var, args);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private void emitDirectPrimSelfCall(PrimSpec ps, Node[] args) {
+            aload(0);
+            int argWords = 1;
+            for (int i = 0; i < args.length; i++) {
+                ValType pt = ps.paramTypes[i];
+                emitTyped(args[i], pt);
+                argWords += (pt == ValType.LONG || pt == ValType.DOUBLE) ? 2 : 1;
+            }
+            ValType retT = ps.analysis.returnType;
+            int retWords = (retT == ValType.LONG || retT == ValType.DOUBLE) ? 2 : 1;
+            invokevirtual(ce.className, ps.methodName, ps.descriptor, argWords, retWords);
+        }
+
+        private void emitGuardedVarPrimSelfCall(Var var, PrimSpec ps, Node[] args, ValType desiredT) {
+            int arity = args.length;
+            int stackAtStart = curStack;
+            Label slowLabel = new Label();
+            Label doneLabel = new Label();
+
+            loadConstObj(var);
+            checkcast("cljl/Var");
+            invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
+            dup();
+            aload(0);
+            getfield(ce.className, "outerFn", "Lcljl/Compiler$CompiledFn;", 1);
+            ifAcmpNe(slowLabel);
+            pop();
+
+            emitDirectPrimSelfCall(ps, args);
+            if (desiredT == ValType.ANY) {
+                boxValue(ps.analysis.returnType);
+            }
+            gotoLabel(doneLabel);
+
+            curStack = stackAtStart + 1;
+            markLabel(slowLabel);
+            checkcast("cljl/Fn");
+            for (Node a : args) emitBoxed(a);
+            invokevirtual("cljl/Fn", "invoke", boxedInvokeDesc(arity), 1 + arity, 1);
+            if (desiredT != ValType.ANY) {
+                unboxFromObject(desiredT);
+            }
+            markLabel(doneLabel);
+            int outWords = (desiredT == ValType.LONG || desiredT == ValType.DOUBLE) ? 2 : 1;
+            curStack = stackAtStart + outWords;
+            if (curStack > maxStack) maxStack = curStack;
+        }
+
+        private void emitGuardedVarBoxedSelfCall(Var var, Node[] args) {
+            int arity = args.length;
+            int stackAtStart = curStack;
+            Label slowLabel = new Label();
+            Label doneLabel = new Label();
+
+            loadConstObj(var);
+            checkcast("cljl/Var");
+            invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
+            dup();
+            aload(0);
+            getfield(ce.className, "outerFn", "Lcljl/Compiler$CompiledFn;", 1);
+            ifAcmpNe(slowLabel);
+            pop();
+
+            aload(0);
+            for (Node a : args) emitBoxed(a);
+            invokevirtual(ce.className, "invoke", boxedInvokeDesc(arity), 1 + arity, 1);
+            gotoLabel(doneLabel);
+
+            curStack = stackAtStart + 1;
+            markLabel(slowLabel);
+            checkcast("cljl/Fn");
+            for (Node a : args) emitBoxed(a);
+            invokevirtual("cljl/Fn", "invoke", boxedInvokeDesc(arity), 1 + arity, 1);
+            markLabel(doneLabel);
+            curStack = stackAtStart + 1;
+            if (curStack > maxStack) maxStack = curStack;
+        }
+
+        private static String boxedInvokeDesc(int arity) {
+            return switch (arity) {
+                case 0 -> "()Ljava/lang/Object;";
+                case 1 -> "(Ljava/lang/Object;)Ljava/lang/Object;";
+                case 2 -> "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+                case 3 -> "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+                case 4 -> "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+                default -> "([Ljava/lang/Object;)Ljava/lang/Object;";
+            };
+        }
+
+        // ====================================================================
+        // Resolved Java Interop Helpers
+        // ====================================================================
+
+        private static String typeDesc(Class<?> cls) {
+            if (cls == void.class) return "V";
+            if (cls == boolean.class) return "Z";
+            if (cls == byte.class) return "B";
+            if (cls == short.class) return "S";
+            if (cls == char.class) return "C";
+            if (cls == int.class) return "I";
+            if (cls == long.class) return "J";
+            if (cls == float.class) return "F";
+            if (cls == double.class) return "D";
+            if (cls.isArray()) return cls.getName().replace('.', '/');
+            return "L" + cls.getName().replace('.', '/') + ";";
+        }
+
+        private static String methodDesc(Class<?> ret, Class<?>[] params) {
+            StringBuilder sb = new StringBuilder("(");
+            for (Class<?> p : params) sb.append(typeDesc(p));
+            sb.append(')').append(typeDesc(ret));
+            return sb.toString();
+        }
+
+        private static int slotWidth(Class<?> cls) {
+            if (cls == void.class) return 0;
+            return (cls == long.class || cls == double.class) ? 2 : 1;
+        }
+
+        private int emitJavaArgs(Node[] args, Class<?>[] paramTypes) {
+            int words = 0;
+            for (int i = 0; i < paramTypes.length; i++) {
+                words += emitJavaArg(args[i], paramTypes[i]);
+            }
+            return words;
+        }
+
+        private int emitJavaArg(Node arg, Class<?> pt) {
+            if (pt == long.class) { emitLong(arg); return 2; }
+            if (pt == int.class) { emitLong(arg); l2i(); return 1; }
+            if (pt == short.class) { emitLong(arg); l2i(); i2s(); return 1; }
+            if (pt == byte.class) { emitLong(arg); l2i(); i2b(); return 1; }
+            if (pt == double.class) { emitDouble(arg); return 2; }
+            if (pt == float.class) { emitDouble(arg); d2f(); return 1; }
+            if (pt == boolean.class) { emitBoolean(arg); return 1; }
+            if (pt == char.class) {
+                if (arg instanceof ConstNode cn && cn.val instanceof Character c) {
+                    iconst((int) c);
+                } else {
+                    emitBoxed(arg);
+                    invokestatic("cljl/BytecodeJIT", "toChar", "(Ljava/lang/Object;)C", 1, 1);
+                }
+                return 1;
+            }
+            if (pt == Long.class) {
+                if (typeOf(arg) == ValType.NIL) aconstNull();
+                else { emitLong(arg); boxValue(ValType.LONG); }
+                return 1;
+            }
+            if (pt == Integer.class) {
+                if (typeOf(arg) == ValType.NIL) aconstNull();
+                else { emitLong(arg); l2i(); invokestatic("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", 1, 1); }
+                return 1;
+            }
+            if (pt == Double.class) {
+                if (typeOf(arg) == ValType.NIL) aconstNull();
+                else { emitDouble(arg); boxValue(ValType.DOUBLE); }
+                return 1;
+            }
+            if (pt == Float.class) {
+                if (typeOf(arg) == ValType.NIL) aconstNull();
+                else { emitDouble(arg); d2f(); invokestatic("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;", 1, 1); }
+                return 1;
+            }
+            if (pt == Boolean.class) {
+                if (typeOf(arg) == ValType.NIL) aconstNull();
+                else { emitBoolean(arg); boxValue(ValType.BOOL); }
+                return 1;
+            }
+            if (pt == Comparator.class && Fn.class.isAssignableFrom(typeOf(arg).boxClass())) {
+                emitBoxed(arg);
+                checkcast("cljl/Fn");
+                invokevirtual("cljl/Fn", "asComparator", "()Ljava/util/Comparator;", 1, 1);
+                return 1;
+            }
+            emitRef(arg, pt);
+            return 1;
+        }
+
+        private void emitResolvedStaticCallRaw(StaticMethodNode sm, Method m) {
+            String owner = m.getDeclaringClass().getName().replace('.', '/');
+            Class<?>[] pts = m.getParameterTypes();
+            Class<?> ret = m.getReturnType();
+            int argWords = emitJavaArgs(sm.args, pts);
+            int retWords = slotWidth(ret);
+            invokestatic(owner, m.getName(), methodDesc(ret, pts), argWords, retWords);
+        }
+
+        private void emitResolvedInstanceCallRaw(InstanceMethodNode im, Method m) {
+            Class<?> ownerCls = m.getDeclaringClass();
+            String owner = ownerCls.getName().replace('.', '/');
+            Class<?>[] pts = m.getParameterTypes();
+            Class<?> ret = m.getReturnType();
+            emitRef(im.target, ownerCls);
+            int argWords = 1 + emitJavaArgs(im.args, pts);
+            int retWords = slotWidth(ret);
+            if (ownerCls.isInterface()) {
+                invokeinterface(owner, m.getName(), methodDesc(ret, pts), argWords, retWords);
+            } else {
+                invokevirtual(owner, m.getName(), methodDesc(ret, pts), argWords, retWords);
+            }
+        }
+
+        private void emitResolvedStaticFieldRaw(Field f) {
+            String owner = f.getDeclaringClass().getName().replace('.', '/');
+            Class<?> ft = f.getType();
+            getstatic(owner, f.getName(), typeDesc(ft), slotWidth(ft));
+        }
+
+        private void emitResolvedInstanceFieldRaw(InstanceFieldNode inf, Field f) {
+            Class<?> ownerCls = f.getDeclaringClass();
+            String owner = ownerCls.getName().replace('.', '/');
+            Class<?> ft = f.getType();
+            emitRef(inf.target, ownerCls);
+            getfield(owner, f.getName(), typeDesc(ft), slotWidth(ft));
+        }
+
+        private void coerceJavaReturnToStack(Class<?> retType, ValType desiredT) {
+            if (retType == void.class) {
+                aconstNull();
+                return;
+            }
+            if (desiredT == ValType.LONG) {
+                if (retType == int.class || retType == short.class || retType == byte.class) i2l();
+                return;
+            }
+            if (desiredT == ValType.DOUBLE) {
+                if (retType == float.class) f2d();
+                return;
+            }
+            if (desiredT == ValType.BOOL) {
+                return;
+            }
+            // Boxed Object desired
+            if (retType == long.class) {
+                boxValue(ValType.LONG);
+            } else if (retType == int.class || retType == short.class || retType == byte.class) {
+                i2l();
+                boxValue(ValType.LONG);
+            } else if (retType == double.class) {
+                boxValue(ValType.DOUBLE);
+            } else if (retType == float.class) {
+                f2d();
+                boxValue(ValType.DOUBLE);
+            } else if (retType == boolean.class) {
+                boxValue(ValType.BOOL);
+            } else if (retType == char.class) {
+                invokestatic("java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", 1, 1);
+            }
+        }
+
+        // ====================================================================
+        // Boxed Object Emission (returns true if control terminated)
+        // ====================================================================
+
+        boolean emitBoxed(Node node) {
+            ValType nt = typeOf(node);
+            if (nt == ValType.LONG && !(node instanceof ConstNode)) {
+                if (emitLong(node)) return true;
+                boxValue(ValType.LONG);
+                return false;
+            }
+            if (nt == ValType.DOUBLE && !(node instanceof ConstNode)) {
+                if (emitDouble(node)) return true;
+                boxValue(ValType.DOUBLE);
+                return false;
+            }
+            if (nt == ValType.BOOL && !(node instanceof ConstNode)) {
+                if (emitBoolean(node)) return true;
+                boxValue(ValType.BOOL);
+                return false;
+            }
+            return emitBoxedImpl(node);
+        }
+
+        boolean emitBoxedImpl(Node node) {
             if (node instanceof ConstNode cn) {
                 Object v = cn.val;
                 if (v == null) {
                     aconstNull();
                 } else if (v == Boolean.TRUE) {
-                    getstatic("java/lang/Boolean", "TRUE", "Ljava/lang/Boolean;");
+                    getstatic("java/lang/Boolean", "TRUE", "Ljava/lang/Boolean;", 1);
                 } else if (v == Boolean.FALSE) {
-                    getstatic("java/lang/Boolean", "FALSE", "Ljava/lang/Boolean;");
+                    getstatic("java/lang/Boolean", "FALSE", "Ljava/lang/Boolean;", 1);
                 } else if (v instanceof String s) {
                     ldcString(s);
                 } else if (v instanceof Long l && l >= -128L && l <= 127L) {
@@ -1021,7 +2887,9 @@ public final class BytecodeJIT {
                 return false;
             }
             if (node instanceof LocalNode ln) {
-                aload(baseSlot + ln.slot);
+                ValType st = layout.slotTypes[ln.slot];
+                loadLogicalSlot(ln.slot);
+                boxValue(st);
                 return false;
             }
             if (node instanceof VarRefNode vr) {
@@ -1035,7 +2903,7 @@ public final class BytecodeJIT {
                 checkcast("cljl/Var");
                 if (dn.init != null) {
                     dup();
-                    emitBoxed(dn.init, baseSlot);
+                    emitBoxed(dn.init);
                     invokevirtual("cljl/Var", "bindRoot", "(Ljava/lang/Object;)Lcljl/Var;", 2, 1);
                     pop();
                 }
@@ -1044,112 +2912,37 @@ public final class BytecodeJIT {
             if (node instanceof DefMacroNode dm) {
                 loadConstObj(dm.var);
                 checkcast("cljl/Var");
-                emitBoxed(dm.fnNode, baseSlot);
+                emitBoxed(dm.fnNode);
                 invokevirtual("cljl/Var", "bindRoot", "(Ljava/lang/Object;)Lcljl/Var;", 2, 1);
                 invokevirtual("cljl/Var", "setMacro", "()Lcljl/Var;", 1, 1);
                 return false;
             }
-            if (node instanceof IfNode iff) {
-                Label elseLabel = new Label();
-                Label endLabel = new Label();
-                emitBoolean(iff.test, baseSlot);
-                ifeq(elseLabel);
-                int stackAtIf = curStack;
-                boolean thenTerm = emitBoxed(iff.thenNode, baseSlot);
-                if (!thenTerm) {
-                    gotoLabel(endLabel);
-                }
-                curStack = stackAtIf;
-                markLabel(elseLabel);
-                boolean elseTerm = emitBoxed(iff.elseNode, baseSlot);
-                markLabel(endLabel);
-                if (!thenTerm || !elseTerm) {
-                    curStack = stackAtIf + 1;
-                } else {
-                    curStack = stackAtIf;
-                }
-                return thenTerm && elseTerm;
+            if (node instanceof IfNode iff) return emitIfTyped(iff, ValType.ANY);
+            if (node instanceof DoNode dn) return emitDoTyped(dn, ValType.ANY);
+            if (node instanceof LetNode ln) return emitLetTyped(ln, ValType.ANY);
+            if (node instanceof LoopNode lp) return emitLoopTyped(lp, ValType.ANY);
+            if (node instanceof LockingNode ln) return emitLockingTyped(ln, ValType.ANY);
+            if (node instanceof CaseNode cn) return emitCaseTyped(cn, ValType.ANY);
+            if (node instanceof Recur0Node || node instanceof Recur1Node
+                    || node instanceof Recur2Node || node instanceof RecurNNode) {
+                return emitRecur(node);
             }
-            if (node instanceof DoNode dn) {
-                if (dn.nodes.length == 0) {
-                    aconstNull();
-                    return false;
-                }
-                int last = dn.nodes.length - 1;
-                for (int i = 0; i < last; i++) {
-                    boolean term = emitBoxed(dn.nodes[i], baseSlot);
-                    if (term) return true;
-                    pop();
-                }
-                return emitBoxed(dn.nodes[last], baseSlot);
-            }
-            if (node instanceof LetNode ln) {
-                for (int i = 0; i < ln.slots.length; i++) {
-                    boolean term = emitBoxed(ln.inits[i], baseSlot);
-                    if (term) return true;
-                    astore(baseSlot + ln.slots[i]);
-                }
-                return emitBoxed(ln.body, baseSlot);
-            }
-            if (node instanceof LoopNode lp) {
-                for (int i = 0; i < lp.slots.length; i++) {
-                    boolean term = emitBoxed(lp.inits[i], baseSlot);
-                    if (term) return true;
-                    astore(baseSlot + lp.slots[i]);
-                }
-                Label loopStart = new Label();
-                markLabel(loopStart);
-                pushLoopTarget(lp.slots, loopStart);
-                boolean term = emitBoxed(lp.body, baseSlot);
-                popLoopTarget();
-                return term;
-            }
-            if (node instanceof Recur0Node) {
-                LoopTarget target = loopTargets.peek();
-                gotoLabel(target.start);
-                return true;
-            }
-            if (node instanceof Recur1Node r1) {
-                LoopTarget target = loopTargets.peek();
-                emitBoxed(r1.expr0, baseSlot);
-                astore(baseSlot + target.slots[0]);
-                gotoLabel(target.start);
-                return true;
-            }
-            if (node instanceof Recur2Node r2) {
-                LoopTarget target = loopTargets.peek();
-                emitBoxed(r2.expr0, baseSlot);
-                emitBoxed(r2.expr1, baseSlot);
-                astore(baseSlot + target.slots[1]);
-                astore(baseSlot + target.slots[0]);
-                gotoLabel(target.start);
-                return true;
-            }
-            if (node instanceof RecurNNode rn) {
-                LoopTarget target = loopTargets.peek();
-                for (Node expr : rn.exprs) {
-                    emitBoxed(expr, baseSlot);
-                }
-                for (int i = rn.slots.length - 1; i >= 0; i--) {
-                    astore(baseSlot + target.slots[i]);
-                }
-                gotoLabel(target.start);
-                return true;
-            }
+            if (node instanceof ThrowNode tn) return emitThrow(tn);
+
             if (node instanceof VectorNode vn) {
-                emitObjectArray(vn.elems, baseSlot);
+                emitObjectArray(vn.elems);
                 invokestatic("cljl/lang/PersistentVector", "createOwning",
                         "([Ljava/lang/Object;)Lcljl/lang/PersistentVector;", 1, 1);
                 return false;
             }
             if (node instanceof MapNode mn) {
-                emitObjectArray(mn.kvs, baseSlot);
+                emitObjectArray(mn.kvs);
                 invokestatic("cljl/lang/PersistentHashMap", "create",
                         "([Ljava/lang/Object;)Lcljl/lang/PersistentHashMap;", 1, 1);
                 return false;
             }
             if (node instanceof SetNode sn) {
-                emitObjectArray(sn.elems, baseSlot);
+                emitObjectArray(sn.elems);
                 invokestatic("cljl/lang/PersistentHashSet", "create",
                         "([Ljava/lang/Object;)Lcljl/lang/PersistentHashSet;", 1, 1);
                 return false;
@@ -1165,18 +2958,23 @@ public final class BytecodeJIT {
                     if (m != null && m.capturedParentSlots.length > 0) {
                         dup();
                         iconst(i);
-                        emitCapturedSlots(m.capturedParentSlots, baseSlot);
+                        emitCapturedSlots(m.capturedParentSlots);
                         aastore();
                     }
                 }
                 if (fn.variadicMethod != null && fn.variadicMethod.capturedParentSlots.length > 0) {
                     dup();
                     iconst(fn.fixedMethods.length);
-                    emitCapturedSlots(fn.variadicMethod.capturedParentSlots, baseSlot);
+                    emitCapturedSlots(fn.variadicMethod.capturedParentSlots);
                     aastore();
                 }
                 invokestatic("cljl/BytecodeJIT", "instantiateFn",
                         "(Lcljl/Compiler$FnNode;[[Ljava/lang/Object;)Lcljl/Fn;", 2, 1);
+                return false;
+            }
+
+            // Self-calls (local & guarded ownerVar)
+            if (tryEmitSelfCall(node, ValType.ANY)) {
                 return false;
             }
 
@@ -1188,229 +2986,400 @@ public final class BytecodeJIT {
             }
             if (node instanceof VarCall1Node c) {
                 emitVarFn(c.v);
-                emitBoxed(c.a, baseSlot);
+                emitBoxed(c.a);
                 invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
                 return false;
             }
             if (node instanceof VarCall2Node c) {
                 emitVarFn(c.v);
-                emitBoxed(c.a, baseSlot);
-                emitBoxed(c.b, baseSlot);
+                emitBoxed(c.a);
+                emitBoxed(c.b);
                 invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
                 return false;
             }
             if (node instanceof VarCall3Node c) {
                 emitVarFn(c.v);
-                emitBoxed(c.a, baseSlot);
-                emitBoxed(c.b, baseSlot);
-                emitBoxed(c.c, baseSlot);
+                emitBoxed(c.a);
+                emitBoxed(c.b);
+                emitBoxed(c.c);
                 invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
                 return false;
             }
             if (node instanceof VarCall4Node c) {
                 emitVarFn(c.v);
-                emitBoxed(c.a, baseSlot);
-                emitBoxed(c.b, baseSlot);
-                emitBoxed(c.c, baseSlot);
-                emitBoxed(c.d, baseSlot);
+                emitBoxed(c.a);
+                emitBoxed(c.b);
+                emitBoxed(c.c);
+                emitBoxed(c.d);
                 invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
                 return false;
             }
             if (node instanceof VarCallNNode c) {
                 emitVarFn(c.v);
-                emitObjectArray(c.args, baseSlot);
+                emitObjectArray(c.args);
                 invokevirtual("cljl/Fn", "invokeVarargs", "([Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
                 return false;
             }
 
             // General fn calls
             if (node instanceof Call0Node c) {
-                boolean directSelf = selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot
-                        && ce.fixedMethods != null && ce.fixedMethods.length > 0 && ce.fixedMethods[0] != null;
-                if (directSelf) {
+                if (isDirectSelf(c.fn, 0)) {
                     aload(0);
                     invokevirtual(ce.className, "invoke", "()Ljava/lang/Object;", 1, 1);
                 } else {
-                    emitBoxed(c.fn, baseSlot);
+                    emitBoxed(c.fn);
                     checkcast("cljl/Fn");
                     invokevirtual("cljl/Fn", "invoke", "()Ljava/lang/Object;", 1, 1);
                 }
                 return false;
             }
             if (node instanceof Call1Node c) {
-                boolean directSelf = selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot
-                        && ce.fixedMethods != null && ce.fixedMethods.length > 1 && ce.fixedMethods[1] != null;
-                if (directSelf) {
-                    aload(0);
-                    emitBoxed(c.a, baseSlot);
-                    invokevirtual(ce.className, "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
-                } else {
-                    emitBoxed(c.fn, baseSlot);
-                    checkcast("cljl/Fn");
-                    emitBoxed(c.a, baseSlot);
-                    invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
-                }
+                emitBoxed(c.fn);
+                checkcast("cljl/Fn");
+                emitBoxed(c.a);
+                invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
                 return false;
             }
             if (node instanceof Call2Node c) {
-                boolean directSelf = selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot
-                        && ce.fixedMethods != null && ce.fixedMethods.length > 2 && ce.fixedMethods[2] != null;
-                if (directSelf) {
-                    aload(0);
-                    emitBoxed(c.a, baseSlot);
-                    emitBoxed(c.b, baseSlot);
-                    invokevirtual(ce.className, "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
-                } else {
-                    emitBoxed(c.fn, baseSlot);
-                    checkcast("cljl/Fn");
-                    emitBoxed(c.a, baseSlot);
-                    emitBoxed(c.b, baseSlot);
-                    invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
-                }
+                emitBoxed(c.fn);
+                checkcast("cljl/Fn");
+                emitBoxed(c.a);
+                emitBoxed(c.b);
+                invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
                 return false;
             }
             if (node instanceof Call3Node c) {
-                boolean directSelf = selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot
-                        && ce.fixedMethods != null && ce.fixedMethods.length > 3 && ce.fixedMethods[3] != null;
-                if (directSelf) {
-                    aload(0);
-                    emitBoxed(c.a, baseSlot);
-                    emitBoxed(c.b, baseSlot);
-                    emitBoxed(c.c, baseSlot);
-                    invokevirtual(ce.className, "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
-                } else {
-                    emitBoxed(c.fn, baseSlot);
-                    checkcast("cljl/Fn");
-                    emitBoxed(c.a, baseSlot);
-                    emitBoxed(c.b, baseSlot);
-                    emitBoxed(c.c, baseSlot);
-                    invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
-                }
+                emitBoxed(c.fn);
+                checkcast("cljl/Fn");
+                emitBoxed(c.a);
+                emitBoxed(c.b);
+                emitBoxed(c.c);
+                invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
                 return false;
             }
             if (node instanceof Call4Node c) {
-                boolean directSelf = selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot
-                        && ce.fixedMethods != null && ce.fixedMethods.length > 4 && ce.fixedMethods[4] != null;
-                if (directSelf) {
+                if (isDirectSelf(c.fn, 4)) {
                     aload(0);
-                    emitBoxed(c.a, baseSlot);
-                    emitBoxed(c.b, baseSlot);
-                    emitBoxed(c.c, baseSlot);
-                    emitBoxed(c.d, baseSlot);
+                    emitBoxed(c.a); emitBoxed(c.b); emitBoxed(c.c); emitBoxed(c.d);
                     invokevirtual(ce.className, "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
                 } else {
-                    emitBoxed(c.fn, baseSlot);
+                    emitBoxed(c.fn);
                     checkcast("cljl/Fn");
-                    emitBoxed(c.a, baseSlot);
-                    emitBoxed(c.b, baseSlot);
-                    emitBoxed(c.c, baseSlot);
-                    emitBoxed(c.d, baseSlot);
+                    emitBoxed(c.a); emitBoxed(c.b); emitBoxed(c.c); emitBoxed(c.d);
                     invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
                 }
                 return false;
             }
             if (node instanceof CallNNode c) {
-                emitBoxed(c.fn, baseSlot);
+                emitBoxed(c.fn);
                 checkcast("cljl/Fn");
-                emitObjectArray(c.args, baseSlot);
+                emitObjectArray(c.args);
                 invokevirtual("cljl/Fn", "invokeVarargs", "([Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
                 return false;
             }
 
-            // Arithmetic intrinsics
-            if (node instanceof Add2Node a) {
-                if (a.b instanceof ConstNode cn && cn.isLong) {
-                    emitBoxed(a.a, baseSlot);
-                    ldcLong(cn.longVal);
-                    invokestatic("cljl/Numbers", "add", "(Ljava/lang/Object;J)Ljava/lang/Number;", 3, 1);
-                } else if (a.a instanceof ConstNode cn && cn.isLong) {
-                    emitBoxed(a.b, baseSlot);
-                    ldcLong(cn.longVal);
-                    invokestatic("cljl/Numbers", "add", "(Ljava/lang/Object;J)Ljava/lang/Number;", 3, 1);
-                } else {
-                    emitBoxed(a.a, baseSlot);
-                    emitBoxed(a.b, baseSlot);
-                    invokestatic("cljl/Numbers", "add", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
-                }
-                return false;
-            }
-            if (node instanceof Sub2Node a) {
-                emitBoxed(a.a, baseSlot);
-                if (a.b instanceof ConstNode cn && cn.isLong) {
-                    ldcLong(cn.longVal);
-                    invokestatic("cljl/Numbers", "minus", "(Ljava/lang/Object;J)Ljava/lang/Number;", 3, 1);
-                } else {
-                    emitBoxed(a.b, baseSlot);
-                    invokestatic("cljl/Numbers", "minus", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
-                }
-                return false;
-            }
-            if (node instanceof Mul2Node a) {
-                if (a.b instanceof ConstNode cn && cn.isLong) {
-                    emitBoxed(a.a, baseSlot);
-                    ldcLong(cn.longVal);
-                    invokestatic("cljl/Numbers", "multiply", "(Ljava/lang/Object;J)Ljava/lang/Number;", 3, 1);
-                } else if (a.a instanceof ConstNode cn && cn.isLong) {
-                    emitBoxed(a.b, baseSlot);
-                    ldcLong(cn.longVal);
-                    invokestatic("cljl/Numbers", "multiply", "(Ljava/lang/Object;J)Ljava/lang/Number;", 3, 1);
-                } else {
-                    emitBoxed(a.a, baseSlot);
-                    emitBoxed(a.b, baseSlot);
-                    invokestatic("cljl/Numbers", "multiply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
-                }
+            // Arithmetic intrinsics (polymorphic fallback when not purely LONG/DOUBLE)
+            if (node instanceof Add2Node a) { emitBinaryNumOp(a.a, a.b, "add"); return false; }
+            if (node instanceof Sub2Node a) { emitBinaryNumOp(a.a, a.b, "minus"); return false; }
+            if (node instanceof Mul2Node a) { emitBinaryNumOp(a.a, a.b, "multiply"); return false; }
+            if (node instanceof Div2Node a) {
+                emitBoxed(a.a);
+                emitBoxed(a.b);
+                invokestatic("cljl/Numbers", "divide", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
                 return false;
             }
             if (node instanceof NegateNode a) {
-                emitBoxed(a.a, baseSlot);
+                emitBoxed(a.a);
                 invokestatic("cljl/Numbers", "minus", "(Ljava/lang/Object;)Ljava/lang/Number;", 1, 1);
                 return false;
             }
             if (node instanceof IncNode a) {
-                emitBoxed(a.a, baseSlot);
+                emitBoxed(a.a);
                 invokestatic("cljl/Numbers", "inc", "(Ljava/lang/Object;)Ljava/lang/Number;", 1, 1);
                 return false;
             }
             if (node instanceof DecNode a) {
-                emitBoxed(a.a, baseSlot);
+                emitBoxed(a.a);
                 invokestatic("cljl/Numbers", "dec", "(Ljava/lang/Object;)Ljava/lang/Number;", 1, 1);
                 return false;
             }
             if (node instanceof Rem2Node a) {
-                emitBoxed(a.a, baseSlot);
-                emitBoxed(a.b, baseSlot);
+                emitBoxed(a.a);
+                emitBoxed(a.b);
                 invokestatic("cljl/Numbers", "remainder", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
                 return false;
             }
             if (node instanceof Quot2Node a) {
-                emitBoxed(a.a, baseSlot);
-                emitBoxed(a.b, baseSlot);
+                emitBoxed(a.a);
+                emitBoxed(a.b);
                 invokestatic("cljl/Numbers", "quotient", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
                 return false;
             }
-
-            // Boolean-returning intrinsics boxed via Boolean.valueOf
-            if (isBooleanNode(node)) {
-                emitBoolean(node, baseSlot);
-                invokestatic("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", 1, 1);
+            if (node instanceof UncheckedAdd2Node a) {
+                emitBoxed(a.a);
+                emitBoxed(a.b);
+                invokestatic("cljl/Numbers", "uncheckedAdd", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
+                return false;
+            }
+            if (node instanceof UncheckedSub2Node a) {
+                emitBoxed(a.a);
+                emitBoxed(a.b);
+                invokestatic("cljl/Numbers", "uncheckedSubtract", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
+                return false;
+            }
+            if (node instanceof UncheckedMul2Node a) {
+                emitBoxed(a.a);
+                emitBoxed(a.b);
+                invokestatic("cljl/Numbers", "uncheckedMultiply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
+                return false;
+            }
+            if (node instanceof UncheckedIncNode a) {
+                emitBoxed(a.a);
+                invokestatic("cljl/Numbers", "uncheckedInc", "(Ljava/lang/Object;)Ljava/lang/Number;", 1, 1);
+                return false;
+            }
+            if (node instanceof UncheckedDecNode a) {
+                emitBoxed(a.a);
+                invokestatic("cljl/Numbers", "uncheckedDec", "(Ljava/lang/Object;)Ljava/lang/Number;", 1, 1);
+                return false;
+            }
+            if (node instanceof UncheckedNegateNode a) {
+                emitBoxed(a.a);
+                invokestatic("cljl/Numbers", "uncheckedNegate", "(Ljava/lang/Object;)Ljava/lang/Number;", 1, 1);
                 return false;
             }
 
-            // Exceptions, Monitors, Case & Interop
-            if (node instanceof ThrowNode tn) {
-                emitBoxed(tn.expr, baseSlot);
-                invokestatic("cljl/BytecodeJIT", "throwObj", "(Ljava/lang/Object;)Ljava/lang/RuntimeException;", 1, 1);
-                athrow();
-                return true;
+            // Boolean nodes boxed fallback
+            if (isBooleanNode(node)) {
+                emitBoolean(node);
+                boxValue(ValType.BOOL);
+                return false;
             }
+
+            // Collection & sequence intrinsics
+            if (node instanceof NthNode a) {
+                ValType ct = typeOf(a.coll);
+                if (ct.isRef() && ct.nonNull && ct.refClass == PersistentVector.class) {
+                    emitRef(a.coll, PersistentVector.class);
+                    emitLong(a.idx);
+                    l2i();
+                    if (a.notFound == null) {
+                        invokevirtual("cljl/lang/PersistentVector", "nth", "(I)Ljava/lang/Object;", 2, 1);
+                    } else {
+                        emitBoxed(a.notFound);
+                        invokevirtual("cljl/lang/PersistentVector", "nth", "(ILjava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                    }
+                    return false;
+                }
+                emitBoxed(a.coll);
+                emitLong(a.idx);
+                l2i();
+                if (a.notFound == null) {
+                    invokestatic("cljl/RT", "nth", "(Ljava/lang/Object;I)Ljava/lang/Object;", 2, 1);
+                } else {
+                    emitBoxed(a.notFound);
+                    invokestatic("cljl/RT", "nth", "(Ljava/lang/Object;ILjava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                }
+                return false;
+            }
+            if (node instanceof GetNode a) {
+                ValType ct = typeOf(a.coll);
+                if (ct.isRef() && ct.nonNull && ct.refClass == PersistentHashMap.class) {
+                    emitRef(a.coll, PersistentHashMap.class);
+                    emitBoxed(a.key);
+                    if (a.notFound == null) {
+                        invokevirtual("cljl/lang/PersistentHashMap", "valAt", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                    } else {
+                        emitBoxed(a.notFound);
+                        invokevirtual("cljl/lang/PersistentHashMap", "valAt", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                    }
+                    return false;
+                }
+                emitBoxed(a.coll);
+                emitBoxed(a.key);
+                if (a.notFound == null) {
+                    invokestatic("cljl/RT", "get", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                } else {
+                    emitBoxed(a.notFound);
+                    invokestatic("cljl/RT", "get", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                }
+                return false;
+            }
+            if (node instanceof TransientNode a) {
+                ValType ct = typeOf(a.coll);
+                if (ct.isRef() && ct.nonNull) {
+                    if (ct.refClass == PersistentVector.class) {
+                        emitRef(a.coll, PersistentVector.class);
+                        invokevirtual("cljl/lang/PersistentVector", "asTransient",
+                                "()Lcljl/lang/PersistentVector$TransientVector;", 1, 1);
+                        return false;
+                    }
+                    if (ct.refClass == PersistentHashMap.class) {
+                        emitRef(a.coll, PersistentHashMap.class);
+                        invokevirtual("cljl/lang/PersistentHashMap", "asTransient",
+                                "()Lcljl/lang/PersistentHashMap$TransientHashMap;", 1, 1);
+                        return false;
+                    }
+                    if (ct.refClass == PersistentHashSet.class) {
+                        emitRef(a.coll, PersistentHashSet.class);
+                        invokevirtual("cljl/lang/PersistentHashSet", "asTransient",
+                                "()Lcljl/lang/PersistentHashSet$TransientHashSet;", 1, 1);
+                        return false;
+                    }
+                }
+                emitBoxed(a.coll);
+                invokestatic("cljl/RT", "transientColl", "(Ljava/lang/Object;)Ljava/lang/Object;", 1, 1);
+                return false;
+            }
+            if (node instanceof PersistentBangNode a) {
+                ValType tt = typeOf(a.target);
+                if (tt.isRef() && tt.nonNull) {
+                    if (tt.refClass == PersistentVector.TransientVector.class) {
+                        emitRef(a.target, PersistentVector.TransientVector.class);
+                        invokevirtual("cljl/lang/PersistentVector$TransientVector", "persistent",
+                                "()Lcljl/lang/PersistentVector;", 1, 1);
+                        return false;
+                    }
+                    if (tt.refClass == PersistentHashMap.TransientHashMap.class) {
+                        emitRef(a.target, PersistentHashMap.TransientHashMap.class);
+                        invokevirtual("cljl/lang/PersistentHashMap$TransientHashMap", "persistent",
+                                "()Lcljl/lang/PersistentHashMap;", 1, 1);
+                        return false;
+                    }
+                    if (tt.refClass == PersistentHashSet.TransientHashSet.class) {
+                        emitRef(a.target, PersistentHashSet.TransientHashSet.class);
+                        invokevirtual("cljl/lang/PersistentHashSet$TransientHashSet", "persistent",
+                                "()Lcljl/lang/PersistentHashSet;", 1, 1);
+                        return false;
+                    }
+                }
+                emitBoxed(a.target);
+                invokestatic("cljl/RT", "persistentBang", "(Ljava/lang/Object;)Ljava/lang/Object;", 1, 1);
+                return false;
+            }
+            if (node instanceof ConjBangNode a) {
+                ValType tt = typeOf(a.target);
+                if (tt.isRef() && tt.nonNull) {
+                    if (tt.refClass == PersistentVector.TransientVector.class) {
+                        emitRef(a.target, PersistentVector.TransientVector.class);
+                        emitBoxed(a.val);
+                        invokevirtual("cljl/lang/PersistentVector$TransientVector", "conj",
+                                "(Ljava/lang/Object;)Lcljl/lang/PersistentVector$TransientVector;", 2, 1);
+                        return false;
+                    }
+                    if (tt.refClass == PersistentHashSet.TransientHashSet.class) {
+                        emitRef(a.target, PersistentHashSet.TransientHashSet.class);
+                        emitBoxed(a.val);
+                        invokevirtual("cljl/lang/PersistentHashSet$TransientHashSet", "conj",
+                                "(Ljava/lang/Object;)Lcljl/lang/PersistentHashSet$TransientHashSet;", 2, 1);
+                        return false;
+                    }
+                }
+                emitBoxed(a.target);
+                emitBoxed(a.val);
+                invokestatic("cljl/RT", "conjBang", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                return false;
+            }
+            if (node instanceof AssocBangNode a) {
+                ValType tt = typeOf(a.target);
+                if (tt.isRef() && tt.nonNull && tt.refClass == PersistentHashMap.TransientHashMap.class) {
+                    emitRef(a.target, PersistentHashMap.TransientHashMap.class);
+                    emitBoxed(a.key);
+                    emitBoxed(a.val);
+                    invokevirtual("cljl/lang/PersistentHashMap$TransientHashMap", "assoc",
+                            "(Ljava/lang/Object;Ljava/lang/Object;)Lcljl/lang/PersistentHashMap$TransientHashMap;", 3, 1);
+                    return false;
+                }
+                emitBoxed(a.target);
+                emitBoxed(a.key);
+                emitBoxed(a.val);
+                invokestatic("cljl/RT", "assocBang", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                return false;
+            }
+            if (node instanceof ConjNode a) {
+                ValType ct = typeOf(a.coll);
+                if (ct.isRef() && ct.nonNull && ct.refClass == PersistentVector.class) {
+                    emitRef(a.coll, PersistentVector.class);
+                    emitBoxed(a.val);
+                    invokevirtual("cljl/lang/PersistentVector", "conj",
+                            "(Ljava/lang/Object;)Lcljl/lang/PersistentVector;", 2, 1);
+                    return false;
+                }
+                emitBoxed(a.coll);
+                emitBoxed(a.val);
+                invokestatic("cljl/RT", "conj", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                return false;
+            }
+            if (node instanceof AssocNode a) {
+                ValType ct = typeOf(a.coll);
+                if (ct.isRef() && ct.nonNull && ct.refClass == PersistentHashMap.class) {
+                    emitRef(a.coll, PersistentHashMap.class);
+                    emitBoxed(a.key);
+                    emitBoxed(a.val);
+                    invokevirtual("cljl/lang/PersistentHashMap", "assoc",
+                            "(Ljava/lang/Object;Ljava/lang/Object;)Lcljl/lang/PersistentHashMap;", 3, 1);
+                    return false;
+                }
+                if (ct.isRef() && ct.nonNull && ct.refClass == PersistentVector.class) {
+                    emitRef(a.coll, PersistentVector.class);
+                    emitBoxed(a.key);
+                    emitBoxed(a.val);
+                    invokevirtual("cljl/lang/PersistentVector", "assoc",
+                            "(Ljava/lang/Object;Ljava/lang/Object;)Lcljl/lang/PersistentVector;", 3, 1);
+                    return false;
+                }
+                emitBoxed(a.coll);
+                emitBoxed(a.key);
+                emitBoxed(a.val);
+                invokestatic("cljl/RT", "assoc", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                return false;
+            }
+            if (node instanceof FirstNode a) {
+                emitBoxed(a.coll);
+                invokestatic("cljl/RT", "first", "(Ljava/lang/Object;)Ljava/lang/Object;", 1, 1);
+                return false;
+            }
+            if (node instanceof NextNode a) {
+                emitBoxed(a.coll);
+                invokestatic("cljl/RT", "next", "(Ljava/lang/Object;)Lcljl/lang/ISeq;", 1, 1);
+                return false;
+            }
+            if (node instanceof RestNode a) {
+                emitBoxed(a.coll);
+                invokestatic("cljl/RT", "more", "(Ljava/lang/Object;)Lcljl/lang/ISeq;", 1, 1);
+                return false;
+            }
+            if (node instanceof SeqNode a) {
+                emitBoxed(a.coll);
+                invokestatic("cljl/RT", "seq", "(Ljava/lang/Object;)Lcljl/lang/ISeq;", 1, 1);
+                return false;
+            }
+
+            // Java interop (direct typed when resolved, otherwise cached reflection fallback)
             if (node instanceof NewNode nn) {
+                Constructor<?> ctor = analysis != null ? analysis.resolvedCtors.get(nn) : null;
+                if (ctor != null) {
+                    String owner = nn.clazz.getName().replace('.', '/');
+                    Class<?>[] pts = ctor.getParameterTypes();
+                    newInst(owner);
+                    dup();
+                    int argWords = emitJavaArgs(nn.args, pts);
+                    invokespecial(owner, "<init>", methodDesc(void.class, pts), 1 + argWords, 0);
+                    return false;
+                }
                 loadConstObj(nn.clazz);
                 checkcast("java/lang/Class");
-                emitObjectArrayOrEmpty(nn.args, baseSlot);
+                emitObjectArrayOrEmpty(nn.args);
                 invokestatic("cljl/Interop", "invokeConstructor", "(Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
                 return false;
             }
             if (node instanceof StaticFieldNode sf) {
+                Field f = analysis != null ? analysis.resolvedFields.get(sf) : null;
+                if (f != null) {
+                    emitResolvedStaticFieldRaw(f);
+                    coerceJavaReturnToStack(f.getType(), ValType.ANY);
+                    return false;
+                }
                 loadConstObj(sf.clazz);
                 checkcast("java/lang/Class");
                 ldcString(sf.fieldName);
@@ -1418,37 +3387,55 @@ public final class BytecodeJIT {
                 return false;
             }
             if (node instanceof StaticMethodNode sm) {
+                Method m = analysis != null ? analysis.resolvedMethods.get(sm) : null;
+                if (m != null) {
+                    emitResolvedStaticCallRaw(sm, m);
+                    coerceJavaReturnToStack(m.getReturnType(), ValType.ANY);
+                    return false;
+                }
                 loadConstObj(sm.clazz);
                 checkcast("java/lang/Class");
                 ldcString(sm.methodName);
-                emitObjectArrayOrEmpty(sm.args, baseSlot);
+                emitObjectArrayOrEmpty(sm.args);
                 invokestatic("cljl/Interop", "invokeStaticMethod", "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
                 return false;
             }
             if (node instanceof InstanceFieldNode inf) {
-                emitBoxed(inf.target, baseSlot);
+                Field f = analysis != null ? analysis.resolvedFields.get(inf) : null;
+                if (f != null) {
+                    emitResolvedInstanceFieldRaw(inf, f);
+                    coerceJavaReturnToStack(f.getType(), ValType.ANY);
+                    return false;
+                }
+                emitBoxed(inf.target);
                 ldcString(inf.fieldName);
                 invokestatic("cljl/Interop", "getInstanceField", "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;", 2, 1);
                 return false;
             }
             if (node instanceof InstanceMethodNode im) {
-                emitBoxed(im.target, baseSlot);
+                Method m = analysis != null ? analysis.resolvedMethods.get(im) : null;
+                if (m != null) {
+                    emitResolvedInstanceCallRaw(im, m);
+                    coerceJavaReturnToStack(m.getReturnType(), ValType.ANY);
+                    return false;
+                }
+                emitBoxed(im.target);
                 ldcString(im.methodName);
-                emitObjectArrayOrEmpty(im.args, baseSlot);
+                emitObjectArrayOrEmpty(im.args);
                 invokestatic("cljl/Interop", "invokeInstanceMethod", "(Ljava/lang/Object;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
                 return false;
             }
             if (node instanceof SetVarNode sv) {
                 loadConstObj(sv.var);
                 checkcast("cljl/Var");
-                emitBoxed(sv.val, baseSlot);
+                emitBoxed(sv.val);
                 invokevirtual("cljl/Var", "set", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
                 return false;
             }
             if (node instanceof SetFieldNode sf) {
-                emitBoxed(sf.target, baseSlot);
+                emitBoxed(sf.target);
                 ldcString(sf.fieldName);
-                emitBoxed(sf.val, baseSlot);
+                emitBoxed(sf.val);
                 invokestatic("cljl/Interop", "setInstanceField", "(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
                 return false;
             }
@@ -1456,255 +3443,42 @@ public final class BytecodeJIT {
                 loadConstObj(ssf.clazz);
                 checkcast("java/lang/Class");
                 ldcString(ssf.fieldName);
-                emitBoxed(ssf.val, baseSlot);
+                emitBoxed(ssf.val);
                 invokestatic("cljl/Interop", "setStaticField", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
                 return false;
             }
             if (node instanceof MonitorNode mn) {
-                emitBoxed(mn.target, baseSlot);
+                emitBoxed(mn.target);
                 iconst(mn.enter ? 1 : 0);
                 invokestatic("cljl/Compiler", "monitorOp", "(Ljava/lang/Object;Z)Ljava/lang/Object;", 2, 1);
                 return false;
             }
-            if (node instanceof LockingNode ln) {
-                int lockLocal = allocTempLocal();
-                int exLocal = allocTempLocal();
-                emitBoxed(ln.target, baseSlot);
-                invokestatic("cljl/BytecodeJIT", "requireNonNullLock", "(Ljava/lang/Object;)Ljava/lang/Object;", 1, 1);
-                dup();
-                astore(lockLocal);
-                monitorenter();
-
-                Label tryStart = new Label();
-                Label tryEnd = new Label();
-                Label catchStart = new Label();
-                Label done = new Label();
-
-                markLabel(tryStart);
-                boolean bodyTerm = emitBoxed(ln.body, baseSlot);
-                markLabel(tryEnd);
-
-                if (!bodyTerm) {
-                    aload(lockLocal);
-                    monitorexit();
-                    gotoLabel(done);
-                }
-
-                curStack = 1;
-                if (maxStack < 1) maxStack = 1;
-                markLabel(catchStart);
-                astore(exLocal);
-                aload(lockLocal);
-                monitorexit();
-                aload(exLocal);
-                athrow();
-
-                exceptionTable.add(new ExceptionEntry(tryStart, tryEnd, catchStart, 0));
-
-                freeTempLocals(2);
-                if (!bodyTerm) {
-                    curStack = 1;
-                    markLabel(done);
-                    return false;
-                } else {
-                    curStack = 0;
-                    return true;
-                }
-            }
-            if (node instanceof CaseNode cn) {
-                List<Node> branches = new ArrayList<>();
-                IdentityHashMap<Node, Integer> nodeToIdx = new IdentityHashMap<>();
-                Map<RT.EquivKey, Integer> keyToIdx = new HashMap<>(cn.table.size() * 2 + 1);
-                for (Map.Entry<RT.EquivKey, Node> e : cn.table.entrySet()) {
-                    Integer idx = nodeToIdx.get(e.getValue());
-                    if (idx == null) {
-                        idx = branches.size();
-                        nodeToIdx.put(e.getValue(), idx);
-                        branches.add(e.getValue());
-                    }
-                    keyToIdx.put(e.getKey(), idx);
-                }
-
-                if (branches.isEmpty()) {
-                    emitBoxed(cn.expr, baseSlot);
-                    if (cn.hasDefault) {
-                        pop();
-                        return emitBoxed(cn.defaultNode, baseSlot);
-                    }
-                    invokestatic("cljl/BytecodeJIT", "throwNoMatchingClause", "(Ljava/lang/Object;)Ljava/lang/RuntimeException;", 1, 1);
-                    athrow();
-                    return true;
-                }
-
-                int stackAtEntry = curStack;
-                emitBoxed(cn.expr, baseSlot);
-                loadConstObj(keyToIdx);
-                checkcast("java/util/Map");
-                if (cn.hasDefault) {
-                    invokestatic("cljl/BytecodeJIT", "caseLookup", "(Ljava/lang/Object;Ljava/util/Map;)I", 2, 1);
-                } else {
-                    invokestatic("cljl/BytecodeJIT", "caseLookupOrThrow", "(Ljava/lang/Object;Ljava/util/Map;)I", 2, 1);
-                }
-
-                int n = branches.size();
-                Label[] branchLabels = new Label[n];
-                for (int i = 0; i < n; i++) branchLabels[i] = new Label();
-                Label defaultLabel = new Label();
-                Label endLabel = new Label();
-
-                tableswitch(0, n - 1, defaultLabel, branchLabels);
-
-                boolean anyNonTerm = false;
-                for (int i = 0; i < n; i++) {
-                    curStack = stackAtEntry;
-                    markLabel(branchLabels[i]);
-                    boolean bTerm = emitBoxed(branches.get(i), baseSlot);
-                    if (!bTerm) {
-                        anyNonTerm = true;
-                        gotoLabel(endLabel);
-                    }
-                }
-
-                curStack = stackAtEntry;
-                markLabel(defaultLabel);
-                if (cn.hasDefault) {
-                    boolean dTerm = emitBoxed(cn.defaultNode, baseSlot);
-                    if (!dTerm) {
-                        anyNonTerm = true;
-                    }
-                } else {
-                    aconstNull();
-                    invokestatic("cljl/BytecodeJIT", "throwNoMatchingClause", "(Ljava/lang/Object;)Ljava/lang/RuntimeException;", 1, 1);
-                    athrow();
-                }
-
-                if (anyNonTerm) {
-                    curStack = stackAtEntry + 1;
-                    markLabel(endLabel);
-                    return false;
-                } else {
-                    curStack = stackAtEntry;
-                    return true;
-                }
-            }
 
             throw new IllegalStateException("Unsupported node in BytecodeJIT: " + node.getClass().getName());
+        }
+
+        private void emitBinaryNumOp(Node a, Node b, String methodName) {
+            if (typeOf(b) == ValType.LONG || (b instanceof ConstNode cn && cn.isLong)) {
+                emitBoxed(a);
+                emitLong(b);
+                invokestatic("cljl/Numbers", methodName, "(Ljava/lang/Object;J)Ljava/lang/Number;", 3, 1);
+            } else if (typeOf(a) == ValType.LONG || (a instanceof ConstNode cn && cn.isLong)) {
+                emitLong(a);
+                emitBoxed(b);
+                invokestatic("cljl/Numbers", methodName, "(JLjava/lang/Object;)Ljava/lang/Number;", 3, 1);
+            } else {
+                emitBoxed(a);
+                emitBoxed(b);
+                invokestatic("cljl/Numbers", methodName, "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
+            }
         }
 
         private static boolean isBooleanNode(Node n) {
             return n instanceof Lt2Node || n instanceof Lte2Node || n instanceof Gt2Node || n instanceof Gte2Node
                     || n instanceof Equiv2Node || n instanceof NumEq2Node || n instanceof ZeroPNode
                     || n instanceof PosPNode || n instanceof NegPNode || n instanceof NilPNode
-                    || n instanceof NotNode || n instanceof IdenticalNode;
-        }
-
-        void emitBoolean(Node node, int baseSlot) {
-            if (node instanceof Lt2Node a) {
-                emitBoxed(a.a, baseSlot);
-                if (a.b instanceof ConstNode cn && cn.isLong) {
-                    ldcLong(cn.longVal);
-                    invokestatic("cljl/Numbers", "lt", "(Ljava/lang/Object;J)Z", 3, 1);
-                } else {
-                    emitBoxed(a.b, baseSlot);
-                    invokestatic("cljl/Numbers", "lt", "(Ljava/lang/Object;Ljava/lang/Object;)Z", 2, 1);
-                }
-                return;
-            }
-            if (node instanceof Lte2Node a) {
-                emitBoxed(a.a, baseSlot);
-                if (a.b instanceof ConstNode cn && cn.isLong) {
-                    ldcLong(cn.longVal);
-                    invokestatic("cljl/Numbers", "lte", "(Ljava/lang/Object;J)Z", 3, 1);
-                } else {
-                    emitBoxed(a.b, baseSlot);
-                    invokestatic("cljl/Numbers", "lte", "(Ljava/lang/Object;Ljava/lang/Object;)Z", 2, 1);
-                }
-                return;
-            }
-            if (node instanceof Gt2Node a) {
-                emitBoxed(a.a, baseSlot);
-                if (a.b instanceof ConstNode cn && cn.isLong) {
-                    ldcLong(cn.longVal);
-                    invokestatic("cljl/Numbers", "gt", "(Ljava/lang/Object;J)Z", 3, 1);
-                } else {
-                    emitBoxed(a.b, baseSlot);
-                    invokestatic("cljl/Numbers", "gt", "(Ljava/lang/Object;Ljava/lang/Object;)Z", 2, 1);
-                }
-                return;
-            }
-            if (node instanceof Gte2Node a) {
-                emitBoxed(a.a, baseSlot);
-                if (a.b instanceof ConstNode cn && cn.isLong) {
-                    ldcLong(cn.longVal);
-                    invokestatic("cljl/Numbers", "gte", "(Ljava/lang/Object;J)Z", 3, 1);
-                } else {
-                    emitBoxed(a.b, baseSlot);
-                    invokestatic("cljl/Numbers", "gte", "(Ljava/lang/Object;Ljava/lang/Object;)Z", 2, 1);
-                }
-                return;
-            }
-            if (node instanceof Equiv2Node a) {
-                emitBoxed(a.a, baseSlot);
-                emitBoxed(a.b, baseSlot);
-                invokestatic("cljl/RT", "equiv", "(Ljava/lang/Object;Ljava/lang/Object;)Z", 2, 1);
-                return;
-            }
-            if (node instanceof NumEq2Node a) {
-                emitBoxed(a.a, baseSlot);
-                emitBoxed(a.b, baseSlot);
-                invokestatic("cljl/Numbers", "equal", "(Ljava/lang/Object;Ljava/lang/Object;)Z", 2, 1);
-                return;
-            }
-            if (node instanceof ZeroPNode a) {
-                emitBoxed(a.a, baseSlot);
-                invokestatic("cljl/Numbers", "isZero", "(Ljava/lang/Object;)Z", 1, 1);
-                return;
-            }
-            if (node instanceof PosPNode a) {
-                emitBoxed(a.a, baseSlot);
-                invokestatic("cljl/Numbers", "isPos", "(Ljava/lang/Object;)Z", 1, 1);
-                return;
-            }
-            if (node instanceof NegPNode a) {
-                emitBoxed(a.a, baseSlot);
-                invokestatic("cljl/Numbers", "isNeg", "(Ljava/lang/Object;)Z", 1, 1);
-                return;
-            }
-            if (node instanceof NilPNode a) {
-                emitBoxed(a.a, baseSlot);
-                Label trueL = new Label();
-                Label endL = new Label();
-                ifnull(trueL);
-                iconst(0);
-                gotoLabel(endL);
-                curStack--;
-                markLabel(trueL);
-                iconst(1);
-                markLabel(endL);
-                return;
-            }
-            if (node instanceof IdenticalNode a) {
-                emitBoxed(a.a, baseSlot);
-                emitBoxed(a.b, baseSlot);
-                Label neL = new Label();
-                Label endL = new Label();
-                ifAcmpNe(neL);
-                iconst(1);
-                gotoLabel(endL);
-                curStack--;
-                markLabel(neL);
-                iconst(0);
-                markLabel(endL);
-                return;
-            }
-            if (node instanceof NotNode a) {
-                emitBoolean(a.a, baseSlot);
-                iconst(1);
-                ixor();
-                return;
-            }
-            emitBoxed(node, baseSlot);
-            invokestatic("cljl/RT", "truthy", "(Ljava/lang/Object;)Z", 1, 1);
+                    || n instanceof NotNode || n instanceof IdenticalNode
+                    || n instanceof EvenPNode || n instanceof OddPNode || n instanceof TypePredNode;
         }
 
         private void emitVarFn(Var v) {
@@ -1714,39 +3488,40 @@ public final class BytecodeJIT {
             checkcast("cljl/Fn");
         }
 
-        private void emitObjectArray(Node[] nodes, int baseSlot) {
+        private void emitObjectArray(Node[] nodes) {
             iconst(nodes.length);
             anewarray("java/lang/Object");
             for (int i = 0; i < nodes.length; i++) {
                 dup();
                 iconst(i);
-                emitBoxed(nodes[i], baseSlot);
+                emitBoxed(nodes[i]);
                 aastore();
             }
         }
 
-        private void emitObjectArrayOrEmpty(Node[] nodes, int baseSlot) {
+        private void emitObjectArrayOrEmpty(Node[] nodes) {
             if (nodes.length == 0) {
                 invokestatic("cljl/BytecodeJIT", "emptyArray", "()[Ljava/lang/Object;", 0, 1);
             } else {
-                emitObjectArray(nodes, baseSlot);
+                emitObjectArray(nodes);
             }
         }
 
-        private void emitCapturedSlots(int[] parentSlots, int baseSlot) {
+        private void emitCapturedSlots(int[] parentSlots) {
             iconst(parentSlots.length);
             anewarray("java/lang/Object");
             for (int i = 0; i < parentSlots.length; i++) {
                 dup();
                 iconst(i);
-                aload(baseSlot + parentSlots[i]);
+                ValType st = layout.slotTypes[parentSlots[i]];
+                loadLogicalSlot(parentSlots[i]);
+                boxValue(st);
                 aastore();
             }
         }
 
         void finish() {
             byte[] codeBytes = code.toByteArray();
-            // Patch jump offsets
             for (LoopTarget lt : loopTargets) {
                 patchLabel(codeBytes, lt.start);
             }
@@ -1760,11 +3535,11 @@ public final class BytecodeJIT {
                 out.writeShort(0x0001); // ACC_PUBLIC
                 out.writeShort(nameIdx);
                 out.writeShort(descIdx);
-                out.writeShort(1); // 1 attribute: Code
+                out.writeShort(1);
 
                 out.writeShort(ce.codeAttrNameIdx);
                 out.writeInt(12 + codeBytes.length + exceptionTable.size() * 8);
-                out.writeShort(Math.max(maxStack, 4));
+                out.writeShort(Math.max(maxStack, 6));
                 out.writeShort(maxLocals + maxTempLocals);
                 out.writeInt(codeBytes.length);
                 out.write(codeBytes);
@@ -1775,15 +3550,13 @@ public final class BytecodeJIT {
                     out.writeShort(ex.handler.pos);
                     out.writeShort(ex.catchTypeCpIdx);
                 }
-                out.writeShort(0); // attributes_count
+                out.writeShort(0);
                 out.flush();
                 ce.methodInfos.add(baos.toByteArray());
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
         }
-
-        private final List<Label> allLabels = new ArrayList<>();
 
         private void patchLabel(byte[] codeBytes, Label l) {
             if (l.pos < 0) return;

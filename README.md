@@ -9,23 +9,23 @@ Standard Clojure on the JVM parses and compiles thousands of lines of `clojure/c
 - **Direct Java-compiled `clojure.core`**: Core functions and macros (`Core.java`, `CoreExtras.java`) are implemented directly in Java and registered without parsing bootstrap `.clj` files at startup.
 - **Lazy Standard Library Loading**: Standard and contrib namespaces (`StdLib.java`, `StdLibMore.java`) initialize only when required or referenced so unused namespaces add zero startup cost.
 - **AppCDS Support**: The launchers (`cljl.bat` / `cljl.sh`) automatically generate a JVM AppCDS shared class archive (`build/cljl.jsa`) on first build (~159 ms cold JVM startup + evaluation).
-- **Tier-0 AST Interpreter + Tier-1 JVM Bytecode JIT**: `fn*`, `let*`, `loop*`, and `catch` locals compile to fixed integer slot indices in a flat `Object[]` frame, `loop`/`recur` compiles to in-place `while (true)` loops, `0`–`4` argument calls avoid varargs array allocation, hot core operations use primitive-specialized AST nodes, and hot functions are compiled at runtime directly to JVM classfile bytecode (`BytecodeJIT.java`).
+- **Tier-0 AST Interpreter + Type-Inferred Tier-1 JVM Bytecode JIT**: `fn*`, `let*`, `loop*`, and `catch` locals compile to fixed integer slot indices in a flat `Object[]` frame, `loop`/`recur` compiles to in-place `while (true)` loops, `0`–`4` argument calls avoid varargs array allocation, and hot functions are compiled at runtime directly to JVM classfile bytecode (`BytecodeJIT.java`) backed by forward dataflow/fixpoint type inference & `^tag` propagation (`ValType.java`, `TypeAnalyzer.java`), unboxed `long`/`double`/`boolean` locals and operations, primitive-specialized method overloads (`invokePrim_*`) with guarded self-Var recursion (`with-redefs`-safe), direct typed Java interop, and collection/bitwise intrinsics.
 - **Virtual Thread Concurrency, Agents & STM**: `future`, `pmap`, `pcalls`, `pvalues`, and `clojure.core.async` run on Java Virtual Threads alongside asynchronous `agent` queues and Software Transactional Memory (`ref` / `dosync`).
 - **Runtime JVM Class Generation**: `defprotocol`, `defrecord`, `deftype`, `reify`, `definterface`, `gen-interface`, and `proxy` generate real JVM classes and interfaces dynamically (`TypeFactory.java`).
 
 ## Performance (`fib(40)` vs. Official Clojure)
 
-Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measured on OpenJDK 21.0.13 (Temurin, Linux x86_64) comparing **ClojureLite** (`./cljl.sh test/fib_bench.clj`, AppCDS + Tier-1 `BytecodeJIT`) against **Clojure 1.12.0** (`clojure.main test/fib_bench.clj`):
+Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measured on OpenJDK 21.0.13 (Temurin, Linux x86_64) comparing **ClojureLite** (`./cljl.sh test/fib_bench.clj`, AppCDS + type-inferred Tier-1 `BytecodeJIT`) against **Clojure 1.12.0** (`clojure.main test/fib_bench.clj`):
 
 | Metric | ClojureLite (`cljl`) | Clojure 1.12.0 | Speedup |
 | :--- | :---: | :---: | :---: |
-| `fib(40)` Run 1 (first call) | **602.8 ms** | 738.5 ms | 1.23x faster |
-| `fib(40)` Run 2 (warm) | **578.1 ms** | 618.2 ms | 1.07x faster |
-| `fib(40)` Run 3 (warm) | **579.4 ms** | 634.0 ms | 1.09x faster |
-| Total wall time (3 runs + JVM startup) | **1.99 s** | 3.03 s | 1.52x faster |
+| `fib(40)` Run 1 (first call) | **358.2 ms** | 738.5 ms | 2.06x faster |
+| `fib(40)` Run 2 (warm) | **328.3 ms** | 618.2 ms | 1.88x faster |
+| `fib(40)` Run 3 (warm) | **326.8 ms** | 634.0 ms | 1.94x faster |
+| Total wall time (3 runs + JVM startup) | **1.15 s** | 3.03 s | 2.63x faster |
 | Cold startup + eval (`-e "(+ 1 2)"`) | **0.11 s** | 0.54 s | 4.9x faster |
 
-With Tier-1 JVM bytecode compilation (`BytecodeJIT.java`) and direct unboxed numeric fast paths, ClojureLite slightly beats official Clojure even on compute-bound recursive calls while cutting total wall-clock execution time by ~34% thanks to ~5x faster cold startup.
+With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), ClojureLite infers unboxed `long` parameters/returns and dispatches guarded self-recursive calls directly to `invokePrim_J_J` with no user type hints required—running `fib(40)` ~1.9–2.1x faster than official Clojure (matching raw Java `Math.addExact`/`subtractExact` speed) while reducing total wall-clock execution time by ~62%. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) also drop from ~8.74 ms to ~0.56–0.76 ms.
 
 ## Requirements
 
@@ -112,11 +112,13 @@ ClojureLite/
 │   ├── StdLib.java          # Lazy stdlib (string, set, walk, edn, io, test, repl)
 │   ├── StdLibMore.java      # Lazy stdlib (shell, browse, javadoc, main, data, datafy, pprint, xml, zip, spec, async, etc.)
 │   ├── Reader.java          # Clojure reader, tagged literals, syntax-quote expander
-│   ├── Compiler.java        # Macroexpander, destructuring, lexical slots & AST engine
-│   ├── BytecodeJIT.java     # Tier-1 JVM bytecode JIT compiler
+│   ├── Compiler.java        # Macroexpander, destructuring, ^tag hints, lexical slots & AST engine
+│   ├── ValType.java         # Type lattice for primitive/reference inference & ^tag parsing
+│   ├── TypeAnalyzer.java    # Forward dataflow & fixpoint type inference and interop resolution
+│   ├── BytecodeJIT.java     # Type-inferred Tier-1 JVM bytecode JIT & primitive specialization
 │   ├── TypeFactory.java     # Runtime class generation (defrecord, deftype, reify, proxy, interface)
 │   ├── Protocol.java        # Protocol dispatch table
-│   ├── Interop.java         # Cached reflection-based Java interop
+│   ├── Interop.java         # Typed & cached-reflection Java interop
 │   ├── Numbers.java         # Numeric tower (Long, Double, BigInteger, BigDecimal, Ratio)
 │   ├── Fn.java              # Arity-specialized callable base class
 │   ├── Symbol.java          # Symbols
