@@ -62,6 +62,17 @@ public final class Numbers {
         if (x instanceof Long lx && y instanceof Long ly) {
             return Math.addExact(lx, ly);
         }
+        return addSlow(x, y);
+    }
+
+    public static Number add(Object x, long y) {
+        if (x instanceof Long lx) {
+            return Math.addExact(lx, y);
+        }
+        return addSlow(x, Long.valueOf(y));
+    }
+
+    private static Number addSlow(Object x, Object y) {
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
             return toDouble(x) + toDouble(y);
         }
@@ -121,6 +132,17 @@ public final class Numbers {
         if (x instanceof Long lx && y instanceof Long ly) {
             return Math.subtractExact(lx, ly);
         }
+        return minusSlow(x, y);
+    }
+
+    public static Number minus(Object x, long y) {
+        if (x instanceof Long lx) {
+            return Math.subtractExact(lx, y);
+        }
+        return minusSlow(x, Long.valueOf(y));
+    }
+
+    private static Number minusSlow(Object x, Object y) {
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
             return toDouble(x) - toDouble(y);
         }
@@ -155,6 +177,17 @@ public final class Numbers {
         if (x instanceof Long lx && y instanceof Long ly) {
             return Math.multiplyExact(lx, ly);
         }
+        return multiplySlow(x, y);
+    }
+
+    public static Number multiply(Object x, long y) {
+        if (x instanceof Long lx) {
+            return Math.multiplyExact(lx, y);
+        }
+        return multiplySlow(x, Long.valueOf(y));
+    }
+
+    private static Number multiplySlow(Object x, Object y) {
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
             return toDouble(x) * toDouble(y);
         }
@@ -328,6 +361,15 @@ public final class Numbers {
 
     public static boolean lt(Object x, Object y) {
         if (x instanceof Long lx && y instanceof Long ly) return lx < ly;
+        return ltSlow(x, y);
+    }
+
+    public static boolean lt(Object x, long y) {
+        if (x instanceof Long lx) return lx < y;
+        return ltSlow(x, Long.valueOf(y));
+    }
+
+    private static boolean ltSlow(Object x, Object y) {
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
             return toDouble(x) < toDouble(y);
         }
@@ -336,6 +378,15 @@ public final class Numbers {
 
     public static boolean lte(Object x, Object y) {
         if (x instanceof Long lx && y instanceof Long ly) return lx <= ly;
+        return lteSlow(x, y);
+    }
+
+    public static boolean lte(Object x, long y) {
+        if (x instanceof Long lx) return lx <= y;
+        return lteSlow(x, Long.valueOf(y));
+    }
+
+    private static boolean lteSlow(Object x, Object y) {
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
             return toDouble(x) <= toDouble(y);
         }
@@ -344,6 +395,15 @@ public final class Numbers {
 
     public static boolean gt(Object x, Object y) {
         if (x instanceof Long lx && y instanceof Long ly) return lx > ly;
+        return gtSlow(x, y);
+    }
+
+    public static boolean gt(Object x, long y) {
+        if (x instanceof Long lx) return lx > y;
+        return gtSlow(x, Long.valueOf(y));
+    }
+
+    private static boolean gtSlow(Object x, Object y) {
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
             return toDouble(x) > toDouble(y);
         }
@@ -352,6 +412,15 @@ public final class Numbers {
 
     public static boolean gte(Object x, Object y) {
         if (x instanceof Long lx && y instanceof Long ly) return lx >= ly;
+        return gteSlow(x, y);
+    }
+
+    public static boolean gte(Object x, long y) {
+        if (x instanceof Long lx) return lx >= y;
+        return gteSlow(x, Long.valueOf(y));
+    }
+
+    private static boolean gteSlow(Object x, Object y) {
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
             return toDouble(x) >= toDouble(y);
         }

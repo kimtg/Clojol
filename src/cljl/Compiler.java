@@ -1447,12 +1447,17 @@ public final class Compiler {
     }
 
     public static final class CompiledFn extends Fn implements IMeta {
+        private static final int JIT_THRESHOLD = 16;
+
         private final String name;
         private final boolean isNamed;
         private final FnMethod[] fixedMethods;
         private final FnMethod variadicMethod;
         private final Object[][] captured;
         private PersistentHashMap meta;
+        private volatile Fn jitFn;
+        private int calls;
+        private boolean jitAttempted;
 
         public CompiledFn(
                 String name,
@@ -1467,8 +1472,59 @@ public final class Compiler {
             this.captured = captured;
         }
 
+        public FnMethod[] getFixedMethods() { return fixedMethods; }
+        public FnMethod getVariadicMethod() { return variadicMethod; }
+        public Object[][] getCaptured() { return captured; }
+
+        private void maybeCompileJit() {
+            if (jitAttempted) return;
+            int c = ++calls;
+            if (c < JIT_THRESHOLD && (c != 1 || !hasLoop())) {
+                return;
+            }
+            synchronized (this) {
+                if (jitAttempted) return;
+                jitAttempted = true;
+                Fn compiled = BytecodeJIT.compile(this);
+                if (compiled != null) {
+                    jitFn = compiled;
+                }
+            }
+        }
+
+        private boolean hasLoop() {
+            for (FnMethod m : fixedMethods) {
+                if (m != null && containsLoop(m.body)) return true;
+            }
+            return variadicMethod != null && containsLoop(variadicMethod.body);
+        }
+
+        private static boolean containsLoop(Node n) {
+            if (n instanceof LoopNode) return true;
+            if (n instanceof IfNode iff) {
+                return containsLoop(iff.test) || containsLoop(iff.thenNode) || containsLoop(iff.elseNode);
+            }
+            if (n instanceof DoNode dn) {
+                for (Node c : dn.nodes) if (containsLoop(c)) return true;
+            }
+            if (n instanceof LetNode ln) {
+                for (Node init : ln.inits) if (containsLoop(init)) return true;
+                return containsLoop(ln.body);
+            }
+            return false;
+        }
+
         @Override
         public Object invoke() {
+            Fn j = jitFn;
+            if (j != null) return j.invoke();
+            return invokeSlow0();
+        }
+
+        private Object invokeSlow0() {
+            maybeCompileJit();
+            Fn j = jitFn;
+            if (j != null) return j.invoke();
             FnMethod m = fixedMethods[0];
             if (m != null) {
                 Object[] frame = m.initFrame(this, captured, 0);
@@ -1484,6 +1540,15 @@ public final class Compiler {
 
         @Override
         public Object invoke(Object a) {
+            Fn j = jitFn;
+            if (j != null) return j.invoke(a);
+            return invokeSlow1(a);
+        }
+
+        private Object invokeSlow1(Object a) {
+            maybeCompileJit();
+            Fn j = jitFn;
+            if (j != null) return j.invoke(a);
             FnMethod m = fixedMethods[1];
             if (m != null) {
                 Object[] frame = m.initFrame(this, captured, 1);
@@ -1495,6 +1560,15 @@ public final class Compiler {
 
         @Override
         public Object invoke(Object a, Object b) {
+            Fn j = jitFn;
+            if (j != null) return j.invoke(a, b);
+            return invokeSlow2(a, b);
+        }
+
+        private Object invokeSlow2(Object a, Object b) {
+            maybeCompileJit();
+            Fn j = jitFn;
+            if (j != null) return j.invoke(a, b);
             FnMethod m = fixedMethods[2];
             if (m != null) {
                 Object[] frame = m.initFrame(this, captured, 2);
@@ -1507,6 +1581,15 @@ public final class Compiler {
 
         @Override
         public Object invoke(Object a, Object b, Object c) {
+            Fn j = jitFn;
+            if (j != null) return j.invoke(a, b, c);
+            return invokeSlow3(a, b, c);
+        }
+
+        private Object invokeSlow3(Object a, Object b, Object c) {
+            maybeCompileJit();
+            Fn j = jitFn;
+            if (j != null) return j.invoke(a, b, c);
             FnMethod m = fixedMethods[3];
             if (m != null) {
                 Object[] frame = m.initFrame(this, captured, 3);
@@ -1520,6 +1603,15 @@ public final class Compiler {
 
         @Override
         public Object invoke(Object a, Object b, Object c, Object d) {
+            Fn j = jitFn;
+            if (j != null) return j.invoke(a, b, c, d);
+            return invokeSlow4(a, b, c, d);
+        }
+
+        private Object invokeSlow4(Object a, Object b, Object c, Object d) {
+            maybeCompileJit();
+            Fn j = jitFn;
+            if (j != null) return j.invoke(a, b, c, d);
             FnMethod m = fixedMethods[4];
             if (m != null) {
                 Object[] frame = m.initFrame(this, captured, 4);
@@ -1534,6 +1626,15 @@ public final class Compiler {
 
         @Override
         public Object invokeVarargs(Object[] args) {
+            Fn j = jitFn;
+            if (j != null) return j.invokeVarargs(args);
+            return invokeSlowVarargs(args);
+        }
+
+        private Object invokeSlowVarargs(Object[] args) {
+            maybeCompileJit();
+            Fn j = jitFn;
+            if (j != null) return j.invokeVarargs(args);
             int n = args.length;
             if (n < fixedMethods.length) {
                 FnMethod m = fixedMethods[n];
