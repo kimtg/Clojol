@@ -507,7 +507,7 @@ public final class StdLib {
             return f.getPath();
         }));
         ns.intern("resource", Fn.of12("resource",
-                n -> StdLib.class.getClassLoader().getResource(n.toString()),
+                n -> RT.baseLoader().getResource(n.toString()),
                 (n, loader) -> ((ClassLoader) loader).getResource(n.toString())));
         ns.intern("file", Fn.ofVarargs("file", args -> {
             if (args.length == 1) return asFileImpl(args[0]);
@@ -1030,7 +1030,7 @@ public final class StdLib {
             if (line <= 0) return null;
             String file = fileObj.toString();
             try (InputStream is = Files.exists(Path.of(file)) ? Files.newInputStream(Path.of(file))
-                    : StdLib.class.getClassLoader().getResourceAsStream(file)) {
+                    : RT.baseLoader().getResourceAsStream(file)) {
                 if (is == null) return null;
                 List<String> lines = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8)).lines().toList();
                 if (line > lines.size()) return null;

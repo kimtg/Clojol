@@ -2160,13 +2160,16 @@ public final class Core {
                     Class<?> c = Interop.findClass(s.name);
                     if (c == null) throw new RuntimeException("Class not found: " + s);
                     cur.importClass(c);
-                } else if (spec instanceof ISeq seq) {
-                    String pkg = seq.first().toString();
-                    for (ISeq s = seq.next(); s != null; s = s.next()) {
-                        String clsName = pkg + "." + s.first();
-                        Class<?> c = Interop.findClass(clsName);
-                        if (c == null) throw new RuntimeException("Class not found: " + clsName);
-                        cur.importClass(c);
+                } else if (spec instanceof ISeq || spec instanceof PersistentVector) {
+                    ISeq seq = RT.seq(spec);
+                    if (seq != null) {
+                        String pkg = seq.first().toString();
+                        for (ISeq s = seq.next(); s != null; s = s.next()) {
+                            String clsName = pkg + "." + s.first();
+                            Class<?> c = Interop.findClass(clsName);
+                            if (c == null) throw new RuntimeException("Class not found: " + clsName);
+                            cur.importClass(c);
+                        }
                     }
                 }
             }
@@ -2323,6 +2326,12 @@ public final class Core {
         return PersistentTreeSet.create(PersistentTreeMap.DEFAULT_COMPARATOR, PersistentList.create(syms));
     }
 
+    public static void markLibLoaded(String nsName) {
+        if (nsName != null) {
+            LOADED_LIBS.add(nsName);
+        }
+    }
+
     public static void loadLib(String nsName) {
         if ("clojure.core".equals(nsName)) return;
         if (LOADED_LIBS.contains(nsName) && Namespace.find(nsName) != null) return;
@@ -2330,47 +2339,67 @@ public final class Core {
             LOADED_LIBS.add(nsName);
             return;
         }
-        // Try loading from file system or classpath: foo.bar -> foo/bar.cljl or foo/bar.clj
         String rel = nsName.replace('.', '/').replace('-', '_');
-        String[] candidates = {
-                rel + ".cljl", rel + ".clj",
-                "src/" + rel + ".cljl", "src/" + rel + ".clj",
-                "lib/" + rel + ".cljl", "lib/" + rel + ".clj"
-        };
-        for (String cand : candidates) {
-            Path p = Path.of(cand);
-            if (Files.isRegularFile(p)) {
-                try {
-                    Namespace savedNs = RT.currentNS();
-                    try {
-                        String src = Files.readString(p, StandardCharsets.UTF_8);
-                        Compiler.load(src, cand);
-                        LOADED_LIBS.add(nsName);
-                        return;
-                    } finally {
-                        RT.CURRENT_NS.bindRoot(savedNs);
+        if (RT.hasCustomRuntimeLoader()) {
+            for (String ext : new String[]{".cljl", ".clj"}) {
+                try (InputStream is = RT.baseLoader().getResourceAsStream(rel + ext)) {
+                    if (is != null) {
+                        Namespace savedNs = RT.currentNS();
+                        try {
+                            String src = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                            Compiler.load(src, rel + ext);
+                            LOADED_LIBS.add(nsName);
+                            return;
+                        } finally {
+                            RT.CURRENT_NS.bindRoot(savedNs);
+                        }
                     }
                 } catch (IOException e) {
                     throw RT.sneakyThrow(e);
                 }
             }
-        }
-        // Check classpath
-        for (String ext : new String[]{".cljl", ".clj"}) {
-            try (InputStream is = Core.class.getClassLoader().getResourceAsStream(rel + ext)) {
-                if (is != null) {
-                    Namespace savedNs = RT.currentNS();
+        } else {
+            // Try loading from file system or classpath: foo.bar -> foo/bar.cljl or foo/bar.clj
+            String[] candidates = {
+                    rel + ".cljl", rel + ".clj",
+                    "src/" + rel + ".cljl", "src/" + rel + ".clj",
+                    "lib/" + rel + ".cljl", "lib/" + rel + ".clj"
+            };
+            for (String cand : candidates) {
+                Path p = Path.of(cand);
+                if (Files.isRegularFile(p)) {
                     try {
-                        String src = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-                        Compiler.load(src, rel + ext);
-                        LOADED_LIBS.add(nsName);
-                        return;
-                    } finally {
-                        RT.CURRENT_NS.bindRoot(savedNs);
+                        Namespace savedNs = RT.currentNS();
+                        try {
+                            String src = Files.readString(p, StandardCharsets.UTF_8);
+                            Compiler.load(src, cand);
+                            LOADED_LIBS.add(nsName);
+                            return;
+                        } finally {
+                            RT.CURRENT_NS.bindRoot(savedNs);
+                        }
+                    } catch (IOException e) {
+                        throw RT.sneakyThrow(e);
                     }
                 }
-            } catch (IOException e) {
-                throw RT.sneakyThrow(e);
+            }
+            // Check classpath
+            for (String ext : new String[]{".cljl", ".clj"}) {
+                try (InputStream is = RT.baseLoader().getResourceAsStream(rel + ext)) {
+                    if (is != null) {
+                        Namespace savedNs = RT.currentNS();
+                        try {
+                            String src = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                            Compiler.load(src, rel + ext);
+                            LOADED_LIBS.add(nsName);
+                            return;
+                        } finally {
+                            RT.CURRENT_NS.bindRoot(savedNs);
+                        }
+                    }
+                } catch (IOException e) {
+                    throw RT.sneakyThrow(e);
+                }
             }
         }
         if (Namespace.find(nsName) == null) {

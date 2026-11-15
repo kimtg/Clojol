@@ -12,6 +12,7 @@ Standard Clojure on the JVM parses and compiles thousands of lines of `clojure/c
 - **Tier-0 AST Interpreter + Type-Inferred Tier-1 JVM Bytecode JIT**: `fn*`, `let*`, `loop*`, and `catch` locals compile to fixed integer slot indices in a flat `Object[]` frame, `loop`/`recur` compiles to in-place `while (true)` loops, `0`–`4` argument calls avoid varargs array allocation, and hot functions are compiled at runtime directly to JVM classfile bytecode (`BytecodeJIT.java`) backed by forward dataflow/fixpoint type inference & `^tag` propagation (`ValType.java`, `TypeAnalyzer.java`), unboxed `long`/`double`/`boolean` locals and operations, primitive-specialized method overloads (`invokePrim_*`) with guarded self-Var recursion (`with-redefs`-safe), direct typed Java interop, and collection/bitwise intrinsics.
 - **Virtual Thread Concurrency, Agents & STM**: `future`, `pmap`, `pcalls`, `pvalues`, and `clojure.core.async` run on Java Virtual Threads alongside asynchronous `agent` queues and Software Transactional Memory (`ref` / `dosync`).
 - **Runtime JVM Class Generation**: `defprotocol`, `defrecord`, `deftype`, `reify`, `definterface`, `gen-interface`, and `proxy` generate real JVM classes and interfaces dynamically (`TypeFactory.java`).
+- **Standard `clj` CLI & `deps.edn` Engine (`1.12.6.1673`)**: Pure-Java `deps.edn` resolver (`Deps.java`) with `.cpcache` caching, transitive `:local/root` / `:mvn/version` / `:git/url` dependencies, `-A`/`-M`/`-X`/`-T`/`-P`, `-J`/`-S*` flags (`-Sdeps-file`, `-Scommand`), `clojure.main` init/main options, and built-in `:deps` CLI programs.
 
 ## Performance (`fib(40)` vs. Official Clojure)
 
@@ -62,18 +63,61 @@ Supports multi-line balanced forms, `*1`, `*2`, `*3`, `*e`, and `:quit` / `:exit
 
 Script arguments are bound to `*command-line-args*`. Pass `-` to read and execute from `stdin`.
 
-### CLI Options
+### CLI Options (`clj` 1.12.6.1673 Compatible)
 
-| Flag | Description |
-| :--- | :--- |
-| `(none)` | Start interactive REPL |
-| `-e EXPR`, `--eval EXPR` | Evaluate expression(s) and print non-nil results |
-| `FILE [ARGS...]` | Execute a Clojure script file |
-| `- [ARGS...]` | Read and execute script from `stdin` |
-| `-v`, `--version` | Show ClojureLite & Java version |
-| `-h`, `--help` | Show usage information |
+`cljl` supports the standard Clojure CLI modes (`-A`, `-X`, `-M`, `-T`, `-P`), `clj-opts`, `deps.clj` flags (`-Sdeps-file`, `-Scommand`), `clojure.main` init/main flags, and `:deps` alias tools:
 
-Use `CLJL_OPTS` to pass extra JVM flags (e.g. `CLJL_OPTS="-Xmx512m"`).
+```bash
+./cljl.sh [clj-opt*] [-Aaliases]                       # Start REPL
+./cljl.sh [clj-opt*] -X[aliases] [a/fn*] [kpath v]*    # Exec function(s)
+./cljl.sh [clj-opt*] -M[aliases] [init-opt*] [main-opt] [arg*]  # Run main
+./cljl.sh [clj-opt*] -T[name|aliases] a/fn [kpath v] kv-map?    # Run tool
+./cljl.sh [clj-opt*] -P [other exec opts]              # Prepare deps only
+```
+
+| Category | Flag | Description |
+| :--- | :--- | :--- |
+| **Exec** | `-Aaliases` | Use concatenated aliases to modify classpath |
+| | `-X[aliases]` | Modify classpath and invoke `a/fn` (or `:exec-fn`) with EDN key/value args |
+| | `-M[aliases]` | Modify classpath and supply `:main-opts` to `clojure.main` |
+| | `-T[name\|aliases]` | Run tool (isolates project `:paths`/`:deps`; loads `~/.clojure/tools/<name>.edn` if named) |
+| | `-P` | Prepare deps — resolve/download libs and cache classpath without executing |
+| **JVM / Deps** | `-Jopt` | Pass JVM option through (e.g. `-J-Xmx512m`, `-J-Dprop=val`) |
+| | `-Sdeps EDN` | EDN map string or file merged last into deps config |
+| | `-Sdeps-file FILE` | Use custom file instead of `deps.edn` (`deps.clj` option) |
+| | `-Spath` | Compute classpath and print to stdout only |
+| | `-Stree` | Print dependency tree and exit |
+| | `-Scp CP` | Use given classpath directly without computing or caching |
+| | `-Srepro` | Ignore `~/.clojure/deps.edn` config file |
+| | `-Sforce` | Force classpath recomputation (bypass `.cpcache`) |
+| | `-Sverbose` | Print resolved config/cache paths and settings |
+| | `-Sthreads N` | Set number of download/resolution threads |
+| | `-Strace` | Write `trace.edn` tracing dependency expansion and basis |
+| | `-Scommand CMD` | Invoke custom shell command with `{{classpath}}` and `{{main-opts}}` substitutions |
+| | `--` | Stop parsing `clj` options and pass remaining args to `clojure.main` |
+| | `-version`, `--version` | Print ClojureLite & Clojure CLI version and exit |
+| **Init (`clojure.main`)** | `-i`, `--init PATH` | Load a Clojure file or classpath resource |
+| | `-e`, `--eval EXPR` | Evaluate exprs in string and print non-nil values |
+| | `--report TARGET` | Report uncaught exceptions to `"file"` (default), `"stderr"`, or `"none"` |
+| **Main (`clojure.main`)** | `-m`, `--main NS` | Call `-main` in namespace `NS` with remaining args |
+| | `-r`, `--repl` | Run an interactive REPL |
+| | `PATH` | Run a script from a file or classpath resource |
+| | `-` | Run a script from standard input (`stdin`) |
+| | `-h`, `-?`, `--help` | Print full CLI help message and exit |
+
+**Built-in `:deps` alias programs** (`clojure.tools.deps.cli.api`):
+
+- `./cljl.sh -X:deps aliases` — list available aliases and their sources
+- `./cljl.sh -X:deps list` — list full transitive deps set and licenses
+- `./cljl.sh -X:deps tree` (supports `:format :edn`) — print dependency tree
+- `./cljl.sh -X:deps basis` — print runtime basis EDN
+- `./cljl.sh -X:deps find-versions :lib group/art` (or `:git/url ...`) — list available Maven/Git versions
+- `./cljl.sh -X:deps prep` — run `:deps/prep-lib` steps for unprepped dependencies
+- `./cljl.sh -X:deps mvn-pom` — generate `pom.xml` with resolved Maven deps
+- `./cljl.sh -X:deps mvn-install :jar '"path/to/lib.jar"'` — install jar/pom into local Maven repo (`$M2_REPO` / `~/.m2/repository`)
+- `./cljl.sh -X:deps git-resolve-tags` — resolve `:git/tag` coords to `:git/sha` in `deps.edn`
+
+Environment variables `$CLJ_CONFIG`, `$CLJ_CACHE`, `$M2_REPO`, `$GITLIBS`, and `CLJL_OPTS` (extra JVM flags) are also supported.
 
 ## Language Features
 
@@ -91,7 +135,7 @@ Use `CLJL_OPTS` to pass extra JVM flags (e.g. `CLJL_OPTS="-Xmx512m"`).
 - **Numerics, Arrays & Parsing**: `parse-boolean`, `parse-long`, `parse-double`, `parse-uuid`, `random-uuid`, `rationalize`, `biginteger`, `byte`, `short`, `num`, `unchecked-add`, `unchecked-subtract`, `unchecked-multiply`, `unchecked-inc`, `unchecked-dec`, `unchecked-negate`, `with-precision`, `max-key`, `min-key`, typed arrays (`booleans`..`doubles`, `boolean-array`..`double-array`, `make-array`, `into-array`, `to-array-2d`, `aset-*`, `amap`, `areduce`).
 - **Java Interop & Introspection**: `(ClassName. args...)`, `(new ClassName args...)`, `(.method obj args...)`, `(.-field obj)`, `(ClassName/staticMethod args...)`, `ClassName/STATIC_FIELD`, `(set! ...)`, `(.. a b c)`, `(import ...)`, `bases`, `supers`, `bean`, `StackTraceElement->vec`, `Throwable->map`, `ex-cause`, `ex-message`, `clojure.lang.*` class aliases.
 - **Standard Library & Contrib Namespaces**:
-  - Core & JDK: `clojure.core`, `clojure.string`, `clojure.set`, `clojure.walk`, `clojure.edn`, `clojure.java.io`, `clojure.java.shell`, `clojure.java.browse`, `clojure.java.javadoc`, `clojure.main`, `clojure.data`, `clojure.datafy`, `clojure.pprint`, `clojure.repl` (`doc`, `find-doc`, `apropos`, `dir`, `source`, `pst`), `clojure.test`, `clojure.xml`, `clojure.zip`, `clojure.spec.alpha`
+  - Core & JDK: `clojure.core`, `clojure.string`, `clojure.set`, `clojure.walk`, `clojure.edn`, `clojure.java.io`, `clojure.java.shell`, `clojure.java.browse`, `clojure.java.javadoc`, `clojure.main`, `clojure.tools.deps.cli.api`, `clojure.data`, `clojure.datafy`, `clojure.pprint`, `clojure.repl` (`doc`, `find-doc`, `apropos`, `dir`, `source`, `pst`), `clojure.test`, `clojure.xml`, `clojure.zip`, `clojure.spec.alpha`
   - Contrib-compatible: `clojure.core.async`, `clojure.data.priority-map`, `clojure.data.int-map`, `clojure.data.avl`, `flatland.ordered.map`, `flatland.ordered.set`, `flatland.useful.map`
 
 ## Project Structure
@@ -99,13 +143,14 @@ Use `CLJL_OPTS` to pass extra JVM flags (e.g. `CLJL_OPTS="-Xmx512m"`).
 ```text
 ClojureLite/
 ├── cljl.bat                 # Windows launcher (auto-builds & uses AppCDS)
-├── cljl.sh                  # Unix/macOS launcher (auto-builds & uses AppCDS)
+├── cljl.sh                  # Unix/macOS launcher (auto-builds & uses AppCDS + -J pre-parsing)
 ├── make.bat                 # Windows build script (build, rebuild, clean, test, bench)
 ├── make.sh                  # Unix/macOS build script (build, rebuild, clean, test, bench)
 ├── .gitignore
 ├── README.md
 ├── src/cljl/
-│   ├── Main.java            # CLI & REPL entry point
+│   ├── Main.java            # clj/clojure.main CLI & REPL entry point
+│   ├── Deps.java            # deps.edn resolution, .cpcache, -X/-T execution, :deps API
 │   ├── RT.java              # Runtime utilities, dynamic vars, equivalence, printing
 │   ├── Core.java            # Core clojure.core functions & macros
 │   ├── CoreExtras.java      # Cheatsheet extensions, transducers, hierarchies, protocols, types
@@ -142,6 +187,7 @@ ClojureLite/
 └── test/
     ├── core_test.clj        # Core language & runtime test suite (clojure.test)
     ├── cheatsheet_test.clj  # Clojure Cheatsheet & stdlib test suite (clojure.test)
+    ├── cli_test.clj         # clj / deps.edn / clojure.main / :deps CLI test suite (clojure.test)
     ├── bench.clj            # Microbenchmarks
     └── fib_bench.clj        # Recursive fib(40) benchmark
 ```
@@ -161,7 +207,7 @@ ClojureLite/
 chmod +x make.sh cljl.sh
 ./make.sh             # Compile, package build/cljl.jar, generate AppCDS archive
 ./make.sh rebuild     # Clean and build from scratch
-./make.sh test        # Build and run test/core_test.clj & test/cheatsheet_test.clj
+./make.sh test        # Build and run core_test.clj, cheatsheet_test.clj & cli_test.clj
 ./make.sh bench       # Build and run test/bench.clj
 ./cljl.sh test/fib_bench.clj   # Run recursive fib(40) benchmark
 ./make.sh clean       # Remove build/

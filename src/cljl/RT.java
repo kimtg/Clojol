@@ -60,6 +60,7 @@ public final class RT {
     }
 
     private static final AtomicInteger GENSYM_ID = new AtomicInteger(1000);
+    private static volatile ClassLoader runtimeClassLoader = null;
 
     static {
         Core.init();
@@ -68,6 +69,24 @@ public final class RT {
 
     public static void ensureInit() {
         // Triggers static initializer if not yet run
+    }
+
+    public static void setRuntimeClassLoader(ClassLoader cl) {
+        runtimeClassLoader = cl;
+        if (cl != null) {
+            Thread.currentThread().setContextClassLoader(cl);
+        }
+    }
+
+    public static ClassLoader baseLoader() {
+        ClassLoader rt = runtimeClassLoader;
+        if (rt != null) return rt;
+        ClassLoader ctx = Thread.currentThread().getContextClassLoader();
+        return ctx != null ? ctx : RT.class.getClassLoader();
+    }
+
+    public static boolean hasCustomRuntimeLoader() {
+        return runtimeClassLoader != null;
     }
 
     public static Namespace currentNS() {

@@ -77,18 +77,21 @@ public final class Interop {
         };
 
         if (found == null) {
+            ClassLoader loader = RT.baseLoader();
             try {
-                found = Class.forName(name);
+                found = Class.forName(name, false, loader);
             } catch (ClassNotFoundException e) {
                 if (!name.contains(".")) {
                     try {
-                        found = Class.forName("java.lang." + name);
+                        found = Class.forName("java.lang." + name, false, loader);
                     } catch (ClassNotFoundException ignored) {}
                 }
             }
         }
 
-        CLASS_CACHE.put(name, found != null ? found : NOT_A_CLASS);
+        if (found != null || RT.hasCustomRuntimeLoader()) {
+            CLASS_CACHE.put(name, found != null ? found : NOT_A_CLASS);
+        }
         return found;
     }
 
@@ -302,8 +305,17 @@ public final class Interop {
         return best;
     }
 
+    private static boolean isAccessibleFromHere(Class<?> c) {
+        if (!Modifier.isPublic(c.getModifiers())) return false;
+        Module targetMod = c.getModule();
+        Module myMod = Interop.class.getModule();
+        if (targetMod == myMod) return true;
+        String pkg = c.getPackageName();
+        return pkg.isEmpty() || targetMod.isExported(pkg, myMod);
+    }
+
     private static Method setAccessibleSafe(Method m, Class<?> clazz) {
-        if (Modifier.isPublic(m.getDeclaringClass().getModifiers()) && Modifier.isPublic(m.getModifiers())) {
+        if (isAccessibleFromHere(m.getDeclaringClass()) && Modifier.isPublic(m.getModifiers())) {
             return m;
         }
         Method pub = findPublicMethodOnHierarchy(clazz, m.getName(), m.getParameterTypes());
@@ -316,11 +328,13 @@ public final class Interop {
 
     private static Method findPublicMethodOnHierarchy(Class<?> clazz, String name, Class<?>[] paramTypes) {
         for (Class<?> cur = clazz; cur != null; cur = cur.getSuperclass()) {
-            if (Modifier.isPublic(cur.getModifiers())) {
+            if (isAccessibleFromHere(cur)) {
                 try {
                     Method sm = cur.getDeclaredMethod(name, paramTypes);
                     if (Modifier.isPublic(sm.getModifiers())) return sm;
                 } catch (NoSuchMethodException ignored) {}
+                Method compat = findCompatiblePublicMethod(cur.getDeclaredMethods(), name, paramTypes);
+                if (compat != null) return compat;
             }
             Method ifaceMethod = findPublicMethodOnInterfaces(cur.getInterfaces(), name, paramTypes);
             if (ifaceMethod != null) return ifaceMethod;
@@ -330,14 +344,33 @@ public final class Interop {
 
     private static Method findPublicMethodOnInterfaces(Class<?>[] ifaces, String name, Class<?>[] paramTypes) {
         for (Class<?> iface : ifaces) {
-            if (Modifier.isPublic(iface.getModifiers())) {
+            if (isAccessibleFromHere(iface)) {
                 try {
                     Method im = iface.getMethod(name, paramTypes);
                     if (Modifier.isPublic(im.getModifiers())) return im;
                 } catch (NoSuchMethodException ignored) {}
+                Method compat = findCompatiblePublicMethod(iface.getMethods(), name, paramTypes);
+                if (compat != null) return compat;
             }
             Method sup = findPublicMethodOnInterfaces(iface.getInterfaces(), name, paramTypes);
             if (sup != null) return sup;
+        }
+        return null;
+    }
+
+    private static Method findCompatiblePublicMethod(Method[] methods, String name, Class<?>[] paramTypes) {
+        for (Method m : methods) {
+            if (!m.getName().equals(name) || !Modifier.isPublic(m.getModifiers()) || m.isBridge()) continue;
+            Class<?>[] candidateTypes = m.getParameterTypes();
+            if (candidateTypes.length != paramTypes.length) continue;
+            boolean ok = true;
+            for (int i = 0; i < paramTypes.length; i++) {
+                if (!candidateTypes[i].isAssignableFrom(paramTypes[i])) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) return m;
         }
         return null;
     }

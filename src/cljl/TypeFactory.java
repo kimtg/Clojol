@@ -33,6 +33,10 @@ public final class TypeFactory {
 
         @Override
         protected Class<?> findClass(String name) throws ClassNotFoundException {
+            ClassLoader rt = RT.baseLoader();
+            if (rt != null && rt != this && rt != getParent()) {
+                return rt.loadClass(name);
+            }
             throw new ClassNotFoundException(name);
         }
     }

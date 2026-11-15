@@ -51,6 +51,7 @@ public final class StdLibMore {
             case "flatland.ordered.set" -> { initFlatlandOrderedSet(); yield true; }
             case "flatland.useful.map" -> { initFlatlandUsefulMap(); yield true; }
             case "clojure.core.async" -> { initCoreAsync(); yield true; }
+            case "clojure.tools.deps.cli.api" -> { Deps.ensureDepsCliApiLoaded(); yield true; }
             default -> false;
         };
     }
@@ -261,11 +262,27 @@ public final class StdLibMore {
             return strFn.invoke(triageFn.invoke(thFn.invoke(e)));
         }));
         ns.intern("report-error", Fn.of12("report-error",
-                t -> reportErrorImpl(t, Keyword.intern("target"), Keyword.intern("none")),
-                (t, opts) -> reportErrorImpl(t, opts, Keyword.intern("none"))));
+                t -> reportErrorImpl(t, Keyword.intern("target"), Keyword.intern("file")),
+                (t, opts) -> reportErrorImpl(t, opts, Keyword.intern("file"))));
         ns.intern("repl-caught", Fn.of1("repl-caught", e -> {
             StdLib.errWriter().println(e);
             StdLib.errWriter().flush();
+            return null;
+        }));
+        ns.intern("load-script", Fn.of1("load-script", path -> {
+            try {
+                Main.loadScriptOrResource(String.valueOf(path));
+                return null;
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        }));
+        ns.intern("main", Fn.ofVarargs("main", args -> {
+            String[] strArgs = new String[args.length];
+            for (int i = 0; i < args.length; i++) {
+                strArgs[i] = args[i] == null ? null : args[i].toString();
+            }
+            Main.runMain(strArgs);
             return null;
         }));
         LOADED.add("clojure.main");
@@ -273,8 +290,15 @@ public final class StdLibMore {
 
     private static Object reportErrorImpl(Object tObj, Object opts, Object defTarget) {
         if (!(tObj instanceof Throwable t)) return null;
-        StdLib.errWriter().println(t.getClass().getName() + (t.getMessage() != null ? ": " + t.getMessage() : ""));
-        StdLib.errWriter().flush();
+        Object targetObj = defTarget;
+        if (opts instanceof cljl.lang.Associative a) {
+            Object tVal = a.valAt(Keyword.intern("target"));
+            if (tVal != null) targetObj = tVal;
+        } else if (opts != null) {
+            targetObj = opts;
+        }
+        String target = targetObj instanceof Keyword kw ? kw.getName() : String.valueOf(targetObj);
+        Main.printError(t, target);
         return null;
     }
 

@@ -75,6 +75,7 @@ case "$CMD" in
     echo "[ClojureLite] Running tests..."
     run_cljl "$CLJL_HOME/test/core_test.clj"
     run_cljl "$CLJL_HOME/test/cheatsheet_test.clj"
+    run_cljl "$CLJL_HOME/test/cli_test.clj"
     ;;
   bench)
     [ -f "$JAR" ] || do_build

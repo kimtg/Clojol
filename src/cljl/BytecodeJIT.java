@@ -133,6 +133,15 @@ public final class BytecodeJIT {
         Class<?> define(String binaryName, byte[] bytecode) {
             return defineClass(binaryName, bytecode, 0, bytecode.length);
         }
+
+        @Override
+        protected Class<?> findClass(String name) throws ClassNotFoundException {
+            ClassLoader rt = RT.baseLoader();
+            if (rt != null && rt != this && rt != getParent()) {
+                return rt.loadClass(name);
+            }
+            throw new ClassNotFoundException(name);
+        }
     }
 
     public static boolean canCompile(CompiledFn cf) {

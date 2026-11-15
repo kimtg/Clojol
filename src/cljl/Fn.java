@@ -129,6 +129,13 @@ public abstract class Fn implements Callable<Object>, Runnable,
         };
     }
 
+    public static Fn of01(String name, S0 f0, S1 f1) {
+        return new NamedFn(name) {
+            @Override public Object invoke() { return f0.call(); }
+            @Override public Object invoke(Object a) { return f1.call(a); }
+        };
+    }
+
     public static Fn of12(String name, S1 f1, S2 f2) {
         return new NamedFn(name) {
             @Override public Object invoke(Object a) { return f1.call(a); }
