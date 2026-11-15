@@ -267,6 +267,12 @@ public final class TypeAnalyzer {
         if (n instanceof Gte2Node a) return res.typeOf(a.a).isPrimitive() || res.typeOf(a.b).isPrimitive();
         if (n instanceof NumEq2Node a) return res.typeOf(a.a).isPrimitive() || res.typeOf(a.b).isPrimitive();
         if (n instanceof NthNode a) return res.typeOf(a.idx).isPrimitive();
+        if (n instanceof AlengthNode a) return res.typeOf(a.arr).isRef() || containsUnboxedWork(a.arr, res);
+        if (n instanceof AgetNode a) return res.typeOf(a).isPrimitive()
+                || containsUnboxedWork(a.arr, res) || containsUnboxedWork(a.idx, res);
+        if (n instanceof AsetNode a) return res.typeOf(a.val).isPrimitive()
+                || containsUnboxedWork(a.arr, res) || containsUnboxedWork(a.idx, res)
+                || containsUnboxedWork(a.val, res);
         if (n instanceof IfNode iff) return containsUnboxedWork(iff.test, res)
                 || containsUnboxedWork(iff.thenNode, res) || containsUnboxedWork(iff.elseNode, res);
         if (n instanceof DoNode dn) {
@@ -491,6 +497,17 @@ public final class TypeAnalyzer {
         } else if (n instanceof DoubleCastNode a) {
             markParamIfLocal(a.a, paramIdx, doubleUse);
             scanParamUses(a.a, paramIdx, numericUse, doubleUse, true);
+        } else if (n instanceof AlengthNode a) {
+            scanParamUses(a.arr, paramIdx, numericUse, doubleUse, false);
+        } else if (n instanceof AgetNode a) {
+            scanParamUses(a.arr, paramIdx, numericUse, doubleUse, false);
+            markParamIfLocal(a.idx, paramIdx, numericUse);
+            scanParamUses(a.idx, paramIdx, numericUse, doubleUse, false);
+        } else if (n instanceof AsetNode a) {
+            scanParamUses(a.arr, paramIdx, numericUse, doubleUse, false);
+            markParamIfLocal(a.idx, paramIdx, numericUse);
+            scanParamUses(a.idx, paramIdx, numericUse, doubleUse, false);
+            scanParamUses(a.val, paramIdx, numericUse, doubleUse, false);
         } else if (n instanceof VarCall1Node c) {
             scanParamUses(c.a, paramIdx, numericUse, doubleUse, false);
         } else if (n instanceof VarCall2Node c) {
@@ -742,12 +759,16 @@ public final class TypeAnalyzer {
         }
         if (n instanceof VarCall1Node c) {
             ValType t0 = analyzeNode(c.a);
-            return record(n, checkSelfVarCall(c.v, new ValType[]{t0}));
+            ValType resT = checkSelfVarCall(c.v, new ValType[]{t0});
+            if (resT == ValType.ANY) resT = coreArrayVarType(c.v);
+            return record(n, resT);
         }
         if (n instanceof VarCall2Node c) {
             ValType t0 = analyzeNode(c.a);
             ValType t1 = analyzeNode(c.b);
-            return record(n, checkSelfVarCall(c.v, new ValType[]{t0, t1}));
+            ValType resT = checkSelfVarCall(c.v, new ValType[]{t0, t1});
+            if (resT == ValType.ANY) resT = coreArrayFactoryVarType(c.v);
+            return record(n, resT);
         }
         if (n instanceof VarCall3Node c) {
             ValType t0 = analyzeNode(c.a);
@@ -849,6 +870,21 @@ public final class TypeAnalyzer {
         if (n instanceof CountNode a) {
             analyzeNode(a.coll);
             return record(n, ValType.LONG);
+        }
+        if (n instanceof AlengthNode a) {
+            analyzeNode(a.arr);
+            return record(n, ValType.LONG);
+        }
+        if (n instanceof AgetNode a) {
+            ValType at = analyzeNode(a.arr);
+            analyzeNode(a.idx);
+            return record(n, arrayElemType(at, ValType.ANY));
+        }
+        if (n instanceof AsetNode a) {
+            ValType at = analyzeNode(a.arr);
+            analyzeNode(a.idx);
+            ValType vt = analyzeNode(a.val);
+            return record(n, arrayElemType(at, vt));
         }
 
         // Boolean intrinsics
@@ -1120,6 +1156,49 @@ public final class TypeAnalyzer {
             if (!ep.equals(argTypes[i])) return false;
         }
         return true;
+    }
+
+    private static ValType arrayElemType(ValType arrType, ValType fallback) {
+        if (arrType.kind == ValType.Kind.REF && arrType.refClass != null && arrType.refClass.isArray()) {
+            Class<?> comp = arrType.refClass.getComponentType();
+            if (comp == double.class || comp == float.class) return ValType.DOUBLE;
+            if (comp == long.class || comp == int.class || comp == short.class || comp == byte.class) return ValType.LONG;
+            if (comp == boolean.class) return ValType.BOOL;
+            if (comp == char.class) return ValType.ref(Character.class, true);
+            return ValType.ref(comp, false);
+        }
+        return fallback;
+    }
+
+    private static ValType coreArrayVarType(Var v) {
+        if (v == null || v.ns != RT.CLOJURE_NS) return ValType.ANY;
+        return switch (v.sym.name) {
+            case "doubles", "double-array" -> ValType.ref(double[].class, true);
+            case "longs", "long-array" -> ValType.ref(long[].class, true);
+            case "ints", "int-array" -> ValType.ref(int[].class, true);
+            case "bytes", "byte-array" -> ValType.ref(byte[].class, true);
+            case "shorts", "short-array" -> ValType.ref(short[].class, true);
+            case "floats", "float-array" -> ValType.ref(float[].class, true);
+            case "chars", "char-array" -> ValType.ref(char[].class, true);
+            case "booleans", "boolean-array" -> ValType.ref(boolean[].class, true);
+            case "object-array", "to-array" -> ValType.ref(Object[].class, true);
+            default -> ValType.ANY;
+        };
+    }
+
+    private static ValType coreArrayFactoryVarType(Var v) {
+        if (v == null || v.ns != RT.CLOJURE_NS) return ValType.ANY;
+        return switch (v.sym.name) {
+            case "double-array" -> ValType.ref(double[].class, true);
+            case "long-array" -> ValType.ref(long[].class, true);
+            case "int-array" -> ValType.ref(int[].class, true);
+            case "byte-array" -> ValType.ref(byte[].class, true);
+            case "short-array" -> ValType.ref(short[].class, true);
+            case "float-array" -> ValType.ref(float[].class, true);
+            case "char-array" -> ValType.ref(char[].class, true);
+            case "boolean-array" -> ValType.ref(boolean[].class, true);
+            default -> ValType.ANY;
+        };
     }
 
     private static ValType arithUnary(ValType t) {

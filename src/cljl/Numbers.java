@@ -28,10 +28,107 @@ public final class Numbers {
         throw new ClassCastException("Cannot cast " + (o == null ? "nil" : o.getClass().getName()) + " to Number");
     }
 
+    public static long longCast(double x) {
+        if (x < (double) Long.MIN_VALUE || x > (double) Long.MAX_VALUE) {
+            throw new IllegalArgumentException("Value out of range for long: " + x);
+        }
+        return (long) x;
+    }
+
+    public static long longCast(long x) {
+        return x;
+    }
+
     public static long longCast(Object o) {
+        if (o instanceof Long l) return l;
+        if (o instanceof Integer || o instanceof Short || o instanceof Byte) return ((Number) o).longValue();
+        if (o instanceof Character c) return (long) c;
+        if (o instanceof Double d) return longCast(d.doubleValue());
+        if (o instanceof Float f) return longCast((double) f.floatValue());
+        if (o instanceof BigInteger bi) {
+            if (bi.bitLength() <= 63) return bi.longValue();
+            throw new IllegalArgumentException("Value out of range for long: " + o);
+        }
+        if (o instanceof BigDecimal bd) {
+            try {
+                return bd.toBigInteger().longValueExact();
+            } catch (ArithmeticException e) {
+                throw new IllegalArgumentException("Value out of range for long: " + o);
+            }
+        }
+        if (o instanceof Ratio r) {
+            BigInteger q = r.numerator.divide(r.denominator);
+            if (q.bitLength() <= 63) return q.longValue();
+            throw new IllegalArgumentException("Value out of range for long: " + o);
+        }
+        return toLong(o);
+    }
+
+    public static int intCast(Object o) {
+        long l = longCast(o);
+        if (l < Integer.MIN_VALUE || l > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Value out of range for int: " + o);
+        }
+        return (int) l;
+    }
+
+    public static short shortCast(Object o) {
+        long l = longCast(o);
+        if (l < Short.MIN_VALUE || l > Short.MAX_VALUE) {
+            throw new IllegalArgumentException("Value out of range for short: " + o);
+        }
+        return (short) l;
+    }
+
+    public static byte byteCast(Object o) {
+        long l = longCast(o);
+        if (l < Byte.MIN_VALUE || l > Byte.MAX_VALUE) {
+            throw new IllegalArgumentException("Value out of range for byte: " + o);
+        }
+        return (byte) l;
+    }
+
+    public static char charCast(Object o) {
+        if (o instanceof Character c) return c;
+        long l = longCast(o);
+        if (l < Character.MIN_VALUE || l > Character.MAX_VALUE) {
+            throw new IllegalArgumentException("Value out of range for char: " + o);
+        }
+        return (char) l;
+    }
+
+    public static long uncheckedLong(Object o) {
         if (o instanceof Long l) return l;
         if (o instanceof Character c) return (long) c;
         return toLong(o);
+    }
+
+    public static int uncheckedInt(Object o) {
+        if (o instanceof Double d) return (int) d.doubleValue();
+        if (o instanceof Float f) return (int) f.floatValue();
+        return (int) uncheckedLong(o);
+    }
+
+    public static short uncheckedShort(Object o) {
+        return (short) uncheckedLong(o);
+    }
+
+    public static byte uncheckedByte(Object o) {
+        return (byte) uncheckedLong(o);
+    }
+
+    public static char uncheckedChar(Object o) {
+        if (o instanceof Character c) return c;
+        return (char) uncheckedLong(o);
+    }
+
+    public static float uncheckedFloat(Object o) {
+        if (o instanceof Float f) return f;
+        return (float) toDouble(o);
+    }
+
+    public static double uncheckedDouble(Object o) {
+        return toDouble(o);
     }
 
     public static double toDouble(Object o) {
@@ -254,9 +351,24 @@ public final class Numbers {
         return multiply(x, y);
     }
 
+    public static double divideChecked(double x, double y) {
+        if (y == 0.0) throw new ArithmeticException("Divide by zero");
+        return x / y;
+    }
+
+    public static Number divide(double x, Object y) {
+        return x / toDouble(y);
+    }
+
+    public static Number divide(Object x, double y) {
+        return toDouble(x) / y;
+    }
+
     public static Number divide(Object x, Object y) {
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
-            return toDouble(x) / toDouble(y);
+            double dy = toDouble(y);
+            if (dy == 0.0) throw new ArithmeticException("Divide by zero");
+            return toDouble(x) / dy;
         }
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
             BigDecimal bdy = toBigDecimal(y);

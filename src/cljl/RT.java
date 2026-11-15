@@ -624,6 +624,74 @@ public final class RT {
         return notFound;
     }
 
+    public static int alength(Object arr) {
+        if (arr instanceof double[] da) return da.length;
+        if (arr instanceof long[] la) return la.length;
+        if (arr instanceof int[] ia) return ia.length;
+        if (arr instanceof Object[] oa) return oa.length;
+        if (arr instanceof byte[] ba) return ba.length;
+        if (arr instanceof short[] sa) return sa.length;
+        if (arr instanceof float[] fa) return fa.length;
+        if (arr instanceof char[] ca) return ca.length;
+        if (arr instanceof boolean[] za) return za.length;
+        return Array.getLength(arr);
+    }
+
+    public static Object aget(Object arr, int idx) {
+        if (arr instanceof double[] da) return da[idx];
+        if (arr instanceof long[] la) return la[idx];
+        if (arr instanceof int[] ia) return (long) ia[idx];
+        if (arr instanceof Object[] oa) return oa[idx];
+        if (arr instanceof byte[] ba) return (long) ba[idx];
+        if (arr instanceof short[] sa) return (long) sa[idx];
+        if (arr instanceof float[] fa) return (double) fa[idx];
+        if (arr instanceof char[] ca) return ca[idx];
+        if (arr instanceof boolean[] za) return za[idx] ? Boolean.TRUE : Boolean.FALSE;
+        return Interop.boxResult(Array.get(arr, idx));
+    }
+
+    public static Object aset(Object arr, int idx, Object val) {
+        if (arr instanceof double[] da) {
+            da[idx] = Numbers.toDouble(val);
+            return val;
+        }
+        if (arr instanceof long[] la) {
+            la[idx] = Numbers.toLong(val);
+            return val;
+        }
+        if (arr instanceof int[] ia) {
+            ia[idx] = (int) Numbers.toLong(val);
+            return val;
+        }
+        if (arr instanceof Object[] oa) {
+            oa[idx] = val;
+            return val;
+        }
+        if (arr instanceof byte[] ba) {
+            ba[idx] = (byte) Numbers.toLong(val);
+            return val;
+        }
+        if (arr instanceof short[] sa) {
+            sa[idx] = (short) Numbers.toLong(val);
+            return val;
+        }
+        if (arr instanceof float[] fa) {
+            fa[idx] = (float) Numbers.toDouble(val);
+            return val;
+        }
+        if (arr instanceof char[] ca) {
+            ca[idx] = (val instanceof Character c) ? c : (char) Numbers.toLong(val);
+            return val;
+        }
+        if (arr instanceof boolean[] za) {
+            za[idx] = RT.truthy(val);
+            return val;
+        }
+        Class<?> comp = arr.getClass().getComponentType();
+        Array.set(arr, idx, Interop.coerceArg(comp, val));
+        return val;
+    }
+
     public static ISeq keys(Object coll) {
         if (coll == null) return null;
         ISeq s = seq(coll);

@@ -58,6 +58,50 @@ public final class Core {
         ns.internMacro(name, fn);
     }
 
+    private static Object expandDefn(Object[] args) {
+        Symbol name = (Symbol) args[0];
+        int idx = 1;
+        PersistentHashMap meta = name.meta() != null ? name.meta() : PersistentHashMap.EMPTY;
+        if (idx < args.length && args[idx] instanceof String doc) {
+            meta = meta.assoc(Keyword.intern("doc"), doc);
+            idx++;
+        }
+        if (idx < args.length && args[idx] instanceof PersistentHashMap attr) {
+            for (ISeq s = attr.seq(); s != null; s = s.next()) {
+                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                meta = meta.assoc(me.key, me.val);
+            }
+            idx++;
+        }
+        int endIdx = args.length;
+        if (idx < endIdx && !(args[idx] instanceof PersistentVector)) {
+            if (args[endIdx - 1] instanceof PersistentHashMap tailAttr) {
+                for (ISeq s = tailAttr.seq(); s != null; s = s.next()) {
+                    PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                    meta = meta.assoc(me.key, me.val);
+                }
+                endIdx--;
+            }
+            List<Object> arglists = new ArrayList<>();
+            for (int i = idx; i < endIdx; i++) {
+                if (args[i] instanceof ISeq clause && clause.first() != null) {
+                    arglists.add(clause.first());
+                }
+            }
+            if (!arglists.isEmpty()) {
+                meta = meta.assoc(Keyword.intern("arglists"), PersistentList.create(arglists));
+            }
+        } else if (idx < endIdx && args[idx] instanceof PersistentVector paramsVec) {
+            meta = meta.assoc(Keyword.intern("arglists"), PersistentList.createFromArray(paramsVec));
+        }
+        Symbol namedSym = meta.count() > 0 ? name.withMeta(meta) : name;
+        List<Object> fnArgs = new ArrayList<>();
+        fnArgs.add(Symbol.intern("fn*"));
+        fnArgs.add(name);
+        for (int i = idx; i < endIdx; i++) fnArgs.add(args[i]);
+        return PersistentList.createFromArray(Symbol.intern("def"), namedSym, PersistentList.create(fnArgs));
+    }
+
     public static boolean isa(Object child, Object parent) {
         return CoreExtras.isa(child, parent);
     }
@@ -358,13 +402,13 @@ public final class Core {
         def(ns, "bit-clear", Fn.of2("bit-clear", Numbers::bitClear));
         def(ns, "bit-flip", Fn.of2("bit-flip", Numbers::bitFlip));
 
-        def(ns, "int", Fn.of1("int", x -> x instanceof Character c ? (long) c : (long) ((Number) x).intValue()));
-        def(ns, "long", Fn.of1("long", x -> x instanceof Character c ? (long) c : Numbers.toLong(x)));
+        def(ns, "int", Fn.of1("int", x -> (long) Numbers.intCast(x)));
+        def(ns, "long", Fn.of1("long", Numbers::longCast));
         def(ns, "double", Fn.of1("double", Numbers::toDouble));
         def(ns, "float", Fn.of1("float", x -> (double) ((Number) x).floatValue()));
         def(ns, "bigint", Fn.of1("bigint", Numbers::toBigInteger));
         def(ns, "bigdec", Fn.of1("bigdec", Numbers::toBigDecimal));
-        def(ns, "char", Fn.of1("char", x -> x instanceof Character c ? c : (char) Numbers.toLong(x)));
+        def(ns, "char", Fn.of1("char", Numbers::charCast));
     }
 
     // ========================================================================
@@ -2713,12 +2757,22 @@ public final class Core {
             for (int i = 0; i < arr.length; i++) out[i] = RT.truthy(arr[i]);
             return out;
         }));
-        def(ns, "alength", Fn.of1("alength", a -> (long) Array.getLength(a)));
-        def(ns, "aget", Fn.of2("aget", (a, idx) -> Interop.boxResult(Array.get(a, (int) Numbers.toLong(idx)))));
-        def(ns, "aset", Fn.of3("aset", (a, idx, val) -> {
-            Class<?> comp = a.getClass().getComponentType();
-            Array.set(a, (int) Numbers.toLong(idx), Interop.coerceArg(comp, val));
-            return val;
+        def(ns, "alength", Fn.of1("alength", a -> (long) RT.alength(a)));
+        def(ns, "aget", Fn.ofVarargs("aget", args -> {
+            if (args.length < 2) throw new IllegalArgumentException("aget requires array and at least one index");
+            Object cur = RT.aget(args[0], (int) Numbers.toLong(args[1]));
+            for (int i = 2; i < args.length; i++) {
+                cur = RT.aget(cur, (int) Numbers.toLong(args[i]));
+            }
+            return cur;
+        }));
+        def(ns, "aset", Fn.ofVarargs("aset", args -> {
+            if (args.length < 3) throw new IllegalArgumentException("aset requires array, index(es), and value");
+            Object cur = args[0];
+            for (int i = 1; i < args.length - 2; i++) {
+                cur = RT.aget(cur, (int) Numbers.toLong(args[i]));
+            }
+            return RT.aset(cur, (int) Numbers.toLong(args[args.length - 2]), args[args.length - 1]);
         }));
         def(ns, "aclone", Fn.of1("aclone", a -> {
             int len = Array.getLength(a);
@@ -2766,49 +2820,7 @@ public final class Core {
         Symbol quoteSym = Symbol.intern("quote");
 
         // (defn name doc? attr-map? [params] body...)
-        defMacro(ns, "defn", Fn.ofVarargs("defn", args -> {
-            Symbol name = (Symbol) args[0];
-            int idx = 1;
-            PersistentHashMap meta = name.meta() != null ? name.meta() : PersistentHashMap.EMPTY;
-            if (idx < args.length && args[idx] instanceof String doc) {
-                meta = meta.assoc(Keyword.intern("doc"), doc);
-                idx++;
-            }
-            if (idx < args.length && args[idx] instanceof PersistentHashMap attr) {
-                for (ISeq s = attr.seq(); s != null; s = s.next()) {
-                    PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
-                    meta = meta.assoc(me.key, me.val);
-                }
-                idx++;
-            }
-            int endIdx = args.length;
-            if (idx < endIdx && !(args[idx] instanceof PersistentVector)) {
-                if (args[endIdx - 1] instanceof PersistentHashMap tailAttr) {
-                    for (ISeq s = tailAttr.seq(); s != null; s = s.next()) {
-                        PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
-                        meta = meta.assoc(me.key, me.val);
-                    }
-                    endIdx--;
-                }
-                List<Object> arglists = new ArrayList<>();
-                for (int i = idx; i < endIdx; i++) {
-                    if (args[i] instanceof ISeq clause && clause.first() != null) {
-                        arglists.add(clause.first());
-                    }
-                }
-                if (!arglists.isEmpty()) {
-                    meta = meta.assoc(Keyword.intern("arglists"), PersistentList.create(arglists));
-                }
-            } else if (idx < endIdx && args[idx] instanceof PersistentVector paramsVec) {
-                meta = meta.assoc(Keyword.intern("arglists"), PersistentList.createFromArray(paramsVec));
-            }
-            Symbol namedSym = meta.count() > 0 ? name.withMeta(meta) : name;
-            List<Object> fnArgs = new ArrayList<>();
-            fnArgs.add(fnStar);
-            fnArgs.add(name);
-            for (int i = idx; i < endIdx; i++) fnArgs.add(args[i]);
-            return PersistentList.createFromArray(defSym, namedSym, PersistentList.create(fnArgs));
-        }));
+        defMacro(ns, "defn", Fn.ofVarargs("defn", Core::expandDefn));
 
         Var docVar = ns.internMacro("doc", Fn.ofVarargs("doc", args -> {
             if (args.length != 1) {
@@ -2834,7 +2846,7 @@ public final class Core {
                     .assoc(Keyword.intern("private"), Boolean.TRUE);
             Object[] patched = args.clone();
             patched[0] = name.withMeta(meta);
-            return ((Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("defn")).deref()).applyTo(patched);
+            return expandDefn(patched);
         }));
 
         defMacro(ns, "fn", Fn.ofVarargs("fn", args -> {

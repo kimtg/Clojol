@@ -108,7 +108,16 @@ public final class Namespace implements IMeta, IReference {
 
     public Var internMacro(String name, Fn fn) {
         Var v = intern(Symbol.intern(name));
-        v.bindRoot(fn);
+        // Java-defined macros take only user args; adapt them to Clojure's (&form &env & args) calling convention.
+        Fn wrapped = Fn.ofVarargs(name, args -> {
+            if (args.length < 2) {
+                throw new IllegalArgumentException("Wrong number of args (" + args.length + ") passed to macro: " + name);
+            }
+            Object[] userArgs = new Object[args.length - 2];
+            System.arraycopy(args, 2, userArgs, 0, userArgs.length);
+            return fn.applyTo(userArgs);
+        });
+        v.bindRoot(wrapped);
         v.setMacro();
         return v;
     }

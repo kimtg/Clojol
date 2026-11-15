@@ -130,8 +130,15 @@ public final class Compiler {
         if (v != null && v.isMacro() && v.isBound()) {
             Fn macroFn = (Fn) v.deref();
             ISeq args = s.next();
-            Object[] argArr = RT.toArray(args);
-            return preserveLine(form, macroFn.applyTo(argArr));
+            int argc = RT.count(args);
+            Object[] callArgs = new Object[argc + 2];
+            callArgs[0] = form;
+            callArgs[1] = scope != null ? scope.lexicalEnvMap() : null;
+            int idx = 2;
+            for (ISeq it = args; it != null; it = it.next()) {
+                callArgs[idx++] = it.first();
+            }
+            return preserveLine(form, macroFn.applyTo(callArgs));
         }
 
         // Interop sugar macroexpansion:
@@ -354,8 +361,10 @@ public final class Compiler {
         final Map<Symbol, Integer> capturedBySymbol = new HashMap<>();
         final List<Integer> capturedParentSlots = new ArrayList<>();
         final List<ValType> slotHints = new ArrayList<>();
+        final Set<Integer> staticDoubleSlots = new HashSet<>();
         final Deque<int[]> recurTargets = new ArrayDeque<>();
         int maxSlots = 0;
+        int selfSlot = -1;
         boolean fnRecurUsed = false;
 
         Scope(Scope parent) {
@@ -369,6 +378,16 @@ public final class Compiler {
 
         void popBlock() {
             blockStack.remove(blockStack.size() - 1);
+        }
+
+        int allocateSelfSlot(Symbol sym) {
+            int s = allocateSlot(sym);
+            this.selfSlot = s;
+            return s;
+        }
+
+        ValType slotHint(int slot) {
+            return (slot >= 0 && slot < slotHints.size()) ? slotHints.get(slot) : ValType.ANY;
         }
 
         int allocateSlot(Symbol sym) {
@@ -398,10 +417,28 @@ public final class Compiler {
                     slotHints.add(parentHint);
                     capturedBySymbol.put(key, mySlot);
                     capturedParentSlots.add(parentSlot);
+                    if (parent.staticDoubleSlots.contains(parentSlot)) {
+                        staticDoubleSlots.add(mySlot);
+                    }
                     return mySlot;
                 }
             }
             return -1;
+        }
+
+        PersistentHashMap lexicalEnvMap() {
+            PersistentHashMap env = PersistentHashMap.EMPTY;
+            for (Scope cur = this; cur != null; cur = cur.parent) {
+                for (Map<Symbol, Integer> block : cur.blockStack) {
+                    for (Map.Entry<Symbol, Integer> e : block.entrySet()) {
+                        if (e.getValue() == cur.selfSlot) continue;
+                        if (!env.containsKey(e.getKey())) {
+                            env = env.assoc(e.getKey(), Boolean.TRUE);
+                        }
+                    }
+                }
+            }
+            return env.count() == 0 ? null : env;
         }
     }
 
@@ -525,7 +562,8 @@ public final class Compiler {
             if (scope != null) {
                 int slot = scope.resolveLocal(sym);
                 if (slot != -1) {
-                    return new LocalNode(slot, symHint);
+                    ValType effectiveHint = symHint != ValType.ANY ? symHint : scope.slotHint(slot);
+                    return new LocalNode(slot, effectiveHint, scope.staticDoubleSlots.contains(slot));
                 }
             }
             Namespace ns = RT.currentNS();
@@ -753,8 +791,12 @@ public final class Compiler {
             case "bit-shift-right" -> arity == 2 ? new BitOp2Node(BitOp.SHR, args[0], args[1]) : null;
             case "unsigned-bit-shift-right" -> arity == 2 ? new BitOp2Node(BitOp.USHR, args[0], args[1]) : null;
             case "bit-not" -> arity == 1 ? new BitNotNode(args[0]) : null;
-            case "long" -> arity == 1 ? new LongCastNode(args[0]) : null;
+            case "long" -> arity == 1 ? new LongCastNode(args[0], false) : null;
+            case "unchecked-long" -> arity == 1 ? new LongCastNode(args[0], true) : null;
             case "double" -> arity == 1 ? new DoubleCastNode(args[0]) : null;
+            case "alength" -> arity == 1 ? new AlengthNode(args[0]) : null;
+            case "aget" -> arity == 2 ? new AgetNode(args[0], args[1]) : null;
+            case "aset" -> arity == 3 ? new AsetNode(args[0], args[1], args[2]) : null;
             case "count" -> arity == 1 ? new CountNode(args[0]) : null;
             case "nth" -> (arity == 2 || arity == 3) ? new NthNode(args[0], args[1], arity == 3 ? args[2] : null) : null;
             case "get" -> (arity == 2 || arity == 3) ? new GetNode(args[0], args[1], arity == 3 ? args[2] : null) : null;
@@ -899,6 +941,9 @@ public final class Compiler {
                 Symbol sym = (Symbol) bindings.nth(2 * i);
                 Node init = compile(bindings.nth(2 * i + 1), scope, false);
                 int slot = scope.allocateSlot(sym);
+                if (isStaticDoubleNode(init)) {
+                    scope.staticDoubleSlots.add(slot);
+                }
                 slots[i] = slot;
                 inits[i] = init;
             }
@@ -1040,7 +1085,7 @@ public final class Compiler {
         Scope fnScope = new Scope(parentScope);
         int selfSlot = -1;
         if (fnName != null) {
-            selfSlot = fnScope.allocateSlot(fnName);
+            selfSlot = fnScope.allocateSelfSlot(fnName);
         }
 
         List<Symbol> paramSyms = new ArrayList<>();
@@ -1145,7 +1190,7 @@ public final class Compiler {
             rest = rest.next();
         }
         ISeq arglists = extractArglists(rest);
-        Object fnForm = RT.cons(Symbol.intern("fn*"), RT.cons(name, rest));
+        Object fnForm = RT.cons(Symbol.intern("fn*"), RT.cons(name, prependMacroParams(rest)));
         Node fnNode = compile(fnForm, scope, false);
         Namespace ns = RT.currentNS();
         PersistentHashMap symMeta = name.meta();
@@ -1190,6 +1235,32 @@ public final class Compiler {
             }
         }
         return lists.isEmpty() ? null : PersistentList.create(lists);
+    }
+
+    private static PersistentVector prependFormEnvVec(PersistentVector vec) {
+        Object[] items = new Object[vec.count() + 2];
+        items[0] = Symbol.intern("&form");
+        items[1] = Symbol.intern("&env");
+        for (int i = 0; i < vec.count(); i++) {
+            items[i + 2] = vec.nth(i);
+        }
+        PersistentVector out = PersistentVector.createOwning(items);
+        return vec.meta() != null ? out.withMeta(vec.meta()) : out;
+    }
+
+    private static ISeq prependMacroParams(ISeq rest) {
+        if (rest == null) return null;
+        if (rest.first() instanceof PersistentVector vec) {
+            return RT.cons(prependFormEnvVec(vec), rest.next());
+        }
+        List<Object> clauses = new ArrayList<>();
+        for (ISeq s = rest; s != null; s = s.next()) {
+            Object item = s.first();
+            if (item instanceof ISeq clause && clause.first() instanceof PersistentVector vec) {
+                clauses.add(RT.cons(prependFormEnvVec(vec), clause.next()));
+            }
+        }
+        return PersistentList.create(clauses);
     }
 
     private static Node compileTry(ISeq args, Scope scope) {
@@ -1396,10 +1467,13 @@ public final class Compiler {
     public static final class LocalNode extends Node {
         public final int slot;
         public final ValType hint;
-        public LocalNode(int slot) { this(slot, ValType.ANY); }
-        public LocalNode(int slot, ValType hint) {
+        public final boolean staticDouble;
+        public LocalNode(int slot) { this(slot, ValType.ANY, false); }
+        public LocalNode(int slot, ValType hint) { this(slot, hint, false); }
+        public LocalNode(int slot, ValType hint, boolean staticDouble) {
             this.slot = slot;
             this.hint = hint != null ? hint : ValType.ANY;
+            this.staticDouble = staticDouble;
         }
         @Override public Object eval(Object[] frame) { return frame[slot]; }
     }
@@ -2589,10 +2663,28 @@ public final class Compiler {
     // Extended Intrinsic AST Nodes (Typed / Unboxed Arithmetic, Bitwise, Coll)
     // ========================================================================
 
+    static boolean isStaticDoubleNode(Node n) {
+        if (n instanceof ConstNode cn) return cn.isDouble;
+        if (n instanceof DoubleCastNode) return true;
+        if (n instanceof LocalNode ln) return ln.staticDouble || ln.hint == ValType.DOUBLE;
+        if (n instanceof Div2Node d) return isStaticDoubleNode(d.a) || isStaticDoubleNode(d.b);
+        if (n instanceof Add2Node a) return isStaticDoubleNode(a.a) || isStaticDoubleNode(a.b);
+        if (n instanceof Sub2Node a) return isStaticDoubleNode(a.a) || isStaticDoubleNode(a.b);
+        if (n instanceof Mul2Node a) return isStaticDoubleNode(a.a) || isStaticDoubleNode(a.b);
+        if (n instanceof NegateNode a) return isStaticDoubleNode(a.a);
+        if (n instanceof IncNode a) return isStaticDoubleNode(a.a);
+        if (n instanceof DecNode a) return isStaticDoubleNode(a.a);
+        return false;
+    }
+
     public static final class Div2Node extends Node {
         public final Node a, b;
         public Div2Node(Node a, Node b) { this.a = a; this.b = b; }
-        @Override public Object eval(Object[] frame) { return Numbers.divide(a.eval(frame), b.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (isStaticDoubleNode(a)) return Numbers.divide(Numbers.toDouble(a.eval(frame)), b.eval(frame));
+            if (isStaticDoubleNode(b)) return Numbers.divide(a.eval(frame), Numbers.toDouble(b.eval(frame)));
+            return Numbers.divide(a.eval(frame), b.eval(frame));
+        }
     }
 
     public static final class UncheckedAdd2Node extends Node {
@@ -2699,9 +2791,37 @@ public final class Compiler {
 
     public static final class LongCastNode extends Node {
         public final Node a;
-        public LongCastNode(Node a) { this.a = a; }
+        public final boolean unchecked;
+        public LongCastNode(Node a) { this(a, false); }
+        public LongCastNode(Node a, boolean unchecked) { this.a = a; this.unchecked = unchecked; }
         @Override public Object eval(Object[] frame) { return evalLong(frame); }
-        @Override public long evalLong(Object[] frame) { return Numbers.longCast(a.eval(frame)); }
+        @Override public long evalLong(Object[] frame) {
+            Object v = a.eval(frame);
+            return unchecked ? Numbers.uncheckedLong(v) : Numbers.longCast(v);
+        }
+    }
+
+    public static final class AlengthNode extends Node {
+        public final Node arr;
+        public AlengthNode(Node arr) { this.arr = arr; }
+        @Override public Object eval(Object[] frame) { return evalLong(frame); }
+        @Override public long evalLong(Object[] frame) { return RT.alength(arr.eval(frame)); }
+    }
+
+    public static final class AgetNode extends Node {
+        public final Node arr, idx;
+        public AgetNode(Node arr, Node idx) { this.arr = arr; this.idx = idx; }
+        @Override public Object eval(Object[] frame) {
+            return RT.aget(arr.eval(frame), (int) idx.evalLong(frame));
+        }
+    }
+
+    public static final class AsetNode extends Node {
+        public final Node arr, idx, val;
+        public AsetNode(Node arr, Node idx, Node val) { this.arr = arr; this.idx = idx; this.val = val; }
+        @Override public Object eval(Object[] frame) {
+            return RT.aset(arr.eval(frame), (int) idx.evalLong(frame), val.eval(frame));
+        }
     }
 
     public static final class DoubleCastNode extends Node {

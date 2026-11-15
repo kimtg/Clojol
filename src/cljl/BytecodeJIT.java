@@ -44,15 +44,31 @@ public final class BytecodeJIT {
     private static final int DLOAD = 0x18;
     private static final int ALOAD = 0x19;
     private static final int ALOAD_0 = 0x2a;
+    private static final int IALOAD = 0x2e;
+    private static final int LALOAD = 0x2f;
+    private static final int FALOAD = 0x30;
+    private static final int DALOAD = 0x31;
     private static final int AALOAD = 0x32;
+    private static final int BALOAD = 0x33;
+    private static final int CALOAD = 0x34;
+    private static final int SALOAD = 0x35;
     private static final int ISTORE = 0x36;
     private static final int LSTORE = 0x37;
     private static final int DSTORE = 0x39;
     private static final int ASTORE = 0x3a;
+    private static final int IASTORE = 0x4f;
+    private static final int LASTORE = 0x50;
+    private static final int FASTORE = 0x51;
+    private static final int DASTORE = 0x52;
     private static final int AASTORE = 0x53;
+    private static final int BASTORE = 0x54;
+    private static final int CASTORE = 0x55;
+    private static final int SASTORE = 0x56;
     private static final int POP = 0x57;
     private static final int POP2 = 0x58;
     private static final int DUP = 0x59;
+    private static final int DUP_X2 = 0x5b;
+    private static final int DUP2_X2 = 0x5e;
     private static final int LADD = 0x61;
     private static final int DADD = 0x63;
     private static final int LSUB = 0x65;
@@ -254,6 +270,9 @@ public final class BytecodeJIT {
         if (n instanceof BitNotNode a) return canCompileNode(a.a, false);
         if (n instanceof LongCastNode a) return canCompileNode(a.a, false);
         if (n instanceof DoubleCastNode a) return canCompileNode(a.a, false);
+        if (n instanceof AlengthNode a) return canCompileNode(a.arr, false);
+        if (n instanceof AgetNode a) return canCompileNode(a.arr, false) && canCompileNode(a.idx, false);
+        if (n instanceof AsetNode a) return canCompileNode(a.arr, false) && canCompileNode(a.idx, false) && canCompileNode(a.val, false);
         if (n instanceof CountNode a) return canCompileNode(a.coll, false);
         if (n instanceof NthNode a) {
             return canCompileNode(a.coll, false) && canCompileNode(a.idx, false)
@@ -432,7 +451,7 @@ public final class BytecodeJIT {
             int arity = e.getKey();
             FnMethod m = fixed[arity];
             for (PrimSpec ps : e.getValue()) {
-                emitPrimInvoke(ce, m, arity, arity, ps);
+                emitPrimInvoke(ce, m, arity, arity, ps, genericFixed[arity]);
             }
         }
 
@@ -458,7 +477,7 @@ public final class BytecodeJIT {
     }
 
     private static void emitPrimInvoke(
-            ClassEmitter ce, FnMethod m, int arity, int methodCaptureIdx, PrimSpec ps) {
+            ClassEmitter ce, FnMethod m, int arity, int methodCaptureIdx, PrimSpec ps, AnalysisResult genericAnalysis) {
         int[] argJvmSlots = new int[arity];
         int nextArgSlot = 1;
         for (int i = 0; i < arity; i++) {
@@ -470,6 +489,7 @@ public final class BytecodeJIT {
         SlotLayout layout = new SlotLayout(m, ps.analysis.slotTypes, nextArgSlot);
         CodeGen cg = ce.beginMethod(ps.methodName, ps.descriptor, layout.totalLocals);
         cg.setContext(m, ps.analysis, layout);
+        cg.genericAnalysis = genericAnalysis;
 
         // Initialize selfSlot
         if (m.selfSlot != -1) {
@@ -991,6 +1011,7 @@ public final class BytecodeJIT {
 
         FnMethod currentMethod;
         AnalysisResult analysis;
+        AnalysisResult genericAnalysis;
         SlotLayout layout;
         int selfSlot = -1;
         int curTempLocals = 0;
@@ -1217,12 +1238,28 @@ public final class BytecodeJIT {
             loadJvmLocal(phys, layout.slotTypes[logicalSlot]);
         }
 
+        void iaload() { code.write(IALOAD); adjStack(-1); }
+        void laload() { code.write(LALOAD); }
+        void faload() { code.write(FALOAD); adjStack(-1); }
+        void daload() { code.write(DALOAD); }
         void aaload() { code.write(AALOAD); adjStack(-1); }
+        void baload() { code.write(BALOAD); adjStack(-1); }
+        void caload() { code.write(CALOAD); adjStack(-1); }
+        void saload() { code.write(SALOAD); adjStack(-1); }
+        void iastore() { code.write(IASTORE); adjStack(-3); }
+        void lastore() { code.write(LASTORE); adjStack(-4); }
+        void fastore() { code.write(FASTORE); adjStack(-3); }
+        void dastore() { code.write(DASTORE); adjStack(-4); }
         void aastore() { code.write(AASTORE); adjStack(-3); }
+        void bastore() { code.write(BASTORE); adjStack(-3); }
+        void castore() { code.write(CASTORE); adjStack(-3); }
+        void sastore() { code.write(SASTORE); adjStack(-3); }
         void arraylength() { code.write(ARRAYLENGTH); }
         void pop() { code.write(POP); adjStack(-1); }
         void pop2() { code.write(POP2); adjStack(-2); }
         void dup() { code.write(DUP); adjStack(1); }
+        void dupX2() { code.write(DUP_X2); adjStack(1); }
+        void dup2X2() { code.write(DUP2_X2); adjStack(2); }
         void ixor() { code.write(IXOR); adjStack(-1); }
         void ladd() { code.write(LADD); adjStack(-2); }
         void lsub() { code.write(LSUB); adjStack(-2); }
@@ -1455,6 +1492,20 @@ public final class BytecodeJIT {
             }
         }
 
+        private Class<?> arrayClassOf(Node arr) {
+            ValType at = typeOf(arr);
+            if (at.kind == ValType.Kind.REF && at.refClass != null && at.refClass.isArray()) {
+                return at.refClass;
+            }
+            return null;
+        }
+
+        private void emitArrayAndIndex(Node arr, Class<?> arrCls, Node idx) {
+            emitRef(arr, arrCls);
+            emitLong(idx);
+            l2i();
+        }
+
         // ====================================================================
         // Typed Self-Call Lookup
         // ====================================================================
@@ -1553,11 +1604,15 @@ public final class BytecodeJIT {
                 if (at == ValType.LONG) return emitLong(lc.a);
                 if (at == ValType.DOUBLE) {
                     if (emitDouble(lc.a)) return true;
-                    d2l();
+                    if (lc.unchecked) {
+                        d2l();
+                    } else {
+                        invokestatic("cljl/Numbers", "longCast", "(D)J", 2, 2);
+                    }
                     return false;
                 }
                 if (emitBoxed(lc.a)) return true;
-                invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J", 1, 2);
+                invokestatic("cljl/Numbers", lc.unchecked ? "uncheckedLong" : "longCast", "(Ljava/lang/Object;)J", 1, 2);
                 return false;
             }
             if (node instanceof Add2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
@@ -1699,6 +1754,62 @@ public final class BytecodeJIT {
                 i2l();
                 return false;
             }
+            if (node instanceof AlengthNode a) {
+                Class<?> arrCls = arrayClassOf(a.arr);
+                if (arrCls != null) {
+                    emitRef(a.arr, arrCls);
+                    arraylength();
+                    i2l();
+                    return false;
+                }
+                emitBoxed(a.arr);
+                invokestatic("cljl/RT", "alength", "(Ljava/lang/Object;)I", 1, 1);
+                i2l();
+                return false;
+            }
+            if (node instanceof AgetNode a) {
+                Class<?> arrCls = arrayClassOf(a.arr);
+                if (arrCls == long[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx); laload(); return false;
+                }
+                if (arrCls == int[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx); iaload(); i2l(); return false;
+                }
+                if (arrCls == short[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx); saload(); i2l(); return false;
+                }
+                if (arrCls == byte[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx); baload(); i2l(); return false;
+                }
+                if (arrCls == double[].class || arrCls == float[].class) {
+                    if (emitDouble(node)) return true;
+                    invokestatic("cljl/Numbers", "longCast", "(D)J", 2, 2);
+                    return false;
+                }
+            }
+            if (node instanceof AsetNode a) {
+                Class<?> arrCls = arrayClassOf(a.arr);
+                if (arrCls == long[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx);
+                    if (emitLong(a.val)) return true;
+                    dup2X2(); lastore(); return false;
+                }
+                if (arrCls == int[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx);
+                    if (emitLong(a.val)) return true;
+                    l2i(); dupX2(); iastore(); i2l(); return false;
+                }
+                if (arrCls == short[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx);
+                    if (emitLong(a.val)) return true;
+                    l2i(); i2s(); dupX2(); sastore(); i2l(); return false;
+                }
+                if (arrCls == byte[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx);
+                    if (emitLong(a.val)) return true;
+                    l2i(); i2b(); dupX2(); bastore(); i2l(); return false;
+                }
+            }
             if (node instanceof StaticMethodNode sm && analysis != null) {
                 Method m = analysis.resolvedMethods.get(sm);
                 if (m != null && ValType.fromJavaReturn(m.getReturnType()) == ValType.LONG) {
@@ -1823,7 +1934,14 @@ public final class BytecodeJIT {
                     && (typeOf(a.a) == ValType.DOUBLE || typeOf(a.b) == ValType.DOUBLE)) {
                 if (emitDouble(a.a)) return true;
                 if (emitDouble(a.b)) return true;
-                ddiv();
+                boolean staticFloat = genericAnalysis == null
+                        || genericAnalysis.typeOf(a.a) == ValType.DOUBLE
+                        || genericAnalysis.typeOf(a.b) == ValType.DOUBLE;
+                if (staticFloat) {
+                    ddiv();
+                } else {
+                    invokestatic("cljl/Numbers", "divideChecked", "(DD)D", 4, 2);
+                }
                 return false;
             }
             if (node instanceof Rem2Node a && isDoubleOrLongPair(a.a, a.b)
@@ -1884,6 +2002,28 @@ public final class BytecodeJIT {
                 if (emitDouble(a.a)) return true;
                 dneg();
                 return false;
+            }
+            if (node instanceof AgetNode a) {
+                Class<?> arrCls = arrayClassOf(a.arr);
+                if (arrCls == double[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx); daload(); return false;
+                }
+                if (arrCls == float[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx); faload(); f2d(); return false;
+                }
+            }
+            if (node instanceof AsetNode a) {
+                Class<?> arrCls = arrayClassOf(a.arr);
+                if (arrCls == double[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx);
+                    if (emitDouble(a.val)) return true;
+                    dup2X2(); dastore(); return false;
+                }
+                if (arrCls == float[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx);
+                    if (emitDouble(a.val)) return true;
+                    d2f(); dupX2(); fastore(); f2d(); return false;
+                }
             }
             if (node instanceof StaticMethodNode sm && analysis != null) {
                 Method m = analysis.resolvedMethods.get(sm);
@@ -2261,6 +2401,18 @@ public final class BytecodeJIT {
                     case KEYWORD -> emitInstanceof("cljl/Keyword");
                     case SYMBOL -> emitInstanceof("cljl/Symbol");
                 }
+                return false;
+            }
+            if (node instanceof AgetNode a && arrayClassOf(a.arr) == boolean[].class) {
+                emitArrayAndIndex(a.arr, boolean[].class, a.idx);
+                baload();
+                return false;
+            }
+            if (node instanceof AsetNode a && arrayClassOf(a.arr) == boolean[].class) {
+                emitArrayAndIndex(a.arr, boolean[].class, a.idx);
+                if (emitBoolean(a.val)) return true;
+                dupX2();
+                bastore();
                 return false;
             }
             if (node instanceof StaticMethodNode sm && analysis != null) {
@@ -3106,6 +3258,18 @@ public final class BytecodeJIT {
             if (node instanceof Sub2Node a) { emitBinaryNumOp(a.a, a.b, "minus"); return false; }
             if (node instanceof Mul2Node a) { emitBinaryNumOp(a.a, a.b, "multiply"); return false; }
             if (node instanceof Div2Node a) {
+                if (typeOf(a.a) == ValType.DOUBLE) {
+                    emitDouble(a.a);
+                    emitBoxed(a.b);
+                    invokestatic("cljl/Numbers", "divide", "(DLjava/lang/Object;)Ljava/lang/Number;", 3, 1);
+                    return false;
+                }
+                if (typeOf(a.b) == ValType.DOUBLE) {
+                    emitBoxed(a.a);
+                    emitDouble(a.b);
+                    invokestatic("cljl/Numbers", "divide", "(Ljava/lang/Object;D)Ljava/lang/Number;", 3, 1);
+                    return false;
+                }
                 emitBoxed(a.a);
                 emitBoxed(a.b);
                 invokestatic("cljl/Numbers", "divide", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
@@ -3180,6 +3344,54 @@ public final class BytecodeJIT {
             }
 
             // Collection & sequence intrinsics
+            if (node instanceof AgetNode a) {
+                Class<?> arrCls = arrayClassOf(a.arr);
+                if (arrCls == char[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx);
+                    caload();
+                    invokestatic("java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", 1, 1);
+                    return false;
+                }
+                if (arrCls != null && !arrCls.getComponentType().isPrimitive()) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx);
+                    aaload();
+                    return false;
+                }
+                emitBoxed(a.arr);
+                emitLong(a.idx);
+                l2i();
+                invokestatic("cljl/RT", "aget", "(Ljava/lang/Object;I)Ljava/lang/Object;", 2, 1);
+                return false;
+            }
+            if (node instanceof AsetNode a) {
+                Class<?> arrCls = arrayClassOf(a.arr);
+                if (arrCls == char[].class) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx);
+                    if (a.val instanceof ConstNode cn && cn.val instanceof Character c) {
+                        iconst((int) c);
+                    } else {
+                        emitBoxed(a.val);
+                        invokestatic("cljl/BytecodeJIT", "toChar", "(Ljava/lang/Object;)C", 1, 1);
+                    }
+                    dupX2();
+                    castore();
+                    invokestatic("java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", 1, 1);
+                    return false;
+                }
+                if (arrCls != null && !arrCls.getComponentType().isPrimitive()) {
+                    emitArrayAndIndex(a.arr, arrCls, a.idx);
+                    emitRef(a.val, arrCls.getComponentType());
+                    dupX2();
+                    aastore();
+                    return false;
+                }
+                emitBoxed(a.arr);
+                emitLong(a.idx);
+                l2i();
+                emitBoxed(a.val);
+                invokestatic("cljl/RT", "aset", "(Ljava/lang/Object;ILjava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                return false;
+            }
             if (node instanceof NthNode a) {
                 ValType ct = typeOf(a.coll);
                 if (ct.isRef() && ct.nonNull) {

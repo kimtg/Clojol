@@ -206,8 +206,15 @@ public final class CoreExtras {
     // ========================================================================
 
     private static void initMathAndParsing(Namespace ns) {
-        def(ns, "byte", Fn.of1("byte", x -> (byte) Numbers.toLong(x)));
-        def(ns, "short", Fn.of1("short", x -> (short) Numbers.toLong(x)));
+        def(ns, "byte", Fn.of1("byte", Numbers::byteCast));
+        def(ns, "short", Fn.of1("short", Numbers::shortCast));
+        def(ns, "unchecked-byte", Fn.of1("unchecked-byte", Numbers::uncheckedByte));
+        def(ns, "unchecked-short", Fn.of1("unchecked-short", Numbers::uncheckedShort));
+        def(ns, "unchecked-int", Fn.of1("unchecked-int", Numbers::uncheckedInt));
+        def(ns, "unchecked-long", Fn.of1("unchecked-long", Numbers::uncheckedLong));
+        def(ns, "unchecked-char", Fn.of1("unchecked-char", Numbers::uncheckedChar));
+        def(ns, "unchecked-float", Fn.of1("unchecked-float", Numbers::uncheckedFloat));
+        def(ns, "unchecked-double", Fn.of1("unchecked-double", Numbers::uncheckedDouble));
         def(ns, "num", Fn.of1("num", x -> (Number) x));
         def(ns, "biginteger", Fn.of1("biginteger", x -> {
             if (x instanceof BigInteger bi) return bi;

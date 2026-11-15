@@ -838,6 +838,133 @@
       (is (= 10.5 (reduce + [1 2 3.5 4])))
       (is (= 10.5 (reduce + (list 1 2 3.5 4)))))))
 
+(defmacro capture-form-env
+  ([x] `(list '~(first &form) ~(nil? &env) ~(contains? &env 'y) ~(:mytag (meta &form)) ~x))
+  ([x y] `(list '~(first &form) ~(nil? &env) ~(contains? &env y) ~x '~y)))
+
+(def top-level-macro-capture ^:mytag (capture-form-env 42))
+
+(deftest compatibility-and-primitive-array-test
+  (testing "defmacro &form and &env"
+    (is (= ['capture-form-env true false true 42]
+           top-level-macro-capture))
+    (is (= ['capture-form-env true false true 42]
+           ((fn [] ^:mytag (capture-form-env 42)))))
+    (let [y 10]
+      (is (= ['capture-form-env false true nil 42]
+             (capture-form-env 42)))
+      (is (= ['capture-form-env false true 1 'y]
+             (capture-form-env 1 y)))))
+
+  (testing "Numeric division compatibility"
+    (let [divide (fn [x y] (/ x y))
+          divide-d (fn [^double x ^double y] (/ x y))]
+      (dotimes [_ 200]
+        (is (= 0.5 (divide 1.0 2.0)))
+        (is (thrown? ArithmeticException (divide 1.0 0.0)))
+        (is (= ##Inf (divide-d 1.0 0.0))))
+      (is (= ##Inf (/ 1.0 0.0)))
+      (is (= ##Inf (let [x 1.0 y 0.0] (/ x y))))))
+
+  (testing "Checked narrowing casts and unchecked-* coercions"
+    (let [as-long (fn [x] (long x))
+          as-ulong (fn [x] (unchecked-long x))
+          as-byte (fn [x] (byte x))
+          as-ubyte (fn [x] (unchecked-byte x))
+          as-short (fn [x] (short x))
+          as-ushort (fn [x] (unchecked-short x))
+          as-int (fn [x] (int x))
+          as-uint (fn [x] (unchecked-int x))]
+      (dotimes [_ 200]
+        (is (= 42 (as-long 42.9)))
+        (is (= 0 (as-long ##NaN)))
+        (is (= Long/MAX_VALUE (as-long Long/MAX_VALUE)))
+        (is (= Long/MIN_VALUE (as-long Long/MIN_VALUE)))
+        (is (thrown? IllegalArgumentException (as-long 1.0E100)))
+        (is (thrown? IllegalArgumentException (as-long -1.0E100)))
+        (is (thrown? IllegalArgumentException (as-long ##Inf)))
+        (is (= Long/MAX_VALUE (as-ulong 1.0E100)))
+        (is (thrown? IllegalArgumentException (as-byte 128)))
+        (is (thrown? IllegalArgumentException (as-byte -129)))
+        (is (= -128 (as-ubyte 128)))
+        (is (= -24 (as-ubyte 1000)))
+        (is (thrown? IllegalArgumentException (as-short 40000)))
+        (is (= -25536 (as-ushort 40000)))
+        (is (thrown? IllegalArgumentException (as-int 1.0E10)))
+        (is (= Integer/MAX_VALUE (as-uint 1.0E10))))
+      (is (= \a (unchecked-char 97)))
+      (is (= 1.5 (double (unchecked-float 1.5))))
+      (is (= 2.5 (unchecked-double 2.5)))))
+
+  (testing "Specialized primitive and object array operations (alength/aget/aset)"
+    (let [sum-doubles (fn [^doubles xs]
+                        (loop [x (double 0) i 0]
+                          (if (< i (alength xs))
+                            (recur (+ x (aget xs i)) (inc i))
+                            x)))
+          sum-longs (fn [^longs xs]
+                      (loop [x 0 i 0]
+                        (if (< i (alength xs))
+                          (recur (+ x (aget xs i)) (inc i))
+                          x)))
+          fill-and-sum-ints (fn [^ints xs]
+                              (loop [i 0]
+                                (when (< i (alength xs))
+                                  (aset xs i (* 2 i))
+                                  (recur (inc i))))
+                              (loop [s 0 i 0]
+                                (if (< i (alength xs))
+                                  (recur (+ s (aget xs i)) (inc i))
+                                  s)))
+          sum-bytes (fn [^bytes xs]
+                      (loop [s 0 i 0]
+                        (if (< i (alength xs))
+                          (recur (+ s (aget xs i)) (inc i))
+                          s)))
+          sum-shorts (fn [^shorts xs]
+                       (loop [s 0 i 0]
+                         (if (< i (alength xs))
+                           (recur (+ s (aget xs i)) (inc i))
+                           s)))
+          sum-floats (fn [^floats xs]
+                       (loop [s (double 0) i 0]
+                         (if (< i (alength xs))
+                           (recur (+ s (aget xs i)) (inc i))
+                           s)))
+          count-trues (fn [^booleans xs]
+                        (loop [c 0 i 0]
+                          (if (< i (alength xs))
+                            (recur (if (aget xs i) (inc c) c) (inc i))
+                            c)))
+          concat-chars (fn [^chars xs]
+                         (aset xs 0 \Z)
+                         (aget xs 0))
+          obj-roundtrip (fn [^objects xs v]
+                          (aset xs 1 v)
+                          (aget xs 1))
+          da (double-array [1.5 2.5 3.0 4.0])
+          la (long-array [10 20 30])
+          ia (int-array 4)
+          ba (byte-array [1 2 3 -1])
+          sa (short-array [100 200])
+          fa (float-array [1.5 2.5])
+          za (boolean-array [true false true])
+          ca (char-array [\a \b])
+          oa (object-array [:a :b :c])
+          grid (to-array-2d [[1 2] [3 4]])]
+      (dotimes [_ 200]
+        (is (= 11.0 (sum-doubles da)))
+        (is (= 60 (sum-longs la)))
+        (is (= 12 (fill-and-sum-ints ia)))
+        (is (= 5 (sum-bytes ba)))
+        (is (= 300 (sum-shorts sa)))
+        (is (= 4.0 (sum-floats fa)))
+        (is (= 2 (count-trues za)))
+        (is (= \Z (concat-chars ca)))
+        (is (= :updated (obj-roundtrip oa :updated)))
+        (aset grid 1 0 99)
+        (is (= 99 (aget grid 1 0)))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))
