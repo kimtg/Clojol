@@ -755,6 +755,20 @@ public final class RT {
             if (readably && bi.bitLength() <= 63) sb.append('N');
             return;
         }
+        if (x instanceof Double d) {
+            if (d == Double.POSITIVE_INFINITY) sb.append("##Inf");
+            else if (d == Double.NEGATIVE_INFINITY) sb.append("##-Inf");
+            else if (Double.isNaN(d)) sb.append("##NaN");
+            else sb.append(d.toString());
+            return;
+        }
+        if (x instanceof Float f) {
+            if (f == Float.POSITIVE_INFINITY) sb.append("##Inf");
+            else if (f == Float.NEGATIVE_INFINITY) sb.append("##-Inf");
+            else if (Float.isNaN(f)) sb.append("##NaN");
+            else sb.append(f.toString());
+            return;
+        }
         if (x instanceof PersistentVector v) {
             if (maxLevel >= 0 && level >= maxLevel) { sb.append('#'); return; }
             sb.append('[');

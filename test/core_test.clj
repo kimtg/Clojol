@@ -706,6 +706,27 @@
       (is (false? (== (+ nan 0.0) (+ nan 0.0))))
       (is (= [false true false true true false false true false] (f-cmp 1 1.0)))))
 
+  (testing "symbolic float printing (##Inf, ##-Inf, ##NaN)"
+    (let [pinf (/ 1.0 0.0)
+          ninf (/ -1.0 0.0)
+          nan (/ 0.0 0.0)]
+      (is (= "##Inf" (pr-str pinf)))
+      (is (= "##Inf" (pr-str ##Inf)))
+      (is (= "##Inf" (print-str pinf)))
+      (is (= "##-Inf" (pr-str ninf)))
+      (is (= "##-Inf" (print-str ninf)))
+      (is (= "##NaN" (pr-str nan)))
+      (is (= "##NaN" (print-str nan)))
+      (is (= "##Inf" (pr-str (Float/valueOf Float/POSITIVE_INFINITY))))
+      (is (= "##-Inf" (pr-str (Float/valueOf Float/NEGATIVE_INFINITY))))
+      (is (= "##NaN" (pr-str (Float/valueOf Float/NaN))))
+      (is (= "Infinity" (str pinf)))
+      (is (= "-Infinity" (str ninf)))
+      (is (= "NaN" (str nan)))
+      (is (= ##Inf (read-string (pr-str pinf))))
+      (is (= ##-Inf (read-string (pr-str ninf))))
+      (is (Double/isNaN (read-string (pr-str nan))))))
+
   (testing "nil safety on type-hinted refs and collection intrinsics"
     (let [f-cnt (fn [^String s] (count s))
           f-len (fn [^String s] (.length s))
