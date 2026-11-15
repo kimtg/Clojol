@@ -408,6 +408,15 @@ public final class RT {
         throw new IllegalArgumentException("dissoc not supported on: " + coll.getClass().getName());
     }
 
+    public static Object pop(Object coll) {
+        if (coll == null) return null;
+        if (coll instanceof PersistentVector pv) return pv.pop();
+        if (coll instanceof PersistentList pl) return pl.pop();
+        if (coll instanceof PersistentList.EmptyList el) return el.pop();
+        if (coll instanceof PersistentColl pc) return pc.pop();
+        throw new IllegalArgumentException("pop not supported on: " + coll.getClass().getName());
+    }
+
     public static Object transientColl(Object coll) {
         if (coll instanceof PersistentVector pv) return pv.asTransient();
         if (coll instanceof PersistentHashMap pm) return pm.asTransient();

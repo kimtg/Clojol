@@ -26,16 +26,27 @@
 (def ^:private cljl-bat
   (.toString (.resolve repo-root "cljl.bat")))
 
-(def ^:private cljl-cmd
-  (if windows? ["cmd.exe" "/c" cljl-bat] [cljl-sh]))
-
 (def ^:private cljl-jar
   (.toString (.resolve repo-root "build/cljl.jar")))
+
+(def ^:private java-bin
+  (let [exe (path-of (System/getProperty "java.home") "bin" (if windows? "java.exe" "java"))]
+    (if (Files/isRegularFile exe (make-array java.nio.file.LinkOption 0))
+      (.toString exe)
+      "java")))
+
+(def ^:private cljl-cmd
+  ;; Use direct java -jar on Windows in ProcessBuilder so cmd.exe does not mangle quotes or newlines;
+  ;; cljl.bat itself is verified in help-and-version-test.
+  (if windows? [java-bin "-jar" cljl-jar] [cljl-sh]))
 
 (defn- delete-tree! [^Path p]
   (when (Files/exists p (into-array java.nio.file.LinkOption []))
     (with-open [s (Files/walk p (into-array java.nio.file.FileVisitOption []))]
       (doseq [^Path f (reverse (iterator-seq (.iterator s)))]
+        (let [file (.toFile f)]
+          (when (and (.exists file) (not (.canWrite file)))
+            (.setWritable file true)))
         (Files/deleteIfExists f)))))
 
 (defn- write-file! [^Path base rel content]
@@ -52,12 +63,35 @@
       (.write jos (.getBytes content StandardCharsets/UTF_8))
       (.closeEntry jos))))
 
+(defn- escape-win-arg [^String s]
+  (if (neg? (.indexOf s (int \")))
+    s
+    (let [sb (StringBuilder. (+ (.length s) 8))
+          n (.length s)]
+      (loop [i 0 bs 0]
+        (if (= i n)
+          (do (dotimes [_ bs] (.append sb \\))
+              (.toString sb))
+          (let [c (.charAt s i)]
+            (cond
+              (= c \\) (recur (inc i) (inc bs))
+              (= c \") (do (dotimes [_ (+ (* 2 bs) 1)] (.append sb \\))
+                           (.append sb \")
+                           (recur (inc i) 0))
+              :else (do (dotimes [_ bs] (.append sb \\))
+                        (.append sb c)
+                        (recur (inc i) 0)))))))))
+
 (defn- run-proc
   ([cmd] (run-proc {} nil nil cmd))
   ([opts cmd] (run-proc opts nil nil cmd))
   ([opts stdin-str cmd] (run-proc opts stdin-str nil cmd))
   ([opts stdin-str _unused cmd]
-   (let [pb (ProcessBuilder. ^java.util.List (vec (map str cmd)))]
+   (let [raw-args (vec (map str cmd))
+         cmd-args (if (and windows? (not= "cmd.exe" (first raw-args)))
+                    (into [(first raw-args)] (map escape-win-arg (rest raw-args)))
+                    raw-args)
+         pb (ProcessBuilder. ^java.util.List cmd-args)]
      (when-let [cwd (:dir opts)]
        (.directory pb (if (instance? Path cwd) (.toFile ^Path cwd) (File. (str cwd)))))
      (when-let [env-map (:env opts)]
@@ -102,7 +136,12 @@
     (doseq [flag ["-version" "--version"]]
       (let [res (run-cljl [flag])]
         (is (= 0 (:exit res)))
-        (is (str/includes? (:out res) "1.12.6.1673"))))))
+        (is (str/includes? (:out res) "1.12.6.1673")))))
+  (when windows?
+    (testing "cljl.bat handles arguments containing ')' without cmd.exe syntax errors"
+      (let [res (run-proc ["cmd.exe" "/c" cljl-bat "-Srepro" "-Sdeps" "{}" "-e" "(+ 1 2)"])]
+        (is (= 0 (:exit res)) (:err res))
+        (is (= "3" (str/trim (:out res))))))))
 
 (deftest init-and-main-opts-test
   (let [tmp (Files/createTempDirectory "cljl-main-test" (make-array java.nio.file.attribute.FileAttribute 0))]
@@ -288,7 +327,9 @@
                                  "-M:local" "-e" "(+ 2 3)"])]
           (is (= 0 (:exit res-cmd)) (:err res-cmd))
           (is (str/includes? (:out res-cmd) "CP="))
-          (is (str/includes? (:out res-cmd) "OPTS=-e (+ 1 1) -e (+ 2 3)")))
+          (is (str/includes? (:out res-cmd) (if windows?
+                                              "OPTS=-e \"(+ 1 1)\" -e \"(+ 2 3)\""
+                                              "OPTS=-e (+ 1 1) -e (+ 2 3)"))))
 
         (let [res-p (run-cljl {:dir tmp :env {"CLJ_CONFIG" cfg-dir}}
                               ["-P" "-M:local" "-e" "(throw (ex-info \"should-not-run\" {}))"])]

@@ -763,6 +763,7 @@ public final class Compiler {
             case "conj!" -> arity == 2 ? new ConjBangNode(args[0], args[1]) : null;
             case "assoc!" -> arity == 3 ? new AssocBangNode(args[0], args[1], args[2]) : null;
             case "conj" -> arity == 2 ? new ConjNode(args[0], args[1]) : null;
+            case "pop" -> arity == 1 ? new PopNode(args[0]) : null;
             case "assoc" -> arity == 3 ? new AssocNode(args[0], args[1], args[2]) : null;
             case "dissoc" -> arity == 2 ? new DissocNode(args[0], args[1]) : null;
             case "first" -> arity == 1 ? new FirstNode(args[0]) : null;
@@ -2825,6 +2826,12 @@ public final class Compiler {
         public final Node coll;
         public SeqNode(Node coll) { this.coll = coll; }
         @Override public Object eval(Object[] frame) { return RT.seq(coll.eval(frame)); }
+    }
+
+    public static final class PopNode extends Node {
+        public final Node coll;
+        public PopNode(Node coll) { this.coll = coll; }
+        @Override public Object eval(Object[] frame) { return RT.pop(coll.eval(frame)); }
     }
 
     public static final class EvenPNode extends Node {

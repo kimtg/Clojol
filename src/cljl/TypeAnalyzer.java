@@ -933,11 +933,19 @@ public final class TypeAnalyzer {
         if (n instanceof ConjNode a) {
             ValType ct = analyzeNode(a.coll);
             analyzeNode(a.val);
-            if (ct.isRef() && ct.refClass == PersistentVector.class) {
-                return record(n, ValType.ref(PersistentVector.class, true));
+            if (ct.isRef() && (ct.refClass == PersistentVector.class
+                    || ct.refClass == PersistentHashSet.class)) {
+                return record(n, ValType.ref(ct.refClass, true));
             }
             if (ct.isRef() && IPersistentList.class.isAssignableFrom(ct.refClass)) {
                 return record(n, ValType.ref(PersistentList.class, true));
+            }
+            return record(n, ValType.ANY);
+        }
+        if (n instanceof PopNode a) {
+            ValType ct = analyzeNode(a.coll);
+            if (ct.isRef() && ct.refClass == PersistentVector.class) {
+                return record(n, ValType.ref(PersistentVector.class, true));
             }
             return record(n, ValType.ANY);
         }
@@ -974,7 +982,10 @@ public final class TypeAnalyzer {
             return record(n, ValType.ref(ISeq.class, true));
         }
         if (n instanceof SeqNode a) {
-            analyzeNode(a.coll);
+            ValType ct = analyzeNode(a.coll);
+            if (ct.isRef() && ct.nonNull && (ct.refClass == PersistentList.class || ct.refClass == Cons.class)) {
+                return record(n, ValType.ref(ct.refClass, true));
+            }
             return record(n, ValType.ref(ISeq.class, false));
         }
 

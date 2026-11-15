@@ -460,6 +460,9 @@ public final class Main {
             List<String> cmd = new ArrayList<>();
             cmd.add(javaBin);
             cmd.add("-Dcljl.relaunched=true");
+            if (Boolean.getBoolean("cljl.jit.strict")) {
+                cmd.add("-Dcljl.jit.strict=true");
+            }
             cmd.addAll(jvmOpts);
             cmd.add("-cp");
             cmd.add(fullCp);
@@ -485,12 +488,47 @@ public final class Main {
                     }
                 }
             }
+            if (isWindows()) {
+                for (int i = 1; i < cmd.size(); i++) {
+                    cmd.set(i, escapeWindowsArg(cmd.get(i)));
+                }
+            }
             ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.inheritIO();
             return pb.start().waitFor();
         } catch (Exception e) {
             throw RT.sneakyThrow(e);
         }
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+    }
+
+    /**
+     * Escapes embedded double quotes (and preceding backslashes) for Java's ProcessBuilder
+     * -> CreateProcessW -> Microsoft CRT CommandLineToArgvW parsing on Windows.
+     */
+    private static String escapeWindowsArg(String s) {
+        if (s.indexOf('"') < 0) return s;
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        int backslashes = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\') {
+                backslashes++;
+            } else if (c == '"') {
+                for (int j = 0; j < backslashes * 2 + 1; j++) sb.append('\\');
+                sb.append('"');
+                backslashes = 0;
+            } else {
+                for (int j = 0; j < backslashes; j++) sb.append('\\');
+                sb.append(c);
+                backslashes = 0;
+            }
+        }
+        for (int j = 0; j < backslashes; j++) sb.append('\\');
+        return sb.toString();
     }
 
     private static int execShellCommand(String command) {

@@ -27,6 +27,7 @@ public final class Core {
 
     private static volatile boolean initialized = false;
     private static final Set<String> LOADED_LIBS = ConcurrentHashMap.newKeySet();
+    private static Fn addFn;
 
     private Core() {}
 
@@ -188,7 +189,7 @@ public final class Core {
     // ========================================================================
 
     private static void initMath(Namespace ns) {
-        def(ns, "+", new Fn.NamedFn("+") {
+        Fn plus = new Fn.NamedFn("+") {
             @Override public Object invoke() { return 0L; }
             @Override public Object invoke(Object a) { return a; }
             @Override public Object invoke(Object a, Object b) { return Numbers.add(a, b); }
@@ -200,7 +201,9 @@ public final class Core {
                 for (int i = 1; i < args.length; i++) acc = Numbers.add(acc, args[i]);
                 return acc;
             }
-        });
+        };
+        addFn = plus;
+        def(ns, "+", plus);
 
         def(ns, "+'", new Fn.NamedFn("+'") {
             @Override public Object invoke() { return 0L; }
@@ -993,6 +996,9 @@ public final class Core {
     }
 
     private static Object reduceVectorRange(Fn f, Object acc, PersistentVector pv, int start, int end) {
+        if (f == addFn) {
+            return reduceAddVectorRange(acc, pv, start, end);
+        }
         int i = start;
         while (i < end) {
             Object[] chunk = pv.arrayFor(i);
@@ -1007,7 +1013,48 @@ public final class Core {
         return acc;
     }
 
+    private static Object reduceAddVectorRange(Object acc, PersistentVector pv, int start, int end) {
+        int i = start;
+        if (acc instanceof Long lacc) {
+            long sum = lacc;
+            while (i < end) {
+                Object[] chunk = pv.arrayFor(i);
+                int offset = i & 0x01f;
+                int limit = Math.min(chunk.length, offset + (end - i));
+                for (int j = offset; j < limit; j++) {
+                    Object v = chunk[j];
+                    if (v instanceof Long lv) {
+                        sum = Math.addExact(sum, lv);
+                    } else {
+                        acc = Numbers.add(sum, v);
+                        return finishReduceAddVectorRange(acc, pv, i + (j - offset) + 1, end);
+                    }
+                }
+                i += (limit - offset);
+            }
+            return Long.valueOf(sum);
+        }
+        return finishReduceAddVectorRange(acc, pv, start, end);
+    }
+
+    private static Object finishReduceAddVectorRange(Object acc, PersistentVector pv, int start, int end) {
+        int i = start;
+        while (i < end) {
+            Object[] chunk = pv.arrayFor(i);
+            int offset = i & 0x01f;
+            int limit = Math.min(chunk.length, offset + (end - i));
+            for (int j = offset; j < limit; j++) {
+                acc = Numbers.add(acc, chunk[j]);
+            }
+            i += (limit - offset);
+        }
+        return acc;
+    }
+
     private static Object reduceList(Fn f, Object acc, PersistentList pl) {
+        if (f == addFn) {
+            return reduceAddList(acc, pl);
+        }
         PersistentList cur = pl;
         while (true) {
             acc = f.invoke(acc, cur.first);
@@ -1022,6 +1069,37 @@ public final class Core {
                 return acc;
             }
         }
+    }
+
+    private static Object reduceAddList(Object acc, PersistentList pl) {
+        PersistentList cur = pl;
+        if (acc instanceof Long lacc) {
+            long sum = lacc;
+            while (true) {
+                Object v = cur.first;
+                if (v instanceof Long lv) {
+                    sum = Math.addExact(sum, lv);
+                } else {
+                    Object objAcc = Numbers.add(sum, v);
+                    return finishReduceAddSeq(objAcc, cur.next());
+                }
+                if (cur.rest instanceof PersistentList nextPl) {
+                    cur = nextPl;
+                } else {
+                    ISeq tail = cur.next();
+                    return tail == null ? Long.valueOf(sum) : finishReduceAddSeq(Long.valueOf(sum), tail);
+                }
+            }
+        }
+        return finishReduceAddSeq(acc, cur);
+    }
+
+    private static Object finishReduceAddSeq(Object acc, ISeq s) {
+        while (s != null) {
+            acc = Numbers.add(acc, s.first());
+            s = s.next();
+        }
+        return acc;
     }
 
     private static Object reduce2(Fn f, Object coll) {
@@ -1430,14 +1508,7 @@ public final class Core {
             return RT.first(coll);
         }));
 
-        def(ns, "pop", Fn.of1("pop", coll -> {
-            if (coll == null) return null;
-            if (coll instanceof PersistentVector pv) return pv.pop();
-            if (coll instanceof PersistentList pl) return pl.pop();
-            if (coll instanceof PersistentList.EmptyList el) return el.pop();
-            if (coll instanceof PersistentColl pc) return pc.pop();
-            throw new IllegalArgumentException("pop not supported on: " + coll.getClass().getName());
-        }));
+        def(ns, "pop", Fn.of1("pop", RT::pop));
 
         def(ns, "subvec", Fn.of23("subvec",
                 (v, start) -> {

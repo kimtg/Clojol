@@ -782,7 +782,40 @@
       (is (= (mapv inc (range 10 90)) (mapv inc sv)))
       (is (= (filterv odd? (range 10 90)) (filterv odd? sv)))
       (is (= (reverse (range 100)) (reverse v)))
-      (is (= {0 1 2 3} (into {} [[0 1] [2 3]]))))))
+      (is (= {0 1 2 3} (into {} [[0 1] [2 3]]))))
+    ;; Phase 2 JIT/core fast-path coverage: pop, SubVec nth, set conj/get, list first/next/rest/seq, reduce + edge cases
+    (let [pop-vec (fn [n]
+                    (loop [v (vec (range n)) acc 0]
+                      (if (pos? (count v))
+                        (recur (pop v) (+ acc (peek v)))
+                        acc)))
+          sum-list-loop (fn [xs]
+                          (loop [s (seq xs) acc 0]
+                            (if s
+                              (recur (next s) (+ acc (first s)))
+                              acc)))
+          sum-subvec (fn [n]
+                       (let [sv (subvec (vec (range n)) 10 (- n 10))]
+                         (loop [i 0 acc 0]
+                           (if (< i (count sv))
+                             (recur (inc i) (+ acc (nth sv i)))
+                             acc))))
+          build-set (fn [n]
+                      (loop [i 0 s #{}]
+                        (if (< i n)
+                          (recur (inc i) (conj s i))
+                          (get s (dec n)))))]
+      (dotimes [_ 200]
+        (is (= 190 (pop-vec 20)))
+        (is (= 190 (sum-list-loop (apply list (range 20)))))
+        (is (= 190 (sum-list-loop (cons 0 (apply list (range 1 20))))))
+        (is (= 390 (sum-subvec 40)))
+        (is (= 19 (build-set 20))))
+      (is (= 0 (reduce + [])))
+      (is (= 0 (reduce + '())))
+      (is (= "keep" (reduce + ["keep"])))
+      (is (= 10.5 (reduce + [1 2 3.5 4])))
+      (is (= 10.5 (reduce + (list 1 2 3.5 4)))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

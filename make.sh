@@ -36,11 +36,25 @@ do_build() {
   echo "[ClojureLite] Build complete."
 }
 
+do_build_if_needed() {
+  if [ ! -f "$JAR" ] || [ -n "$(find "$CLJL_HOME/src" -name '*.java' -newer "$JAR" 2>/dev/null | head -n 1)" ]; then
+    do_build
+  fi
+}
+
 run_cljl() {
   if [ -f "$JSA" ]; then
     java ${CLJL_OPTS:-} -XX:SharedArchiveFile="$JSA" -jar "$JAR" "$@"
   else
     java ${CLJL_OPTS:-} -jar "$JAR" "$@"
+  fi
+}
+
+run_cljl_strict() {
+  if [ -f "$JSA" ]; then
+    java ${CLJL_OPTS:-} -Dcljl.jit.strict=true -XX:SharedArchiveFile="$JSA" -jar "$JAR" "$@"
+  else
+    java ${CLJL_OPTS:-} -Dcljl.jit.strict=true -jar "$JAR" "$@"
   fi
 }
 
@@ -71,14 +85,14 @@ case "$CMD" in
     do_build
     ;;
   test)
-    [ -f "$JAR" ] || do_build
-    echo "[ClojureLite] Running tests..."
-    run_cljl "$CLJL_HOME/test/core_test.clj"
-    run_cljl "$CLJL_HOME/test/cheatsheet_test.clj"
-    run_cljl "$CLJL_HOME/test/cli_test.clj"
+    do_build_if_needed
+    echo "[ClojureLite] Running tests (strict JIT)..."
+    run_cljl_strict "$CLJL_HOME/test/core_test.clj"
+    run_cljl_strict "$CLJL_HOME/test/cheatsheet_test.clj"
+    run_cljl_strict "$CLJL_HOME/test/cli_test.clj"
     ;;
   bench)
-    [ -f "$JAR" ] || do_build
+    do_build_if_needed
     echo "[ClojureLite] Running benchmarks..."
     run_cljl "$CLJL_HOME/test/bench.clj"
     ;;

@@ -81,13 +81,12 @@ public final class PersistentVector extends Fn
     }
 
     private int tailoff() {
-        if (cnt < 32) return 0;
-        return ((cnt - 1) >>> 5) << 5;
+        return cnt == 0 ? 0 : ((cnt - 1) & ~0x1f);
     }
 
     public Object[] arrayFor(int i) {
         if (Integer.compareUnsigned(i, cnt) < 0) {
-            if (i >= cnt - tail.length) return tail;
+            if (i >= ((cnt - 1) & ~0x1f)) return tail;
             Node node = root;
             for (int level = shift; level > 0; level -= 5) {
                 node = (Node) node.array[(i >>> level) & 0x01f];
@@ -186,9 +185,7 @@ public final class PersistentVector extends Fn
         if (cnt == 1) return EMPTY.withMeta(meta);
         int tailLen = tail.length;
         if (tailLen > 1) {
-            Object[] newTail = new Object[tailLen - 1];
-            System.arraycopy(tail, 0, newTail, 0, tailLen - 1);
-            return new PersistentVector(meta, cnt - 1, shift, root, newTail);
+            return new PersistentVector(meta, cnt - 1, shift, root, Arrays.copyOf(tail, tailLen - 1));
         }
         Object[] newTail = arrayFor(cnt - 2);
         Node newRoot = popTail(shift, root);

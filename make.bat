@@ -60,36 +60,41 @@ echo [ClojureLite] Generating AppCDS archive %JSA%...
 if exist "%JSA%" del /q "%JSA%"
 java -XX:ArchiveClassesAtExit="%JSA%" -jar "%JAR%" -Srepro -Sdeps "{}" -e "(+ 1 2)" >nul 2>&1
 echo [ClojureLite] Build complete.
-goto :eof
+exit /b 0
+
+:do_build_if_needed
+set "NEED_BUILD=0"
+if not exist "%JAR%" (
+    set "NEED_BUILD=1"
+) else (
+    echo F| xcopy /D /L /Y /S "%CLJL_HOME%\src\*.java" "%JAR%" 2>nul | findstr /i /e ".java" >nul && set "NEED_BUILD=1"
+)
+if "%NEED_BUILD%"=="1" (
+    call :do_build
+    exit /b %ERRORLEVEL%
+)
+exit /b 0
 
 :test
-if not exist "%JAR%" call :do_build
+call :do_build_if_needed
 if errorlevel 1 exit /b 1
-echo [ClojureLite] Running tests...
-if exist "%JSA%" (
-    java %CLJL_OPTS% -XX:SharedArchiveFile="%JSA%" -jar "%JAR%" "%CLJL_HOME%\test\core_test.clj"
-    if errorlevel 1 exit /b 1
-    java %CLJL_OPTS% -XX:SharedArchiveFile="%JSA%" -jar "%JAR%" "%CLJL_HOME%\test\cheatsheet_test.clj"
-    if errorlevel 1 exit /b 1
-    java %CLJL_OPTS% -XX:SharedArchiveFile="%JSA%" -jar "%JAR%" "%CLJL_HOME%\test\cli_test.clj"
-) else (
-    java %CLJL_OPTS% -jar "%JAR%" "%CLJL_HOME%\test\core_test.clj"
-    if errorlevel 1 exit /b 1
-    java %CLJL_OPTS% -jar "%JAR%" "%CLJL_HOME%\test\cheatsheet_test.clj"
-    if errorlevel 1 exit /b 1
-    java %CLJL_OPTS% -jar "%JAR%" "%CLJL_HOME%\test\cli_test.clj"
-)
+echo [ClojureLite] Running tests (strict JIT)...
+set "JSA_OPT="
+if exist "%JSA%" set JSA_OPT=-XX:SharedArchiveFile="%JSA%"
+java %CLJL_OPTS% -Dcljl.jit.strict=true %JSA_OPT% -jar "%JAR%" "%CLJL_HOME%\test\core_test.clj"
+if errorlevel 1 exit /b 1
+java %CLJL_OPTS% -Dcljl.jit.strict=true %JSA_OPT% -jar "%JAR%" "%CLJL_HOME%\test\cheatsheet_test.clj"
+if errorlevel 1 exit /b 1
+java %CLJL_OPTS% -Dcljl.jit.strict=true %JSA_OPT% -jar "%JAR%" "%CLJL_HOME%\test\cli_test.clj"
 exit /b %ERRORLEVEL%
 
 :bench
-if not exist "%JAR%" call :do_build
+call :do_build_if_needed
 if errorlevel 1 exit /b 1
 echo [ClojureLite] Running benchmarks...
-if exist "%JSA%" (
-    java %CLJL_OPTS% -XX:SharedArchiveFile="%JSA%" -jar "%JAR%" "%CLJL_HOME%\test\bench.clj"
-) else (
-    java %CLJL_OPTS% -jar "%JAR%" "%CLJL_HOME%\test\bench.clj"
-)
+set "JSA_OPT="
+if exist "%JSA%" set JSA_OPT=-XX:SharedArchiveFile="%JSA%"
+java %CLJL_OPTS% %JSA_OPT% -jar "%JAR%" "%CLJL_HOME%\test\bench.clj"
 exit /b %ERRORLEVEL%
 
 :help

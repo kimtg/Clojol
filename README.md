@@ -198,7 +198,7 @@ ClojureLite/
 # Windows
 .\make.bat            # Compile, package build\cljl.jar, generate AppCDS archive
 .\make.bat rebuild    # Clean and build from scratch
-.\make.bat test       # Build and run test\core_test.clj & test\cheatsheet_test.clj
+.\make.bat test       # Build and run core_test.clj, cheatsheet_test.clj & cli_test.clj
 .\make.bat bench      # Build and run test\bench.clj
 .\cljl.bat test\fib_bench.clj  # Run recursive fib(40) benchmark
 .\make.bat clean      # Remove build\
