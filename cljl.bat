@@ -8,7 +8,12 @@ set "JSA=%CLJL_HOME%\build\cljl.jsa"
 if not exist "%JAR%" (
     echo [ClojureLite] Building cljl.jar... 1>&2
     if not exist "%CLJL_HOME%\build\classes" mkdir "%CLJL_HOME%\build\classes"
-    dir /s /b "%CLJL_HOME%\src\*.java" > "%CLJL_HOME%\build\sources.txt"
+    setlocal enabledelayedexpansion
+    (for /r "%CLJL_HOME%\src" %%f in (*.java) do @(
+        set "SRC_FILE=%%f"
+        echo "!SRC_FILE:\=/!"
+    )) > "%CLJL_HOME%\build\sources.txt"
+    endlocal
     javac --release 21 -d "%CLJL_HOME%\build\classes" @"%CLJL_HOME%\build\sources.txt" 1>&2
     if errorlevel 1 exit /b 1
     jar --create --file "%JAR%" --main-class cljl.Main -C "%CLJL_HOME%\build\classes" . 1>&2

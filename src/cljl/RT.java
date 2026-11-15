@@ -61,6 +61,7 @@ public final class RT {
 
     private static final AtomicInteger GENSYM_ID = new AtomicInteger(1000);
     private static volatile ClassLoader runtimeClassLoader = null;
+    private static volatile boolean strictRuntimeLoader = false;
 
     static {
         Core.init();
@@ -72,6 +73,11 @@ public final class RT {
     }
 
     public static void setRuntimeClassLoader(ClassLoader cl) {
+        setRuntimeClassLoader(cl, true);
+    }
+
+    public static void setRuntimeClassLoader(ClassLoader cl, boolean strict) {
+        strictRuntimeLoader = strict;
         runtimeClassLoader = cl;
         if (cl != null) {
             Thread.currentThread().setContextClassLoader(cl);
@@ -87,6 +93,10 @@ public final class RT {
 
     public static boolean hasCustomRuntimeLoader() {
         return runtimeClassLoader != null;
+    }
+
+    public static boolean isStrictRuntimeLoader() {
+        return strictRuntimeLoader;
     }
 
     public static Namespace currentNS() {

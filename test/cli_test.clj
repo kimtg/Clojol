@@ -17,8 +17,17 @@
 (def ^:private repo-root
   (.normalize (.toAbsolutePath (.toPath (File. ".")))))
 
+(def ^:private windows?
+  (str/includes? (str/lower-case (System/getProperty "os.name" "")) "win"))
+
 (def ^:private cljl-sh
   (.toString (.resolve repo-root "cljl.sh")))
+
+(def ^:private cljl-bat
+  (.toString (.resolve repo-root "cljl.bat")))
+
+(def ^:private cljl-cmd
+  (if windows? ["cmd.exe" "/c" cljl-bat] [cljl-sh]))
 
 (def ^:private cljl-jar
   (.toString (.resolve repo-root "build/cljl.jar")))
@@ -73,7 +82,7 @@
   ([args] (run-cljl {} nil args))
   ([opts args] (run-cljl opts nil args))
   ([opts stdin-str args]
-   (run-proc opts stdin-str nil (into [cljl-sh] args))))
+   (run-proc opts stdin-str nil (into cljl-cmd args))))
 
 (deftest help-and-version-test
   (testing "-h, -?, --help, -M -h, -- -h"
@@ -158,7 +167,49 @@
             (is (= "[\"-Spath\" \"-J-Xmx128m\"]" (str/trim (:out res))))))
         (testing "clojure.main/main callable from Clojure code"
           (let [out-str (with-out-str (main/main "-e" "(+ 7 8)"))]
-            (is (= "15" (str/trim out-str))))))
+            (is (= "15" (str/trim out-str)))))
+        (testing "-M -m clojure.main executes clojure.main/-main"
+          (let [res (run-cljl {:dir tmp} ["-M" "-m" "clojure.main" "-e" "(+ 1 2)"])]
+            (is (= 0 (:exit res)) (:err res))
+            (is (= "3" (str/trim (:out res))))))
+        (testing "-M -i / -e defining namespace + -main then -m <ns>"
+          (let [defs-file (write-file! tmp "defs.clj" "(ns inline.ns)\n(defn -main [& args] (println \"INLINE:\" (vec args)))\n")
+                res1 (run-cljl {:dir tmp} ["-M" "-i" (.toString defs-file) "-m" "inline.ns" "x" "y"])
+                res2 (run-cljl {:dir tmp} ["-M" "-e" "(ns inline.eval)\n(defn -main [x] (println \"EVAL:\" x))" "-m" "inline.eval" "hi"])]
+            (is (= 0 (:exit res1)) (:err res1))
+            (is (= "INLINE: [x y]" (str/trim (:out res1))))
+            (is (= 0 (:exit res2)) (:err res2))
+            (is (= ["#'inline.eval/-main" "EVAL: hi"] (str/split-lines (str/trim (:out res2)))))))
+        (testing "-M -m supports .cljc namespace files"
+          (write-file! tmp "src/my/cljc_app.cljc" "(ns my.cljc-app)\n(defn -main [& args] (println \"CLJC:\" #?(:clj :jvm :default :other) (vec args)))\n")
+          (let [res (run-cljl {:dir tmp} ["-M" "-m" "my.cljc-app" "ok"])]
+            (is (= 0 (:exit res)) (:err res))
+            (is (= "CLJC: :jvm [ok]" (str/trim (:out res))))))
+        (testing "strict deps.edn project does not leak CWD namespace not in :paths"
+          (write-file! tmp "hidden.clj" "(ns hidden)\n(defn -main [] (println \"LEAKED\"))\n")
+          (let [res (run-cljl {:dir tmp} ["-M" "--report" "none" "-m" "hidden"])]
+            (is (not= 0 (:exit res))))))
+      (finally
+        (delete-tree! tmp)))))
+
+(deftest dash-m-without-deps-edn-test
+  (let [tmp (Files/createTempDirectory "cljl-no-deps-test" (make-array java.nio.file.attribute.FileAttribute 0))
+        cfg-dir (.resolve tmp "cfg")]
+    (try
+      (write-file! cfg-dir "deps.edn" "{:aliases {:user-only {:extra-paths [\"u\"]}}}")
+      (write-file! tmp "foo.clj" "(ns foo)\n(defn -main [& args] (println \"CWD_FOO:\" (vec args)))\n")
+      (write-file! tmp "src/my/sub_app.clj" "(ns my.sub-app)\n(defn -main [& args] (println \"SRC_SUB:\" (vec args)))\n")
+      (write-file! tmp "lib/lib_ns.cljc" "(ns lib-ns)\n(defn -main [& args] (println \"LIB_CLJC:\" (vec args)))\n")
+      (testing "-M -m loads from CWD, src/, and lib/ when no deps.edn is present"
+        (let [r1 (run-cljl {:dir tmp :env {"CLJ_CONFIG" cfg-dir}} ["-M" "-m" "foo" "a" "b"])
+              r2 (run-cljl {:dir tmp :env {"CLJ_CONFIG" cfg-dir}} ["-M" "-m" "my.sub-app" "1"])
+              r3 (run-cljl {:dir tmp :env {"CLJ_CONFIG" cfg-dir}} ["-M" "-m" "lib-ns" "z"])]
+          (is (= 0 (:exit r1)) (:err r1))
+          (is (= "CWD_FOO: [a b]" (str/trim (:out r1))))
+          (is (= 0 (:exit r2)) (:err r2))
+          (is (= "SRC_SUB: [1]" (str/trim (:out r2))))
+          (is (= 0 (:exit r3)) (:err r3))
+          (is (= "LIB_CLJC: [z]" (str/trim (:out r3))))))
       (finally
         (delete-tree! tmp)))))
 
@@ -260,10 +311,10 @@
     (try
       ;; Create local/root sublib with prep-lib
       (write-file! sublib-dir "deps.edn"
-                   (str "{:paths [\"src\"] :deps/prep-lib {:ensure \"" (.toString prep-marker) "\" :fn sub.prep/run}}"))
+                   (str "{:paths [\"src\"] :deps/prep-lib {:ensure " (pr-str (.toString prep-marker)) " :fn sub.prep/run}}"))
       (write-file! sublib-dir "src/sub/core.clj" "(ns sub.core)\n(def version \"local-sub-1\")\n")
       (write-file! sublib-dir "src/sub/prep.clj"
-                   (str "(ns sub.prep)\n(defn run [_] (spit \"" (.toString prep-marker) "\" \"prepped\"))\n"))
+                   (str "(ns sub.prep)\n(defn run [_] (spit " (pr-str (.toString prep-marker)) " \"prepped\"))\n"))
 
       ;; Create sample jar + install via :deps mvn-install
       (create-jar! sample-jar {"mvnlib/hello.clj" "(ns mvnlib.hello)\n(defn greet [] :from-mvn-repo)\n"
@@ -287,7 +338,7 @@
         (write-file! tmp "tool-src/my/tool.clj"
                      "(ns my.tool)\n(defn run [m] (println (pr-str [m (boolean (try (require 'proj.secret) true (catch Exception _ false)))])))\n")
         (write-file! cfg-dir "tools/mytool.edn"
-                     (str "{:paths [\"" (.toString (.resolve tmp "tool-src")) "\"] :ns-default my.tool :exec-fn run :exec-args {:from :named-tool}}"))
+                     (str "{:paths [" (pr-str (.toString (.resolve tmp "tool-src"))) "] :ns-default my.tool :exec-fn run :exec-args {:from :named-tool}}"))
 
         ;; Project src & deps.edn
         (write-file! tmp "src/proj/secret.clj" "(ns proj.secret)\n(def s 1)\n")
@@ -296,12 +347,12 @@
         (write-file! tmp "extra/proj/extra.clj" "(ns proj.extra)\n(def ok true)\n")
         (write-file! tmp "deps.edn"
                      (str "{:paths [\"src\"]\n"
-                          " :deps {local/sub {:local/root \"" (.toString sublib-dir) "\"}\n"
-                          "        git/dep {:git/url \"" (.toString git-origin) "\" :git/sha \"" git-sha "\"}}\n"
+                          " :deps {local/sub {:local/root " (pr-str (.toString sublib-dir)) "}\n"
+                          "        git/dep {:git/url " (pr-str (.toString git-origin)) " :git/sha " (pr-str git-sha) "}}\n"
                           " :aliases {:dev {:extra-paths [\"extra\"]}\n"
                           "           :run-e {:main-opts [\"-m\" \"proj.app\" \"from-alias\"]}\n"
                           "           :x-alias {:ns-default proj.app :ns-aliases {p proj.app} :exec-fn greet :exec-args {:a 1 :nested {:k 0}}}\n"
-                          "           :t-alias {:extra-paths [\"" (.toString (.resolve tmp "tool-src")) "\"] :ns-default my.tool :exec-fn run :exec-args {:from :alias-tool}}}}"))
+                          "           :t-alias {:extra-paths [" (pr-str (.toString (.resolve tmp "tool-src"))) "] :ns-default my.tool :exec-fn run :exec-args {:from :alias-tool}}}}"))
 
         (testing "-A concatenated aliases ignore :main-opts and load :extra-paths + deps"
           (let [res (run-cljl {:dir tmp :env {"CLJ_CONFIG" cfg-dir "M2_REPO" m2-dir "GITLIBS" gitlibs-dir}}
@@ -418,7 +469,7 @@
 
             ;; Verify :deps git-resolve-tags adds :git/sha
             (let [tag-deps (write-file! tmp "tag-deps.edn"
-                                        (str "{:deps {git/dep {:git/tag \"v0.1.0\" :git/url \"" (.toString git-origin) "\"}}}"))]
+                                        (str "{:deps {git/dep {:git/tag \"v0.1.0\" :git/url " (pr-str (.toString git-origin)) "}}}"))]
               (let [grt (run-cljl {:dir tmp :env env}
                                   ["-X:deps" "git-resolve-tags" ":deps-file" (pr-str (.toString tag-deps))])]
                 (is (= 0 (:exit grt)) (:err grt))

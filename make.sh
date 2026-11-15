@@ -32,7 +32,7 @@ do_build() {
 
   echo "[ClojureLite] Generating AppCDS archive $JSA..."
   rm -f "$JSA"
-  java -XX:ArchiveClassesAtExit="$JSA" -jar "$JAR" -e "(+ 1 2)" >/dev/null 2>&1 || true
+  java -XX:ArchiveClassesAtExit="$JSA" -jar "$JAR" -Srepro -Sdeps "{}" -e "(+ 1 2)" >/dev/null 2>&1 || true
   echo "[ClojureLite] Build complete."
 }
 

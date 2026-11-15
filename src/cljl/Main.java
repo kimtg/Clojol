@@ -229,8 +229,12 @@ public final class Main {
             bindCommandLineArgs(args, i + 2);
             String[] mainCallArgs = Arrays.copyOfRange(args, i + 2, args.length);
             try {
-                Core.loadLib(nsName);
                 Namespace targetNs = Namespace.find(nsName);
+                Var existingMain = targetNs != null ? targetNs.findInternedVar(Symbol.intern("-main")) : null;
+                if (existingMain == null || !existingMain.isBound()) {
+                    Core.loadLib(nsName);
+                    targetNs = Namespace.find(nsName);
+                }
                 if (targetNs == null) {
                     throw new RuntimeException("Namespace not found: " + nsName);
                 }

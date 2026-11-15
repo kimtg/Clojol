@@ -277,14 +277,16 @@ public final class StdLibMore {
                 throw RT.sneakyThrow(e);
             }
         }));
-        ns.intern("main", Fn.ofVarargs("main", args -> {
+        Fn mainFn = Fn.ofVarargs("main", args -> {
             String[] strArgs = new String[args.length];
             for (int i = 0; i < args.length; i++) {
                 strArgs[i] = args[i] == null ? null : args[i].toString();
             }
             Main.runMain(strArgs);
             return null;
-        }));
+        });
+        ns.intern("main", mainFn);
+        ns.intern("-main", mainFn);
         LOADED.add("clojure.main");
     }
 

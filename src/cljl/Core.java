@@ -2340,65 +2340,46 @@ public final class Core {
             return;
         }
         String rel = nsName.replace('.', '/').replace('-', '_');
-        if (RT.hasCustomRuntimeLoader()) {
-            for (String ext : new String[]{".cljl", ".clj"}) {
-                try (InputStream is = RT.baseLoader().getResourceAsStream(rel + ext)) {
-                    if (is != null) {
-                        Namespace savedNs = RT.currentNS();
-                        try {
-                            String src = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-                            Compiler.load(src, rel + ext);
-                            LOADED_LIBS.add(nsName);
-                            return;
-                        } finally {
-                            RT.CURRENT_NS.bindRoot(savedNs);
-                        }
-                    }
-                } catch (IOException e) {
-                    throw RT.sneakyThrow(e);
-                }
-            }
-        } else {
-            // Try loading from file system or classpath: foo.bar -> foo/bar.cljl or foo/bar.clj
-            String[] candidates = {
-                    rel + ".cljl", rel + ".clj",
-                    "src/" + rel + ".cljl", "src/" + rel + ".clj",
-                    "lib/" + rel + ".cljl", "lib/" + rel + ".clj"
-            };
-            for (String cand : candidates) {
-                Path p = Path.of(cand);
-                if (Files.isRegularFile(p)) {
+        String[] exts = {".cljl", ".clj", ".cljc"};
+        // Check active classpath/runtime loader first
+        for (String ext : exts) {
+            try (InputStream is = RT.baseLoader().getResourceAsStream(rel + ext)) {
+                if (is != null) {
+                    Namespace savedNs = RT.currentNS();
                     try {
-                        Namespace savedNs = RT.currentNS();
-                        try {
-                            String src = Files.readString(p, StandardCharsets.UTF_8);
-                            Compiler.load(src, cand);
-                            LOADED_LIBS.add(nsName);
-                            return;
-                        } finally {
-                            RT.CURRENT_NS.bindRoot(savedNs);
-                        }
-                    } catch (IOException e) {
-                        throw RT.sneakyThrow(e);
+                        String src = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                        Compiler.load(src, rel + ext);
+                        LOADED_LIBS.add(nsName);
+                        return;
+                    } finally {
+                        RT.CURRENT_NS.bindRoot(savedNs);
                     }
                 }
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
             }
-            // Check classpath
-            for (String ext : new String[]{".cljl", ".clj"}) {
-                try (InputStream is = RT.baseLoader().getResourceAsStream(rel + ext)) {
-                    if (is != null) {
-                        Namespace savedNs = RT.currentNS();
+        }
+        // Fallback to CWD / src / lib unless explicit deps.edn / -Scp / -T enforces strict isolation
+        if (!(RT.hasCustomRuntimeLoader() && RT.isStrictRuntimeLoader())) {
+            for (String prefix : new String[]{"", "src/", "lib/"}) {
+                for (String ext : exts) {
+                    String cand = prefix + rel + ext;
+                    Path p = Path.of(cand);
+                    if (Files.isRegularFile(p)) {
                         try {
-                            String src = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-                            Compiler.load(src, rel + ext);
-                            LOADED_LIBS.add(nsName);
-                            return;
-                        } finally {
-                            RT.CURRENT_NS.bindRoot(savedNs);
+                            Namespace savedNs = RT.currentNS();
+                            try {
+                                String src = Files.readString(p, StandardCharsets.UTF_8);
+                                Compiler.load(src, cand);
+                                LOADED_LIBS.add(nsName);
+                                return;
+                            } finally {
+                                RT.CURRENT_NS.bindRoot(savedNs);
+                            }
+                        } catch (IOException e) {
+                            throw RT.sneakyThrow(e);
                         }
                     }
-                } catch (IOException e) {
-                    throw RT.sneakyThrow(e);
                 }
             }
         }

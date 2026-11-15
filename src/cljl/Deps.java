@@ -612,11 +612,12 @@ public final class Deps {
                 urls.add(Path.of(root).toUri().toURL());
             } catch (Exception ignored) {}
         }
-        boolean isolated = (opts != null && (opts.mode == Mode.TOOL || opts.scp != null))
-                || (basis.mergedDeps != null && basis.mergedDeps.containsKey(Keyword.intern("paths")));
-        if (!urls.isEmpty() || isolated) {
+        boolean strict = (opts != null && (opts.scp != null || opts.mode == Mode.TOOL
+                || opts.sdeps != null || opts.sdepsFile != null || !opts.aliases.isEmpty()))
+                || Files.isRegularFile(Path.of("deps.edn"));
+        if (!urls.isEmpty() || strict) {
             URLClassLoader ucl = new URLClassLoader(urls.toArray(new URL[0]), RT.class.getClassLoader());
-            RT.setRuntimeClassLoader(ucl);
+            RT.setRuntimeClassLoader(ucl, strict);
         }
     }
 

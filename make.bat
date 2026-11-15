@@ -43,7 +43,12 @@ exit /b %ERRORLEVEL%
 :do_build
 echo [ClojureLite] Compiling Java sources...
 if not exist "%CLASSES_DIR%" mkdir "%CLASSES_DIR%"
-dir /s /b "%CLJL_HOME%\src\*.java" > "%BUILD_DIR%\sources.txt"
+setlocal enabledelayedexpansion
+(for /r "%CLJL_HOME%\src" %%f in (*.java) do @(
+    set "SRC_FILE=%%f"
+    echo "!SRC_FILE:\=/!"
+)) > "%BUILD_DIR%\sources.txt"
+endlocal
 javac --release 21 -d "%CLASSES_DIR%" @"%BUILD_DIR%\sources.txt"
 if errorlevel 1 exit /b 1
 
@@ -53,7 +58,7 @@ if errorlevel 1 exit /b 1
 
 echo [ClojureLite] Generating AppCDS archive %JSA%...
 if exist "%JSA%" del /q "%JSA%"
-java -XX:ArchiveClassesAtExit="%JSA%" -jar "%JAR%" -e "(+ 1 2)" >nul 2>&1
+java -XX:ArchiveClassesAtExit="%JSA%" -jar "%JAR%" -Srepro -Sdeps "{}" -e "(+ 1 2)" >nul 2>&1
 echo [ClojureLite] Build complete.
 goto :eof
 
@@ -65,10 +70,14 @@ if exist "%JSA%" (
     java %CLJL_OPTS% -XX:SharedArchiveFile="%JSA%" -jar "%JAR%" "%CLJL_HOME%\test\core_test.clj"
     if errorlevel 1 exit /b 1
     java %CLJL_OPTS% -XX:SharedArchiveFile="%JSA%" -jar "%JAR%" "%CLJL_HOME%\test\cheatsheet_test.clj"
+    if errorlevel 1 exit /b 1
+    java %CLJL_OPTS% -XX:SharedArchiveFile="%JSA%" -jar "%JAR%" "%CLJL_HOME%\test\cli_test.clj"
 ) else (
     java %CLJL_OPTS% -jar "%JAR%" "%CLJL_HOME%\test\core_test.clj"
     if errorlevel 1 exit /b 1
     java %CLJL_OPTS% -jar "%JAR%" "%CLJL_HOME%\test\cheatsheet_test.clj"
+    if errorlevel 1 exit /b 1
+    java %CLJL_OPTS% -jar "%JAR%" "%CLJL_HOME%\test\cli_test.clj"
 )
 exit /b %ERRORLEVEL%
 
