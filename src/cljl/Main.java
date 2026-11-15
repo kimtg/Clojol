@@ -444,7 +444,10 @@ public final class Main {
 
     private static int relaunchWithJvmOpts(List<String> jvmOpts, BasisResult basis, String[] origArgs) {
         try {
-            String javaBin = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+            Path javaExe = Path.of(System.getProperty("java.home"), "bin", "java.exe");
+            String javaBin = Files.isRegularFile(javaExe)
+                    ? javaExe.toString()
+                    : Path.of(System.getProperty("java.home"), "bin", "java").toString();
             String selfCp = System.getProperty("java.class.path", "");
             String fullCp = (basis != null && basis.classpath != null && !basis.classpath.isEmpty())
                     ? selfCp + File.pathSeparator + basis.classpath
@@ -501,6 +504,10 @@ public final class Main {
 
     private static String shellQuote(String s) {
         if (s.matches("[a-zA-Z0-9_./:-]+")) return s;
+        boolean win = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+        if (win) {
+            return "\"" + s.replace("\"", "\\\"") + "\"";
+        }
         return "'" + s.replace("'", "'\\''") + "'";
     }
 

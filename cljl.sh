@@ -16,9 +16,9 @@ if [ ! -f "$JAR" ]; then
   echo "[ClojureLite] Building cljl.jar..." >&2
   mkdir -p "$CLJL_HOME/build/classes"
   find "$CLJL_HOME/src" -name '*.java' > "$CLJL_HOME/build/sources.txt"
-  javac --release 21 -d "$CLJL_HOME/build/classes" @"$CLJL_HOME/build/sources.txt"
-  jar --create --file "$JAR" --main-class cljl.Main -C "$CLJL_HOME/build/classes" .
-  java -XX:ArchiveClassesAtExit="$JSA" -jar "$JAR" -e "(+ 1 2)" >/dev/null 2>&1 || true
+  javac --release 21 -d "$CLJL_HOME/build/classes" @"$CLJL_HOME/build/sources.txt" >&2
+  jar --create --file "$JAR" --main-class cljl.Main -C "$CLJL_HOME/build/classes" . >&2
+  java -XX:ArchiveClassesAtExit="$JSA" -jar "$JAR" -Srepro -Sdeps "{}" -e "(+ 1 2)" >/dev/null 2>&1 || true
 fi
 
 JVM_OPTS=()
