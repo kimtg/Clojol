@@ -936,13 +936,27 @@ public final class TypeAnalyzer {
             if (ct.isRef() && ct.refClass == PersistentVector.class) {
                 return record(n, ValType.ref(PersistentVector.class, true));
             }
+            if (ct.isRef() && IPersistentList.class.isAssignableFrom(ct.refClass)) {
+                return record(n, ValType.ref(PersistentList.class, true));
+            }
             return record(n, ValType.ANY);
         }
         if (n instanceof AssocNode a) {
             ValType ct = analyzeNode(a.coll);
             analyzeNode(a.key);
             analyzeNode(a.val);
-            if (ct.isRef() && (ct.refClass == PersistentHashMap.class || ct.refClass == PersistentVector.class)) {
+            if (ct.isRef() && (ct.refClass == PersistentHashMap.class
+                    || ct.refClass == PersistentVector.class
+                    || ct.refClass == PersistentVector.SubVec.class)) {
+                return record(n, ValType.ref(ct.refClass, true));
+            }
+            return record(n, ValType.ANY);
+        }
+        if (n instanceof DissocNode a) {
+            ValType ct = analyzeNode(a.coll);
+            analyzeNode(a.key);
+            if (ct.isRef() && (ct.refClass == PersistentHashMap.class
+                    || ct.refClass == PersistentTreeMap.class)) {
                 return record(n, ValType.ref(ct.refClass, true));
             }
             return record(n, ValType.ANY);

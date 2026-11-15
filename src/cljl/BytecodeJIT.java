@@ -269,6 +269,7 @@ public final class BytecodeJIT {
         if (n instanceof AssocBangNode a) return canCompileNode(a.target, false) && canCompileNode(a.key, false) && canCompileNode(a.val, false);
         if (n instanceof ConjNode a) return canCompileNode(a.coll, false) && canCompileNode(a.val, false);
         if (n instanceof AssocNode a) return canCompileNode(a.coll, false) && canCompileNode(a.key, false) && canCompileNode(a.val, false);
+        if (n instanceof DissocNode a) return canCompileNode(a.coll, false) && canCompileNode(a.key, false);
         if (n instanceof FirstNode a) return canCompileNode(a.coll, false);
         if (n instanceof NextNode a) return canCompileNode(a.coll, false);
         if (n instanceof RestNode a) return canCompileNode(a.coll, false);
@@ -1670,6 +1671,18 @@ public final class BytecodeJIT {
                     if (ct.refClass == PersistentHashMap.class) {
                         emitRef(c.coll, PersistentHashMap.class);
                         getfield("cljl/lang/PersistentHashMap", "count", "I", 1);
+                        i2l();
+                        return false;
+                    }
+                    if (ct.refClass == PersistentList.class) {
+                        emitRef(c.coll, PersistentList.class);
+                        getfield("cljl/lang/PersistentList", "count", "I", 1);
+                        i2l();
+                        return false;
+                    }
+                    if (Counted.class.isAssignableFrom(ct.refClass)) {
+                        emitRef(c.coll, Counted.class);
+                        invokeinterface("cljl/lang/Counted", "count", "()I", 1, 1);
                         i2l();
                         return false;
                     }
@@ -3307,12 +3320,28 @@ public final class BytecodeJIT {
             }
             if (node instanceof ConjNode a) {
                 ValType ct = typeOf(a.coll);
-                if (ct.isRef() && ct.nonNull && ct.refClass == PersistentVector.class) {
-                    emitRef(a.coll, PersistentVector.class);
-                    emitBoxed(a.val);
-                    invokevirtual("cljl/lang/PersistentVector", "conj",
-                            "(Ljava/lang/Object;)Lcljl/lang/PersistentVector;", 2, 1);
-                    return false;
+                if (ct.isRef() && ct.nonNull) {
+                    if (ct.refClass == PersistentVector.class) {
+                        emitRef(a.coll, PersistentVector.class);
+                        emitBoxed(a.val);
+                        invokevirtual("cljl/lang/PersistentVector", "conj",
+                                "(Ljava/lang/Object;)Lcljl/lang/PersistentVector;", 2, 1);
+                        return false;
+                    }
+                    if (ct.refClass == PersistentList.class) {
+                        emitRef(a.coll, PersistentList.class);
+                        emitBoxed(a.val);
+                        invokevirtual("cljl/lang/PersistentList", "cons",
+                                "(Ljava/lang/Object;)Lcljl/lang/PersistentList;", 2, 1);
+                        return false;
+                    }
+                    if (IPersistentList.class.isAssignableFrom(ct.refClass)) {
+                        emitRef(a.coll, IPersistentList.class);
+                        emitBoxed(a.val);
+                        invokeinterface("cljl/lang/IPersistentList", "cons",
+                                "(Ljava/lang/Object;)Lcljl/lang/PersistentList;", 2, 1);
+                        return false;
+                    }
                 }
                 emitBoxed(a.coll);
                 emitBoxed(a.val);
@@ -3331,16 +3360,39 @@ public final class BytecodeJIT {
                 }
                 if (ct.isRef() && ct.nonNull && ct.refClass == PersistentVector.class) {
                     emitRef(a.coll, PersistentVector.class);
-                    emitBoxed(a.key);
-                    emitBoxed(a.val);
-                    invokevirtual("cljl/lang/PersistentVector", "assoc",
-                            "(Ljava/lang/Object;Ljava/lang/Object;)Lcljl/lang/PersistentVector;", 3, 1);
+                    if (typeOf(a.key).isLong()) {
+                        emitLong(a.key);
+                        l2i();
+                        emitBoxed(a.val);
+                        invokevirtual("cljl/lang/PersistentVector", "assocN",
+                                "(ILjava/lang/Object;)Lcljl/lang/PersistentVector;", 3, 1);
+                    } else {
+                        emitBoxed(a.key);
+                        emitBoxed(a.val);
+                        invokevirtual("cljl/lang/PersistentVector", "assoc",
+                                "(Ljava/lang/Object;Ljava/lang/Object;)Lcljl/lang/PersistentVector;", 3, 1);
+                    }
                     return false;
                 }
                 emitBoxed(a.coll);
                 emitBoxed(a.key);
                 emitBoxed(a.val);
-                invokestatic("cljl/RT", "assoc", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                invokestatic("cljl/RT", "assoc",
+                        "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Lcljl/lang/Associative;", 3, 1);
+                return false;
+            }
+            if (node instanceof DissocNode d) {
+                ValType ct = typeOf(d.coll);
+                if (ct.isRef() && ct.nonNull && ct.refClass == PersistentHashMap.class) {
+                    emitRef(d.coll, PersistentHashMap.class);
+                    emitBoxed(d.key);
+                    invokevirtual("cljl/lang/PersistentHashMap", "without",
+                            "(Ljava/lang/Object;)Lcljl/lang/PersistentHashMap;", 2, 1);
+                    return false;
+                }
+                emitBoxed(d.coll);
+                emitBoxed(d.key);
+                invokestatic("cljl/RT", "dissoc", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
                 return false;
             }
             if (node instanceof FirstNode a) {

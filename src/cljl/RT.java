@@ -129,6 +129,9 @@ public final class RT {
     public static boolean equiv(Object k1, Object k2) {
         if (k1 == k2) return true;
         if (k1 == null || k2 == null) return false;
+        if (k1 instanceof Long l1 && k2 instanceof Long l2) {
+            return l1.longValue() == l2.longValue();
+        }
         if (k1 instanceof Number n1 && k2 instanceof Number n2) {
             return Numbers.equiv(n1, n2);
         }
@@ -317,6 +320,7 @@ public final class RT {
         if (coll instanceof PersistentVector v) return v.conj(x);
         if (coll instanceof PersistentVector.SubVec sv) return sv.conj(x);
         if (coll instanceof PersistentList l) return l.cons(x);
+        if (coll instanceof PersistentList.EmptyList l) return l.cons(x);
         if (coll instanceof PersistentHashMap m) {
             if (x instanceof Map.Entry<?, ?> e) {
                 return m.assoc(e.getKey(), e.getValue());
@@ -551,6 +555,24 @@ public final class RT {
             throw new IndexOutOfBoundsException();
         }
         if (n < 0) throw new IndexOutOfBoundsException("Index cannot be negative: " + n);
+        if (coll instanceof PersistentList pl) {
+            if (n >= pl.count) throw new IndexOutOfBoundsException("Index " + n + " out of bounds for length " + pl.count);
+            PersistentList cur = pl;
+            for (int i = 0; i < n; i++) {
+                if (cur.rest instanceof PersistentList nextPl) {
+                    cur = nextPl;
+                } else {
+                    ISeq s = cur.next();
+                    for (int j = i + 1; j < n && s != null; j++) s = s.next();
+                    if (s == null) throw new IndexOutOfBoundsException("Index " + n + " out of bounds");
+                    return s.first();
+                }
+            }
+            return cur.first;
+        }
+        if (coll instanceof PersistentList.EmptyList) {
+            throw new IndexOutOfBoundsException("Index " + n + " out of bounds for length 0");
+        }
         ISeq s = seq(coll);
         for (int i = 0; i <= n && s != null; i++, s = s.next()) {
             if (i == n) return s.first();
@@ -571,6 +593,21 @@ public final class RT {
             if (n == 1) return e.getValue();
             return notFound;
         }
+        if (coll instanceof PersistentList pl) {
+            if (n >= pl.count) return notFound;
+            PersistentList cur = pl;
+            for (int i = 0; i < n; i++) {
+                if (cur.rest instanceof PersistentList nextPl) {
+                    cur = nextPl;
+                } else {
+                    ISeq s = cur.next();
+                    for (int j = i + 1; j < n && s != null; j++) s = s.next();
+                    return s == null ? notFound : s.first();
+                }
+            }
+            return cur.first;
+        }
+        if (coll instanceof PersistentList.EmptyList) return notFound;
         ISeq s = seq(coll);
         for (int i = 0; i <= n && s != null; i++, s = s.next()) {
             if (i == n) return s.first();

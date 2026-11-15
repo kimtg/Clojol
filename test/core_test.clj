@@ -729,6 +729,61 @@
       (is (= orig ti-fib)))
     (is (= 21 (ti-fib 8)))))
 
+(def untyped-vec-fixture (vec (range 128)))
+(def untyped-map-fixture (zipmap (range 64) (range 64)))
+
+(deftest collection-jit-and-fast-paths-test
+  ;; Regression test for BytecodeJIT RT.assoc descriptor (previously threw NoSuchMethodError)
+  (let [update-vec (fn [v n]
+                     (loop [i 0 acc v]
+                       (if (< i n)
+                         (recur (inc i) (assoc acc i (* i 2)))
+                         acc)))
+        update-map (fn [m n]
+                     (loop [i 0 acc m]
+                       (if (< i n)
+                         (recur (inc i) (assoc acc i (+ i 100)))
+                         acc)))
+        dissoc-map (fn [m n]
+                     (loop [i 0 acc m]
+                       (if (< i n)
+                         (recur (inc i) (dissoc acc i))
+                         acc)))
+        conj-list (fn [n]
+                    (loop [i 0 xs '()]
+                      (if (< i n)
+                        (recur (inc i) (conj xs i))
+                        xs)))]
+    ;; Warm up enough iterations to trigger Tier-1 BytecodeJIT compilation
+    (dotimes [_ 200]
+      (let [v2 (update-vec untyped-vec-fixture 64)]
+        (is (= 126 (nth v2 63))))
+      (let [m2 (update-map untyped-map-fixture 32)]
+        (is (= 131 (get m2 31))))
+      (let [m3 (dissoc-map untyped-map-fixture 32)]
+        (is (= 32 (count m3)))
+        (is (nil? (get m3 0)))))
+    (let [xs (conj-list 100)]
+      (is (list? xs))
+      (is (counted? xs))
+      (is (= 100 (count xs)))
+      (is (= 99 (first xs)))
+      (is (= 0 (nth xs 99)))
+      (is (= :nf (nth xs 100 :nf)))
+      (is (= 4950 (reduce + xs)))
+      (is (= 4950 (reduce + 0 xs)))
+      (is (= (range 100) (reverse xs))))
+    (let [v (vec (range 100))
+          sv (subvec v 10 90)]
+      (is (= 4950 (reduce + v)))
+      (is (= 3960 (reduce + sv)))
+      (is (= (mapv inc (range 100)) (mapv inc v)))
+      (is (= (filterv even? (range 100)) (filterv even? v)))
+      (is (= (mapv inc (range 10 90)) (mapv inc sv)))
+      (is (= (filterv odd? (range 10 90)) (filterv odd? sv)))
+      (is (= (reverse (range 100)) (reverse v)))
+      (is (= {0 1 2 3} (into {} [[0 1] [2 3]]))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

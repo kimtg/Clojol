@@ -3,10 +3,10 @@ package cljl.lang;
 import cljl.RT;
 import java.util.*;
 
-public final class PersistentList extends ASeq implements Counted {
-    private final Object first;
-    private final ISeq rest;
-    private final int count;
+public final class PersistentList extends ASeq implements IPersistentList {
+    public final Object first;
+    public final ISeq rest;
+    public final int count;
 
     public static final EmptyList EMPTY = new EmptyList(null);
 
@@ -58,6 +58,7 @@ public final class PersistentList extends ASeq implements Counted {
     @Override
     public ISeq next() {
         if (count == 1) return null;
+        if (rest instanceof PersistentList) return rest;
         return rest != null ? rest.seq() : null;
     }
 
@@ -67,7 +68,7 @@ public final class PersistentList extends ASeq implements Counted {
     }
 
     @Override
-    public ISeq cons(Object o) {
+    public PersistentList cons(Object o) {
         return new PersistentList(meta, o, this, count + 1);
     }
 
@@ -86,7 +87,7 @@ public final class PersistentList extends ASeq implements Counted {
         return rest;
     }
 
-    public static final class EmptyList extends ASeq implements Counted {
+    public static final class EmptyList extends ASeq implements IPersistentList {
         public EmptyList(PersistentHashMap meta) {
             super(meta);
         }
@@ -99,7 +100,7 @@ public final class PersistentList extends ASeq implements Counted {
         @Override public boolean isEmpty() { return true; }
 
         @Override
-        public ISeq cons(Object o) {
+        public PersistentList cons(Object o) {
             return new PersistentList(meta, o, null, 1);
         }
 

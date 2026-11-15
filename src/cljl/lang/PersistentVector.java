@@ -86,8 +86,8 @@ public final class PersistentVector extends Fn
     }
 
     public Object[] arrayFor(int i) {
-        if (i >= 0 && i < cnt) {
-            if (i >= tailoff()) return tail;
+        if (Integer.compareUnsigned(i, cnt) < 0) {
+            if (i >= cnt - tail.length) return tail;
             Node node = root;
             for (int level = shift; level > 0; level -= 5) {
                 node = (Node) node.array[(i >>> level) & 0x01f];
@@ -103,15 +103,14 @@ public final class PersistentVector extends Fn
     }
 
     public Object nth(int i, Object notFound) {
-        if (i >= 0 && i < cnt) return nth(i);
+        if (Integer.compareUnsigned(i, cnt) < 0) return nth(i);
         return notFound;
     }
 
     public PersistentVector assocN(int i, Object val) {
-        if (i >= 0 && i < cnt) {
-            if (i >= tailoff()) {
-                Object[] newTail = new Object[tail.length];
-                System.arraycopy(tail, 0, newTail, 0, tail.length);
+        if (Integer.compareUnsigned(i, cnt) < 0) {
+            if (i >= cnt - tail.length) {
+                Object[] newTail = tail.clone();
                 newTail[i & 0x01f] = val;
                 return new PersistentVector(meta, cnt, shift, root, newTail);
             }
@@ -133,10 +132,11 @@ public final class PersistentVector extends Fn
     }
 
     public PersistentVector conj(Object val) {
-        if (cnt - tailoff() < 32) {
-            Object[] newTail = new Object[tail.length + 1];
-            System.arraycopy(tail, 0, newTail, 0, tail.length);
-            newTail[tail.length] = val;
+        int tailLen = tail.length;
+        if (tailLen < 32) {
+            Object[] newTail = new Object[tailLen + 1];
+            System.arraycopy(tail, 0, newTail, 0, tailLen);
+            newTail[tailLen] = val;
             return new PersistentVector(meta, cnt + 1, shift, root, newTail);
         }
         Node newRoot;
@@ -184,9 +184,10 @@ public final class PersistentVector extends Fn
     public PersistentVector pop() {
         if (cnt == 0) throw new IllegalStateException("Can't pop empty vector");
         if (cnt == 1) return EMPTY.withMeta(meta);
-        if (cnt - tailoff() > 1) {
-            Object[] newTail = new Object[tail.length - 1];
-            System.arraycopy(tail, 0, newTail, 0, newTail.length);
+        int tailLen = tail.length;
+        if (tailLen > 1) {
+            Object[] newTail = new Object[tailLen - 1];
+            System.arraycopy(tail, 0, newTail, 0, tailLen - 1);
             return new PersistentVector(meta, cnt - 1, shift, root, newTail);
         }
         Object[] newTail = arrayFor(cnt - 2);
@@ -800,7 +801,7 @@ public final class PersistentVector extends Fn
         public TransientVector conj(Object val) {
             ensureEditable();
             int i = cnt;
-            if (i - tailoff() < 32) {
+            if (i == 0 || (i & 0x01f) != 0) {
                 tail[i & 0x01f] = val;
                 cnt++;
                 return this;

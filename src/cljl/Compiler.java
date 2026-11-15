@@ -764,6 +764,7 @@ public final class Compiler {
             case "assoc!" -> arity == 3 ? new AssocBangNode(args[0], args[1], args[2]) : null;
             case "conj" -> arity == 2 ? new ConjNode(args[0], args[1]) : null;
             case "assoc" -> arity == 3 ? new AssocNode(args[0], args[1], args[2]) : null;
+            case "dissoc" -> arity == 2 ? new DissocNode(args[0], args[1]) : null;
             case "first" -> arity == 1 ? new FirstNode(args[0]) : null;
             case "next" -> arity == 1 ? new NextNode(args[0]) : null;
             case "rest" -> arity == 1 ? new RestNode(args[0]) : null;
@@ -2788,6 +2789,17 @@ public final class Compiler {
         }
         @Override public Object eval(Object[] frame) {
             return RT.assoc(coll.eval(frame), key.eval(frame), val.eval(frame));
+        }
+    }
+
+    public static final class DissocNode extends Node {
+        public final Node coll, key;
+        public DissocNode(Node coll, Node key) {
+            this.coll = coll;
+            this.key = key;
+        }
+        @Override public Object eval(Object[] frame) {
+            return RT.dissoc(coll.eval(frame), key.eval(frame));
         }
     }
 

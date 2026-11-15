@@ -436,18 +436,28 @@ public final class PersistentHashMap extends Fn
 
         @Override
         public Object find(int shift, int hash, Object key, Object notFound) {
-            int bit = bitpos(hash, shift);
-            if ((bitmap & bit) == 0) return notFound;
-            int idx = index(bit);
-            Object keyOrNull = array[2 * idx];
-            Object valOrNode = array[2 * idx + 1];
-            if (keyOrNull == null) {
-                return ((INode) valOrNode).find(shift + 5, hash, key, notFound);
+            BitmapIndexedNode node = this;
+            while (true) {
+                int bit = bitpos(hash, shift);
+                int bitmap = node.bitmap;
+                if ((bitmap & bit) == 0) return notFound;
+                int idx = Integer.bitCount(bitmap & (bit - 1));
+                Object[] arr = node.array;
+                Object keyOrNull = arr[2 * idx];
+                Object valOrNode = arr[2 * idx + 1];
+                if (keyOrNull == null) {
+                    if (valOrNode instanceof BitmapIndexedNode nextNode) {
+                        node = nextNode;
+                        shift += 5;
+                        continue;
+                    }
+                    return ((INode) valOrNode).find(shift + 5, hash, key, notFound);
+                }
+                if (RT.equiv(key, keyOrNull)) {
+                    return valOrNode;
+                }
+                return notFound;
             }
-            if (RT.equiv(key, keyOrNull)) {
-                return valOrNode;
-            }
-            return notFound;
         }
 
         @Override

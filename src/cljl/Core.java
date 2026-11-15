@@ -504,13 +504,36 @@ public final class Core {
         def(ns, "mapv", Fn.ofVarargs("mapv", args -> {
             if (args.length < 2) throw new IllegalArgumentException("mapv requires at least 2 args");
             Fn f = (Fn) args[0];
-            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
             if (args.length == 2) {
-                for (ISeq s = RT.seq(args[1]); s != null; s = s.next()) {
+                Object coll = args[1];
+                if (coll instanceof PersistentVector pv) {
+                    return mapvVectorRange(f, pv, 0, pv.cnt);
+                }
+                if (coll instanceof PersistentVector.SubVec sv) {
+                    return mapvVectorRange(f, sv.v, sv.start, sv.end);
+                }
+                if (coll instanceof PersistentList.EmptyList || coll == null) {
+                    return PersistentVector.EMPTY;
+                }
+                PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
+                if (coll instanceof PersistentList pl) {
+                    PersistentList cur = pl;
+                    while (true) {
+                        tv = tv.conj(f.invoke(cur.first));
+                        if (cur.rest instanceof PersistentList nextPl) {
+                            cur = nextPl;
+                        } else {
+                            for (ISeq s = cur.next(); s != null; s = s.next()) tv = tv.conj(f.invoke(s.first()));
+                            return tv.persistent();
+                        }
+                    }
+                }
+                for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
                     tv = tv.conj(f.invoke(s.first()));
                 }
                 return tv.persistent();
             }
+            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
             ISeq[] seqs = new ISeq[args.length - 1];
             for (int i = 0; i < seqs.length; i++) seqs[i] = RT.seq(args[i + 1]);
             Object[] callArgs = new Object[seqs.length];
@@ -541,7 +564,32 @@ public final class Core {
         def(ns, "remove", Fn.of2("remove", (pred, coll) -> filterSeq((Fn) pred, RT.seq(coll), true)));
         def(ns, "filterv", Fn.of2("filterv", (pred, coll) -> {
             Fn p = (Fn) pred;
+            if (coll instanceof PersistentVector pv) {
+                return filtervVectorRange(p, pv, 0, pv.cnt);
+            }
+            if (coll instanceof PersistentVector.SubVec sv) {
+                return filtervVectorRange(p, sv.v, sv.start, sv.end);
+            }
+            if (coll instanceof PersistentList.EmptyList || coll == null) {
+                return PersistentVector.EMPTY;
+            }
             PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
+            if (coll instanceof PersistentList pl) {
+                PersistentList cur = pl;
+                while (true) {
+                    Object item = cur.first;
+                    if (RT.truthy(p.invoke(item))) tv = tv.conj(item);
+                    if (cur.rest instanceof PersistentList nextPl) {
+                        cur = nextPl;
+                    } else {
+                        for (ISeq s = cur.next(); s != null; s = s.next()) {
+                            Object it = s.first();
+                            if (RT.truthy(p.invoke(it))) tv = tv.conj(it);
+                        }
+                        return tv.persistent();
+                    }
+                }
+            }
             for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
                 Object item = s.first();
                 if (RT.truthy(p.invoke(item))) tv = tv.conj(item);
@@ -913,7 +961,92 @@ public final class Core {
         }));
     }
 
+    private static PersistentVector mapvVectorRange(Fn f, PersistentVector pv, int start, int end) {
+        PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
+        int i = start;
+        while (i < end) {
+            Object[] chunk = pv.arrayFor(i);
+            int offset = i & 0x01f;
+            int limit = Math.min(chunk.length, offset + (end - i));
+            for (int j = offset; j < limit; j++) {
+                tv = tv.conj(f.invoke(chunk[j]));
+            }
+            i += (limit - offset);
+        }
+        return tv.persistent();
+    }
+
+    private static PersistentVector filtervVectorRange(Fn p, PersistentVector pv, int start, int end) {
+        PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
+        int i = start;
+        while (i < end) {
+            Object[] chunk = pv.arrayFor(i);
+            int offset = i & 0x01f;
+            int limit = Math.min(chunk.length, offset + (end - i));
+            for (int j = offset; j < limit; j++) {
+                Object item = chunk[j];
+                if (RT.truthy(p.invoke(item))) tv = tv.conj(item);
+            }
+            i += (limit - offset);
+        }
+        return tv.persistent();
+    }
+
+    private static Object reduceVectorRange(Fn f, Object acc, PersistentVector pv, int start, int end) {
+        int i = start;
+        while (i < end) {
+            Object[] chunk = pv.arrayFor(i);
+            int offset = i & 0x01f;
+            int limit = Math.min(chunk.length, offset + (end - i));
+            for (int j = offset; j < limit; j++) {
+                acc = f.invoke(acc, chunk[j]);
+                if (acc instanceof Reduced r) return r.deref();
+            }
+            i += (limit - offset);
+        }
+        return acc;
+    }
+
+    private static Object reduceList(Fn f, Object acc, PersistentList pl) {
+        PersistentList cur = pl;
+        while (true) {
+            acc = f.invoke(acc, cur.first);
+            if (acc instanceof Reduced r) return r.deref();
+            if (cur.rest instanceof PersistentList nextPl) {
+                cur = nextPl;
+            } else {
+                for (ISeq s = cur.next(); s != null; s = s.next()) {
+                    acc = f.invoke(acc, s.first());
+                    if (acc instanceof Reduced r) return r.deref();
+                }
+                return acc;
+            }
+        }
+    }
+
     private static Object reduce2(Fn f, Object coll) {
+        if (coll instanceof PersistentVector pv) {
+            if (pv.cnt == 0) return f.invoke();
+            return reduceVectorRange(f, pv.nth(0), pv, 1, pv.cnt);
+        }
+        if (coll instanceof PersistentVector.SubVec sv) {
+            if (sv.count() == 0) return f.invoke();
+            return reduceVectorRange(f, sv.nth(0), sv.v, sv.start + 1, sv.end);
+        }
+        if (coll instanceof PersistentList pl) {
+            Object acc = pl.first;
+            if (pl.rest instanceof PersistentList nextPl) {
+                return reduceList(f, acc, nextPl);
+            }
+            for (ISeq s = pl.next(); s != null; s = s.next()) {
+                acc = f.invoke(acc, s.first());
+                if (acc instanceof Reduced r) return r.deref();
+            }
+            return acc;
+        }
+        if (coll instanceof PersistentList.EmptyList) {
+            return f.invoke();
+        }
         ISeq s = RT.seq(coll);
         if (s == null) return f.invoke();
         Object acc = s.first();
@@ -927,14 +1060,19 @@ public final class Core {
     }
 
     private static Object reduce3(Fn f, Object init, Object coll) {
-        Object acc = init;
         if (coll instanceof PersistentVector pv) {
-            for (int i = 0; i < pv.cnt; i++) {
-                acc = f.invoke(acc, pv.nth(i));
-                if (acc instanceof Reduced r) return r.deref();
-            }
-            return acc;
+            return reduceVectorRange(f, init, pv, 0, pv.cnt);
         }
+        if (coll instanceof PersistentVector.SubVec sv) {
+            return reduceVectorRange(f, init, sv.v, sv.start, sv.end);
+        }
+        if (coll instanceof PersistentList pl) {
+            return reduceList(f, init, pl);
+        }
+        if (coll instanceof PersistentList.EmptyList || coll == null) {
+            return init;
+        }
+        Object acc = init;
         for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
             acc = f.invoke(acc, s.first());
             if (acc instanceof Reduced r) return r.deref();
@@ -1155,21 +1293,36 @@ public final class Core {
                 (m, ks) -> getIn(m, ks, null),
                 Core::getIn));
 
-        def(ns, "assoc", Fn.ofVarargs("assoc", args -> {
-            Object coll = args[0];
-            for (int i = 1; i < args.length; i += 2) {
-                coll = RT.assoc(coll, args[i], args[i + 1]);
+        def(ns, "assoc", new Fn.NamedFn("assoc") {
+            @Override public Object invoke(Object coll) { return coll; }
+            @Override public Object invoke(Object coll, Object k, Object v) { return RT.assoc(coll, k, v); }
+            @Override public Object invokeVarargs(Object[] args) {
+                if (args.length < 1) throw arityError(args.length);
+                Object coll = args[0];
+                if ((args.length & 1) == 0) throw new IllegalArgumentException("assoc requires even number of key/value args");
+                for (int i = 1; i < args.length; i += 2) {
+                    coll = RT.assoc(coll, args[i], args[i + 1]);
+                }
+                return coll;
             }
-            return coll;
-        }));
+        });
 
         def(ns, "assoc-in", Fn.of3("assoc-in", (m, ks, v) -> assocIn(m, RT.seq(ks), v)));
 
-        def(ns, "dissoc", Fn.ofVarargs("dissoc", args -> {
-            Object coll = args[0];
-            for (int i = 1; i < args.length; i++) coll = RT.dissoc(coll, args[i]);
-            return coll;
-        }));
+        def(ns, "dissoc", new Fn.NamedFn("dissoc") {
+            @Override public Object invoke(Object coll) { return coll; }
+            @Override public Object invoke(Object coll, Object k) { return RT.dissoc(coll, k); }
+            @Override public Object invoke(Object coll, Object k1, Object k2) { return RT.dissoc(RT.dissoc(coll, k1), k2); }
+            @Override public Object invoke(Object coll, Object k1, Object k2, Object k3) {
+                return RT.dissoc(RT.dissoc(RT.dissoc(coll, k1), k2), k3);
+            }
+            @Override public Object invokeVarargs(Object[] args) {
+                if (args.length < 1) throw arityError(args.length);
+                Object coll = args[0];
+                for (int i = 1; i < args.length; i++) coll = RT.dissoc(coll, args[i]);
+                return coll;
+            }
+        });
 
         def(ns, "update", Fn.ofVarargs("update", args -> {
             Object m = args[0];
@@ -1317,6 +1470,41 @@ public final class Core {
         }));
 
         def(ns, "reverse", Fn.of1("reverse", coll -> {
+            if (coll instanceof PersistentList pl) {
+                PersistentList ret = new PersistentList(null, pl.first, null, 1);
+                if (pl.rest instanceof PersistentList nextPl) {
+                    PersistentList cur = nextPl;
+                    while (true) {
+                        ret = ret.cons(cur.first);
+                        if (cur.rest instanceof PersistentList n) {
+                            cur = n;
+                        } else {
+                            ISeq rem = cur.next();
+                            if (rem == null) return ret;
+                            ISeq sRet = ret;
+                            for (; rem != null; rem = rem.next()) sRet = sRet.cons(rem.first());
+                            return sRet;
+                        }
+                    }
+                }
+                ISeq sRet = ret;
+                for (ISeq rem = pl.next(); rem != null; rem = rem.next()) sRet = sRet.cons(rem.first());
+                return sRet;
+            }
+            if (coll instanceof PersistentVector pv) {
+                if (pv.cnt == 0) return PersistentList.EMPTY;
+                PersistentList ret = null;
+                int i = 0;
+                while (i < pv.cnt) {
+                    Object[] chunk = pv.arrayFor(i);
+                    int limit = Math.min(chunk.length, pv.cnt - i);
+                    for (int j = 0; j < limit; j++) {
+                        ret = ret == null ? new PersistentList(null, chunk[j], null, 1) : ret.cons(chunk[j]);
+                    }
+                    i += limit;
+                }
+                return ret;
+            }
             ISeq ret = PersistentList.EMPTY;
             for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
                 ret = ret.cons(s.first());
@@ -1458,8 +1646,23 @@ public final class Core {
         if (xform == null) {
             if (to instanceof PersistentVector pv) {
                 PersistentVector.TransientVector tv = pv.asTransient();
+                if (from instanceof PersistentVector src) {
+                    int i = 0;
+                    while (i < src.cnt) {
+                        Object[] chunk = src.arrayFor(i);
+                        int limit = Math.min(chunk.length, src.cnt - i);
+                        for (int j = 0; j < limit; j++) tv = tv.conj(chunk[j]);
+                        i += limit;
+                    }
+                    return tv.persistent();
+                }
                 for (ISeq s = RT.seq(from); s != null; s = s.next()) tv = tv.conj(s.first());
                 return tv.persistent();
+            }
+            if (to instanceof PersistentHashMap pm) {
+                PersistentHashMap.TransientHashMap tm = pm.asTransient();
+                for (ISeq s = RT.seq(from); s != null; s = s.next()) tm = (PersistentHashMap.TransientHashMap) RT.conjBang(tm, s.first());
+                return tm.persistent();
             }
             if (to instanceof PersistentHashSet ps) {
                 PersistentHashSet.TransientHashSet ts = ps.asTransient();

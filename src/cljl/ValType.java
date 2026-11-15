@@ -1,5 +1,6 @@
 package cljl;
 
+import cljl.lang.IPersistentList;
 import java.util.Objects;
 
 /**
@@ -175,6 +176,9 @@ public final class ValType {
             boolean nn = a.nonNull && b.nonNull;
             if (ca.isAssignableFrom(cb)) return ref(ca, nn);
             if (cb.isAssignableFrom(ca)) return ref(cb, nn);
+            if (IPersistentList.class.isAssignableFrom(ca) && IPersistentList.class.isAssignableFrom(cb)) {
+                return ref(IPersistentList.class, nn);
+            }
             Class<?> sup = ca.getSuperclass();
             while (sup != null && sup != Object.class) {
                 if (sup.isAssignableFrom(cb)) return ref(sup, nn);
