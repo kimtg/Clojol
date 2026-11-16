@@ -2,6 +2,8 @@
 
 A high-performance, fast-startup implementation of Clojure in pure Java (Java 21+), with zero external dependencies and broad [Clojure Cheatsheet](https://clojure.org/api/cheatsheet) compatibility.
 
+ClojureLite is an independent, clean-room implementation of the Clojure language and is not affiliated with or endorsed by Rich Hickey or Nubank.
+
 ## Why ClojureLite?
 
 Standard Clojure on the JVM parses and compiles thousands of lines of `clojure/core.clj` on every cold start. **ClojureLite** eliminates that bootstrap penalty while preserving idiomatic Clojure semantics:
