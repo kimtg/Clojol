@@ -30,6 +30,18 @@ Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measu
 
 With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns and dispatches guarded self-recursive calls directly to `invokePrim_J_J` with no user type hints required—running `fib(40)` ~1.9–2.1x faster than official Clojure (matching raw Java `Math.addExact`/`subtractExact` speed) while reducing total wall-clock execution time by ~62%. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) also drop from ~8.74 ms to ~0.56–0.76 ms.
 
+### AppCDS Cold Startup Impact
+
+Cold startup + eval (`java ... -jar build/cljl.jar -Srepro -Sdeps "{}" -e "(+ 1 2)"`) measured across 8 runs on OpenJDK 25.0.4.1 (Windows):
+
+| Mode | Min | Median | Average |
+| :--- | :---: | :---: | :---: |
+| **With AppCDS (`-XX:SharedArchiveFile=build/cljl.jsa`)** | 143.0 ms | **148.6 ms** | 149.5 ms |
+| **Without AppCDS (default JDK CDS only)** | 259.5 ms | **275.9 ms** | 274.4 ms |
+| **No CDS (`-Xshare:off`)** | 275.2 ms | **287.5 ms** | 301.8 ms |
+
+AppCDS cuts cold startup + eval time by **~127 ms (~46% / ~1.85x faster)** by memory-mapping all **1,828** startup classes (`Main`, `RT`, `Core`, `CoreExtras`, `Compiler`, `Reader`, `Deps`, `cljl.lang.*`, and JDK classes) directly from `build/cljl.jsa` with **0** classes loaded from `cljl.jar`. Note that `-J` / `:jvm-opts` relaunches and lazily loaded `StdLib` namespaces fall back to loading from `cljl.jar`.
+
 ## Requirements
 
 - **JDK 21 or newer** (`javac`, `java`, `jar` on `PATH`) — tested on OpenJDK 25.0.4.1.
@@ -41,7 +53,7 @@ Both `cljl.bat` (Windows) and `cljl.sh` (Linux/macOS) automatically compile `src
 ### Interactive REPL
 
 ```bash
-# Run the jar file
+# Run the jar file without AppCDS
 java -jar build/cljl.jar
 
 # Windows
