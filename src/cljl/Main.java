@@ -348,7 +348,6 @@ public final class Main {
         Var ve = RT.STAR_E;
 
         System.out.println("Clojol " + VERSION + " (Java " + System.getProperty("java.version") + ")");
-        System.out.println("Type :quit or EOF to exit.");
 
         BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         StringBuilder buf = new StringBuilder();
@@ -372,9 +371,6 @@ public final class Main {
                 }
 
                 String trimmed = line.trim();
-                if (buf.isEmpty() && (":quit".equals(trimmed) || ":exit".equals(trimmed))) {
-                    break;
-                }
                 if (buf.isEmpty() && trimmed.isEmpty()) {
                     continue;
                 }
@@ -603,7 +599,7 @@ public final class Main {
     private static void printHelp() {
         System.out.println("Version: " + Deps.CLJ_TOOLS_VERSION + " (Clojol " + VERSION + ")");
         System.out.println();
-        System.out.println("You use the Clojure tools ('cljl' / 'clj' or 'clojure') to run Clojure programs");
+        System.out.println("You use the Clojure tools ('cljl') to run Clojure programs");
         System.out.println("on the JVM, e.g. to start a REPL or invoke a specific function with data.");
         System.out.println();
         System.out.println("Usage:");

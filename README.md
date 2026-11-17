@@ -49,7 +49,7 @@ chmod +x cljl.sh
 ./cljl.sh
 ```
 
-Supports multi-line balanced forms, `*1`, `*2`, `*3`, `*e`, and `:quit` / `:exit` / EOF.
+Supports multi-line balanced forms, `*1`, `*2`, `*3`, `*e`, and EOF.
 
 ### Evaluate an Expression
 

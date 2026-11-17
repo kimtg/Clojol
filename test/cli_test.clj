@@ -174,10 +174,6 @@
           (let [res (run-cljl {:dir tmp} "(println (+ 10 20))\n" ["-"])]
             (is (= 0 (:exit res)))
             (is (= "30" (str/trim (:out res))))))
-        (testing "-r / --repl reads from stdin and exits on :quit"
-          (let [res (run-cljl {:dir tmp} "(+ 100 23)\n:quit\n" ["-i" (.toString init-script) "-r"])]
-            (is (= 0 (:exit res)) (:err res))
-            (is (str/includes? (:out res) "123"))))
         (testing "--report targets: none, stderr, file"
           (let [res-none (run-cljl {:dir tmp} ["--report" "none" "-e" "(throw (ex-info \"boom-none\" {}))"])]
             (is (not= 0 (:exit res-none)))
