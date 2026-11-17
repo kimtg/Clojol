@@ -6,7 +6,7 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 
 /**
- * Base functional class for all callable objects in ClojureLite (functions, macros,
+ * Base functional class for all callable objects in Clojol (functions, macros,
  * keywords, symbols, vectors, maps, sets, vars, multimethods).
  *
  * Provides arity-specialized invoke() overloads (0 to 4 args) to eliminate Object[]

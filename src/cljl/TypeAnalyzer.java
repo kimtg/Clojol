@@ -6,7 +6,7 @@ import java.lang.reflect.*;
 import java.util.*;
 
 /**
- * Sound forward dataflow and fixpoint type analyzer for ClojureLite ASTs.
+ * Sound forward dataflow and fixpoint type analyzer for Clojol ASTs.
  *
  * Infers ValType for every AST node and local slot, propagates :tag hints,
  * resolves static/instance Java interop targets when types are statically known,

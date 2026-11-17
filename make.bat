@@ -31,7 +31,7 @@ exit /b 0
 
 :do_clean
 if exist "%BUILD_DIR%" (
-    echo [ClojureLite] Cleaning build directory...
+    echo [Clojol] Cleaning build directory...
     rmdir /s /q "%BUILD_DIR%"
 )
 goto :eof
@@ -41,7 +41,7 @@ call :do_build
 exit /b %ERRORLEVEL%
 
 :do_build
-echo [ClojureLite] Compiling Java sources...
+echo [Clojol] Compiling Java sources...
 if not exist "%CLASSES_DIR%" mkdir "%CLASSES_DIR%"
 setlocal enabledelayedexpansion
 (for /r "%CLJL_HOME%\src" %%f in (*.java) do @(
@@ -52,14 +52,14 @@ endlocal
 javac --release 21 -d "%CLASSES_DIR%" @"%BUILD_DIR%\sources.txt"
 if errorlevel 1 exit /b 1
 
-echo [ClojureLite] Packaging %JAR%...
+echo [Clojol] Packaging %JAR%...
 jar --create --file "%JAR%" --main-class cljl.Main -C "%CLASSES_DIR%" .
 if errorlevel 1 exit /b 1
 
-echo [ClojureLite] Generating AppCDS archive %JSA%...
+echo [Clojol] Generating AppCDS archive %JSA%...
 if exist "%JSA%" del /q "%JSA%"
 java -XX:ArchiveClassesAtExit="%JSA%" -jar "%JAR%" -Srepro -Sdeps "{}" -e "(+ 1 2)" >nul 2>&1
-echo [ClojureLite] Build complete.
+echo [Clojol] Build complete.
 exit /b 0
 
 :do_build_if_needed
@@ -78,7 +78,7 @@ exit /b 0
 :test
 call :do_build_if_needed
 if errorlevel 1 exit /b 1
-echo [ClojureLite] Running tests (strict JIT)...
+echo [Clojol] Running tests (strict JIT)...
 set "JSA_OPT="
 if exist "%JSA%" set JSA_OPT=-XX:SharedArchiveFile="%JSA%"
 java %CLJL_OPTS% -Dcljl.jit.strict=true %JSA_OPT% -jar "%JAR%" "%CLJL_HOME%\test\core_test.clj"
@@ -91,7 +91,7 @@ exit /b %ERRORLEVEL%
 :bench
 call :do_build_if_needed
 if errorlevel 1 exit /b 1
-echo [ClojureLite] Running benchmarks...
+echo [Clojol] Running benchmarks...
 set "JSA_OPT="
 if exist "%JSA%" set JSA_OPT=-XX:SharedArchiveFile="%JSA%"
 java %CLJL_OPTS% %JSA_OPT% -jar "%JAR%" "%CLJL_HOME%\test\bench.clj"

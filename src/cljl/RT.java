@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 /**
- * Runtime core utilities for ClojureLite: truthiness, value equivalence, hashing,
+ * Runtime core utilities for Clojol: truthiness, value equivalence, hashing,
  * sequence operations, collection polymorphism, and printing.
  */
 public final class RT {
@@ -50,7 +50,7 @@ public final class RT {
                     Keyword.intern("major"), 1L,
                     Keyword.intern("minor"), 12L,
                     Keyword.intern("incremental"), 0L,
-                    Keyword.intern("qualifier"), "lite"
+                    Keyword.intern("qualifier"), "clojol"
             )).setDynamic();
 
     private static String normalizeInst(String s) {

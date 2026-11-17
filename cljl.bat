@@ -13,7 +13,7 @@ if not exist "%JAR%" (
 )
 
 if "%NEED_BUILD%"=="1" (
-    echo [ClojureLite] Building cljl.jar... 1>&2
+    echo [Clojol] Building cljl.jar... 1>&2
     if not exist "%CLJL_HOME%\build\classes" mkdir "%CLJL_HOME%\build\classes"
     setlocal enabledelayedexpansion
     (for /r "%CLJL_HOME%\src" %%f in (*.java) do @(

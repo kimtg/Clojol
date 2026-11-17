@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
 /**
  * Direct Java-compiled clojure.core standard library.
  * Populates clojure.core without parsing bootstrap Clojure scripts at startup,
- * giving ClojureLite sub-100ms cold startup time.
+ * giving Clojol sub-100ms cold startup time.
  */
 public final class Core {
 
@@ -2065,7 +2065,7 @@ public final class Core {
             URLConnection conn = current.openConnection();
             if (conn instanceof HttpURLConnection http) {
                 http.setInstanceFollowRedirects(true);
-                http.setRequestProperty("User-Agent", "ClojureLite/0.1");
+                http.setRequestProperty("User-Agent", "Clojol/0.1");
                 int status = http.getResponseCode();
                 if (status == HttpURLConnection.HTTP_MOVED_TEMP
                         || status == HttpURLConnection.HTTP_MOVED_PERM

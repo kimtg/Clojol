@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Dynamic JVM class/interface/record/type/reify/proxy factory for ClojureLite.
+ * Dynamic JVM class/interface/record/type/reify/proxy factory for Clojol.
  * Generates v49.0 JVM classfiles in memory with zero external dependencies.
  */
 public final class TypeFactory {

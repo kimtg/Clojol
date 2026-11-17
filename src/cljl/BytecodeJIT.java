@@ -13,7 +13,7 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Tier-1 Type-Specializing JVM Bytecode JIT Compiler for ClojureLite.
+ * Tier-1 Type-Specializing JVM Bytecode JIT Compiler for Clojol.
  *
  * Compiles hot CompiledFn instances directly to JVM classfile (v49.0) bytecode at runtime
  * with zero external dependencies, using TypeAnalyzer's fixpoint type inference and :tag hints

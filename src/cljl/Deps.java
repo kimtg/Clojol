@@ -23,7 +23,7 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import org.w3c.dom.*;
 
 /**
- * Pure-Java Clojure CLI tools / deps.edn / basis / exec (-X / -T) engine for ClojureLite.
+ * Pure-Java Clojure CLI tools / deps.edn / basis / exec (-X / -T) engine for Clojol.
  * Implements standard `clj` & `deps.clj` flags, `.cpcache` caching, `:deps` alias tools,
  * local/Maven/gitlib dependency resolution, and dynamic classpath/JVM execution.
  */
@@ -622,7 +622,7 @@ public final class Deps {
     }
 
     public static void printVerbose(BasisResult basis, CliOptions opts) {
-        System.out.println("version      = ClojureLite " + Main.VERSION + " (clj " + CLJ_TOOLS_VERSION + ")");
+        System.out.println("version      = Clojol " + Main.VERSION + " (clj " + CLJ_TOOLS_VERSION + ")");
         System.out.println("install_dir  = " + getInstallDir());
         System.out.println("config_dir   = " + getConfigDir());
         System.out.println("config_paths = " + String.join(" ", basis.configFiles));
@@ -1629,7 +1629,7 @@ public final class Deps {
 
         Map<Object, Object> depsAlias = new LinkedHashMap<>();
         depsAlias.put(Keyword.intern("ns-default"), Symbol.intern("clojure.tools.deps.cli.api"));
-        depsAlias.put(Keyword.intern("doc"), "ClojureLite built-in :deps CLI tools");
+        depsAlias.put(Keyword.intern("doc"), "Clojol built-in :deps CLI tools");
 
         Map<Object, Object> aliases = new LinkedHashMap<>();
         aliases.put(Keyword.intern("deps"), toPersistentMap(depsAlias));

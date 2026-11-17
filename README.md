@@ -1,10 +1,12 @@
-# ClojureLite (`cljl`)
+# Clojol (`cljl`)
 
 A high-performance, fast-startup implementation of Clojure in pure Java (Java 21+), with zero external dependencies and broad [Clojure Cheatsheet](https://clojure.org/api/cheatsheet) compatibility.
 
-## Why ClojureLite?
+ClojureLite is an independent, clean-room implementation of the Clojure language and is not affiliated with or endorsed by Rich Hickey or Nubank.
 
-Standard Clojure on the JVM parses and compiles thousands of lines of `clojure/core.clj` on every cold start. **ClojureLite** eliminates that bootstrap penalty while preserving idiomatic Clojure semantics:
+## Why Clojol?
+
+Standard Clojure on the JVM parses and compiles thousands of lines of `clojure/core.clj` on every cold start. **Clojol** eliminates that bootstrap penalty while preserving idiomatic Clojure semantics:
 
 - **Direct Java-compiled `clojure.core`**: Core functions and macros (`Core.java`, `CoreExtras.java`) are implemented directly in Java and registered without parsing bootstrap `.clj` files at startup.
 - **Lazy Standard Library Loading**: Standard and contrib namespaces (`StdLib.java`, `StdLibMore.java`) initialize only when required or referenced so unused namespaces add zero startup cost.
@@ -16,9 +18,9 @@ Standard Clojure on the JVM parses and compiles thousands of lines of `clojure/c
 
 ## Performance (`fib(40)` vs. Official Clojure)
 
-Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measured on OpenJDK 21.0.13 (Temurin, Linux x86_64) comparing **ClojureLite** (`./cljl.sh test/fib_bench.clj`, AppCDS + type-inferred Tier-1 `BytecodeJIT`) against **Clojure 1.12.0** (`clojure.main test/fib_bench.clj`):
+Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measured on OpenJDK 21.0.13 (Temurin, Linux x86_64) comparing **Clojol** (`./cljl.sh test/fib_bench.clj`, AppCDS + type-inferred Tier-1 `BytecodeJIT`) against **Clojure 1.12.0** (`clojure.main test/fib_bench.clj`):
 
-| Metric | ClojureLite (`cljl`) | Clojure 1.12.0 | Speedup |
+| Metric | Clojol (`cljl`) | Clojure 1.12.0 | Speedup |
 | :--- | :---: | :---: | :---: |
 | `fib(40)` Run 1 (first call) | **358.2 ms** | 738.5 ms | 2.06x faster |
 | `fib(40)` Run 2 (warm) | **328.3 ms** | 618.2 ms | 1.88x faster |
@@ -26,7 +28,7 @@ Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measu
 | Total wall time (3 runs + JVM startup) | **1.15 s** | 3.03 s | 2.63x faster |
 | Cold startup + eval (`-e "(+ 1 2)"`) | **0.11 s** | 0.54 s | 4.9x faster |
 
-With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), ClojureLite infers unboxed `long` parameters/returns and dispatches guarded self-recursive calls directly to `invokePrim_J_J` with no user type hints required—running `fib(40)` ~1.9–2.1x faster than official Clojure (matching raw Java `Math.addExact`/`subtractExact` speed) while reducing total wall-clock execution time by ~62%. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) also drop from ~8.74 ms to ~0.56–0.76 ms.
+With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns and dispatches guarded self-recursive calls directly to `invokePrim_J_J` with no user type hints required—running `fib(40)` ~1.9–2.1x faster than official Clojure (matching raw Java `Math.addExact`/`subtractExact` speed) while reducing total wall-clock execution time by ~62%. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) also drop from ~8.74 ms to ~0.56–0.76 ms.
 
 ## Requirements
 
@@ -95,7 +97,7 @@ Script arguments are bound to `*command-line-args*`. Pass `-` to read and execut
 | | `-Strace` | Write `trace.edn` tracing dependency expansion and basis |
 | | `-Scommand CMD` | Invoke custom shell command with `{{classpath}}` and `{{main-opts}}` substitutions |
 | | `--` | Stop parsing `clj` options and pass remaining args to `clojure.main` |
-| | `-version`, `--version` | Print ClojureLite & Clojure CLI version and exit |
+| | `-version`, `--version` | Print Clojol & Clojure CLI version and exit |
 | **Init (`clojure.main`)** | `-i`, `--init PATH` | Load a Clojure file or classpath resource |
 | | `-e`, `--eval EXPR` | Evaluate exprs in string and print non-nil values |
 | | `--report TARGET` | Report uncaught exceptions to `"file"` (default), `"stderr"`, or `"none"` |
@@ -141,7 +143,7 @@ Environment variables `$CLJ_CONFIG`, `$CLJ_CACHE`, `$M2_REPO`, `$GITLIBS`, and `
 ## Project Structure
 
 ```text
-ClojureLite/
+Clojol/
 ├── cljl.bat                 # Windows launcher (auto-builds & uses AppCDS)
 ├── cljl.sh                  # Unix/macOS launcher (auto-builds & uses AppCDS + -J pre-parsing)
 ├── make.bat                 # Windows build script (build, rebuild, clean, test, bench)

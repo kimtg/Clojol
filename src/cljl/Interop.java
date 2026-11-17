@@ -5,7 +5,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * High-speed cached Java reflection and interop for ClojureLite.
+ * High-speed cached Java reflection and interop for Clojol.
  */
 public final class Interop {
 

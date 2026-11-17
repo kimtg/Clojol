@@ -6,7 +6,7 @@ import java.math.BigInteger;
 import java.math.MathContext;
 
 /**
- * High-speed numeric tower for ClojureLite supporting Long, Double, BigInteger,
+ * High-speed numeric tower for Clojol supporting Long, Double, BigInteger,
  * BigDecimal, and Ratio with fast-paths for 64-bit Long and Double.
  */
 public final class Numbers {

@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Optimizing Analyzer, Macroexpander, Destructuring Compiler, and Specialized AST
- * Execution Engine for ClojureLite.
+ * Execution Engine for Clojol.
  *
  * Key optimizations:
  * 1. Flat lexical slot addressing: all fn/let/loop/catch locals are mapped to integer

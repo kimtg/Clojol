@@ -31,7 +31,7 @@
         (recur (inc i) (+ acc (get m i)))
         acc))))
 
-(println "--- ClojureLite Benchmarks ---")
+(println "--- Clojol Benchmarks ---")
 (print "sum-loop(1,000,000) x3: ")
 (dotimes [_ 3] (time (sum-loop 1000000)))
 

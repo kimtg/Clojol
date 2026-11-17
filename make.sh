@@ -16,24 +16,24 @@ JSA="$BUILD_DIR/cljl.jsa"
 
 do_clean() {
   if [ -d "$BUILD_DIR" ]; then
-    echo "[ClojureLite] Cleaning build directory..."
+    echo "[Clojol] Cleaning build directory..."
     rm -rf "$BUILD_DIR"
   fi
 }
 
 do_build() {
-  echo "[ClojureLite] Compiling Java sources..."
+  echo "[Clojol] Compiling Java sources..."
   mkdir -p "$CLASSES_DIR"
   find "$CLJL_HOME/src" -name '*.java' > "$BUILD_DIR/sources.txt"
   javac --release 21 -d "$CLASSES_DIR" @"$BUILD_DIR/sources.txt"
 
-  echo "[ClojureLite] Packaging $JAR..."
+  echo "[Clojol] Packaging $JAR..."
   jar --create --file "$JAR" --main-class cljl.Main -C "$CLASSES_DIR" .
 
-  echo "[ClojureLite] Generating AppCDS archive $JSA..."
+  echo "[Clojol] Generating AppCDS archive $JSA..."
   rm -f "$JSA"
   java -XX:ArchiveClassesAtExit="$JSA" -jar "$JAR" -Srepro -Sdeps "{}" -e "(+ 1 2)" >/dev/null 2>&1 || true
-  echo "[ClojureLite] Build complete."
+  echo "[Clojol] Build complete."
 }
 
 do_build_if_needed() {
@@ -86,14 +86,14 @@ case "$CMD" in
     ;;
   test)
     do_build_if_needed
-    echo "[ClojureLite] Running tests (strict JIT)..."
+    echo "[Clojol] Running tests (strict JIT)..."
     run_cljl_strict "$CLJL_HOME/test/core_test.clj"
     run_cljl_strict "$CLJL_HOME/test/cheatsheet_test.clj"
     run_cljl_strict "$CLJL_HOME/test/cli_test.clj"
     ;;
   bench)
     do_build_if_needed
-    echo "[ClojureLite] Running benchmarks..."
+    echo "[Clojol] Running benchmarks..."
     run_cljl "$CLJL_HOME/test/bench.clj"
     ;;
   help|-h|--help)

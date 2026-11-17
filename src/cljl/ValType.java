@@ -4,7 +4,7 @@ import cljl.lang.IPersistentList;
 import java.util.Objects;
 
 /**
- * Compact lattice of inferred and hinted types for ClojureLite's compiler and BytecodeJIT.
+ * Compact lattice of inferred and hinted types for Clojol's compiler and BytecodeJIT.
  */
 public final class ValType {
 

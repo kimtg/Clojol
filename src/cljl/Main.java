@@ -13,7 +13,7 @@ import java.nio.file.Path;
 import java.util.*;
 
 /**
- * ClojureLite CLI, `clj`/`clojure` options engine, `clojure.main`, and Interactive REPL Entry Point.
+ * Clojol CLI, `clj`/`clojure` options engine, `clojure.main`, and Interactive REPL Entry Point.
  */
 public final class Main {
 
@@ -34,7 +34,7 @@ public final class Main {
         }
 
         if (opts.version) {
-            System.out.println("ClojureLite " + VERSION + " (Clojure CLI " + Deps.CLJ_TOOLS_VERSION
+            System.out.println("Clojol " + VERSION + " (Clojure CLI " + Deps.CLJ_TOOLS_VERSION
                     + ", Java " + System.getProperty("java.version") + ")");
             return;
         }
@@ -211,7 +211,7 @@ public final class Main {
             return;
         }
         if ("-v".equals(mainOpt) || "-version".equals(mainOpt) || "--version".equals(mainOpt)) {
-            System.out.println("ClojureLite " + VERSION + " (Clojure CLI " + Deps.CLJ_TOOLS_VERSION
+            System.out.println("Clojol " + VERSION + " (Clojure CLI " + Deps.CLJ_TOOLS_VERSION
                     + ", Java " + System.getProperty("java.version") + ")");
             return;
         }
@@ -347,7 +347,7 @@ public final class Main {
         Var v3 = RT.STAR_3;
         Var ve = RT.STAR_E;
 
-        System.out.println("ClojureLite " + VERSION + " (Java " + System.getProperty("java.version") + ")");
+        System.out.println("Clojol " + VERSION + " (Java " + System.getProperty("java.version") + ")");
         System.out.println("Type :quit or EOF to exit.");
 
         BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
@@ -601,7 +601,7 @@ public final class Main {
     }
 
     private static void printHelp() {
-        System.out.println("Version: " + Deps.CLJ_TOOLS_VERSION + " (ClojureLite " + VERSION + ")");
+        System.out.println("Version: " + Deps.CLJ_TOOLS_VERSION + " (Clojol " + VERSION + ")");
         System.out.println();
         System.out.println("You use the Clojure tools ('cljl' / 'clj' or 'clojure') to run Clojure programs");
         System.out.println("on the JVM, e.g. to start a REPL or invoke a specific function with data.");
