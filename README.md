@@ -41,6 +41,9 @@ Both `cljl.bat` (Windows) and `cljl.sh` (Linux/macOS) automatically compile `src
 ### Interactive REPL
 
 ```bash
+# Run the jar file
+java -jar build/cljl.jar
+
 # Windows
 .\cljl.bat
 
