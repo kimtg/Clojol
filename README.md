@@ -2,7 +2,7 @@
 
 A high-performance, fast-startup implementation of Clojure in pure Java (Java 21+), with zero external dependencies and broad [Clojure Cheatsheet](https://clojure.org/api/cheatsheet) compatibility.
 
-ClojureLite is an independent, clean-room implementation of the Clojure language and is not affiliated with or endorsed by Rich Hickey or Nubank.
+Clojol is an independent, clean-room implementation of the Clojure language and is not affiliated with or endorsed by Rich Hickey or Nubank.
 
 ## Why Clojol?
 
