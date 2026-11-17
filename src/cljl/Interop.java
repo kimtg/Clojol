@@ -10,13 +10,48 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class Interop {
 
     private static final ConcurrentHashMap<String, Class<?>> CLASS_CACHE = new ConcurrentHashMap<>(256);
-    private static final ConcurrentHashMap<MethodKey, Method> METHOD_CACHE = new ConcurrentHashMap<>(512);
-    private static final ConcurrentHashMap<MethodKey, Constructor<?>> CTOR_CACHE = new ConcurrentHashMap<>(128);
-    private static final ConcurrentHashMap<MemberKey, Field> FIELD_CACHE = new ConcurrentHashMap<>(256);
     private static final Class<?> NOT_A_CLASS = Interop.class;
+    private static final Class<?>[] EMPTY_CLASSES = new Class<?>[0];
 
-    private record MemberKey(Class<?> clazz, String name, int arity, boolean isStatic) {}
-    private record MethodKey(Class<?> clazz, String name, List<Class<?>> argTypes, boolean isStatic) {}
+    private static final class CacheEntry<T> {
+        final Class<?>[] argTypes;
+        final T target;
+
+        CacheEntry(Class<?>[] argTypes, T target) {
+            this.argTypes = argTypes;
+            this.target = target;
+        }
+
+        boolean matches(Object[] args) {
+            int n = args == null ? 0 : args.length;
+            if (argTypes.length != n) return false;
+            for (int i = 0; i < n; i++) {
+                Object a = args[i];
+                Class<?> expected = argTypes[i];
+                if (a == null) {
+                    if (expected != Void.class) return false;
+                } else if (a.getClass() != expected) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    private static final class ClassCache {
+        final ConcurrentHashMap<String, CacheEntry<Method>[]> instanceMethods = new ConcurrentHashMap<>(16);
+        final ConcurrentHashMap<String, CacheEntry<Method>[]> staticMethods = new ConcurrentHashMap<>(8);
+        final ConcurrentHashMap<String, Field> instanceFields = new ConcurrentHashMap<>(8);
+        final ConcurrentHashMap<String, Field> staticFields = new ConcurrentHashMap<>(8);
+        volatile CacheEntry<Constructor<?>>[] ctors;
+    }
+
+    private static final ClassValue<ClassCache> CLASS_INFO = new ClassValue<>() {
+        @Override
+        protected ClassCache computeValue(Class<?> type) {
+            return new ClassCache();
+        }
+    };
 
     private Interop() {}
 
@@ -95,20 +130,43 @@ public final class Interop {
         return found;
     }
 
-    private static List<Class<?>> argTypesKey(Object[] args) {
-        if (args == null || args.length == 0) return Collections.emptyList();
+    private static Class<?>[] captureArgTypes(Object[] args) {
+        if (args == null || args.length == 0) return EMPTY_CLASSES;
         Class<?>[] types = new Class<?>[args.length];
         for (int i = 0; i < args.length; i++) {
             types[i] = (args[i] == null) ? Void.class : args[i].getClass();
         }
-        return Arrays.asList(types);
+        return types;
+    }
+
+    private static <T> T lookupEntry(CacheEntry<T>[] entries, Object[] args) {
+        if (entries == null) return null;
+        for (CacheEntry<T> e : entries) {
+            if (e.matches(args)) return e.target;
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> CacheEntry<T>[] appendEntry(CacheEntry<T>[] existing, CacheEntry<T> added) {
+        if (existing == null || existing.length == 0) {
+            return new CacheEntry[]{added};
+        }
+        if (existing.length >= 16) {
+            CacheEntry<T>[] next = existing.clone();
+            next[existing.length - 1] = added;
+            return next;
+        }
+        CacheEntry<T>[] next = Arrays.copyOf(existing, existing.length + 1);
+        next[existing.length] = added;
+        return next;
     }
 
     public static Object invokeConstructor(Class<?> clazz, Object[] args) {
         try {
             int arity = args == null ? 0 : args.length;
-            MethodKey key = new MethodKey(clazz, "<init>", argTypesKey(args), true);
-            Constructor<?> best = CTOR_CACHE.get(key);
+            ClassCache cc = CLASS_INFO.get(clazz);
+            Constructor<?> best = lookupEntry(cc.ctors, args);
             if (best == null) {
                 Constructor<?>[] ctors = clazz.getConstructors();
                 int bestScore = Integer.MAX_VALUE;
@@ -123,8 +181,14 @@ public final class Interop {
                 if (best == null) {
                     throw new IllegalArgumentException("No matching constructor found for " + clazz.getName() + " with " + arity + " args");
                 }
-                try { best.setAccessible(true); } catch (Exception ignored) {}
-                CTOR_CACHE.put(key, best);
+                if (!Modifier.isPublic(best.getModifiers()) || !isAccessibleFromHere(clazz)) {
+                    try { best.setAccessible(true); } catch (Exception ignored) {}
+                }
+                synchronized (cc) {
+                    if (lookupEntry(cc.ctors, args) == null) {
+                        cc.ctors = appendEntry(cc.ctors, new CacheEntry<>(captureArgTypes(args), best));
+                    }
+                }
             }
             Object[] coerced = coerceArgs(best.getParameterTypes(), best.isVarArgs(), args);
             return best.newInstance(coerced);
@@ -135,14 +199,20 @@ public final class Interop {
         }
     }
 
+    private static void setFieldAccessibleSafe(Field f) {
+        if (!Modifier.isPublic(f.getModifiers()) || !isAccessibleFromHere(f.getDeclaringClass())) {
+            try { f.setAccessible(true); } catch (Exception ignored) {}
+        }
+    }
+
     public static Object getStaticField(Class<?> clazz, String fieldName) {
         try {
-            MemberKey key = new MemberKey(clazz, fieldName, -1, true);
-            Field f = FIELD_CACHE.get(key);
+            ClassCache cc = CLASS_INFO.get(clazz);
+            Field f = cc.staticFields.get(fieldName);
             if (f == null) {
                 f = clazz.getField(fieldName);
-                f.setAccessible(true);
-                FIELD_CACHE.put(key, f);
+                setFieldAccessibleSafe(f);
+                cc.staticFields.putIfAbsent(fieldName, f);
             }
             return boxResult(f.get(null));
         } catch (NoSuchFieldException e) {
@@ -155,12 +225,12 @@ public final class Interop {
 
     public static Object setStaticField(Class<?> clazz, String fieldName, Object val) {
         try {
-            MemberKey key = new MemberKey(clazz, fieldName, -1, true);
-            Field f = FIELD_CACHE.get(key);
+            ClassCache cc = CLASS_INFO.get(clazz);
+            Field f = cc.staticFields.get(fieldName);
             if (f == null) {
                 f = clazz.getField(fieldName);
-                f.setAccessible(true);
-                FIELD_CACHE.put(key, f);
+                setFieldAccessibleSafe(f);
+                cc.staticFields.putIfAbsent(fieldName, f);
             }
             f.set(null, coerceArg(f.getType(), val));
             return val;
@@ -198,13 +268,13 @@ public final class Interop {
         }
         Class<?> clazz = target.getClass();
         try {
-            MemberKey key = new MemberKey(clazz, fieldName, -1, false);
-            Field f = FIELD_CACHE.get(key);
+            ClassCache cc = CLASS_INFO.get(clazz);
+            Field f = cc.instanceFields.get(fieldName);
             if (f == null) {
                 f = findField(clazz, fieldName);
                 if (f != null) {
-                    f.setAccessible(true);
-                    FIELD_CACHE.put(key, f);
+                    setFieldAccessibleSafe(f);
+                    cc.instanceFields.putIfAbsent(fieldName, f);
                 }
             }
             if (f != null) {
@@ -223,7 +293,7 @@ public final class Interop {
         try {
             Field f = findField(clazz, fieldName);
             if (f == null) throw new IllegalArgumentException("No such field " + fieldName + " on " + clazz.getName());
-            f.setAccessible(true);
+            setFieldAccessibleSafe(f);
             Object coerced = coerceArg(f.getType(), val);
             f.set(target, coerced);
             return val;
@@ -264,7 +334,7 @@ public final class Interop {
                 if (arity == 0) {
                     Field f = findField(clazz, methodName);
                     if (f != null) {
-                        f.setAccessible(true);
+                        setFieldAccessibleSafe(f);
                         return boxResult(f.get(target));
                     }
                 }
@@ -280,8 +350,9 @@ public final class Interop {
     }
 
     private static Method findBestMethod(Class<?> clazz, String name, Object[] args, boolean isStatic) {
-        MethodKey key = new MethodKey(clazz, name, argTypesKey(args), isStatic);
-        Method cached = METHOD_CACHE.get(key);
+        ClassCache cc = CLASS_INFO.get(clazz);
+        ConcurrentHashMap<String, CacheEntry<Method>[]> map = isStatic ? cc.staticMethods : cc.instanceMethods;
+        Method cached = lookupEntry(map.get(name), args);
         if (cached != null) {
             return cached;
         }
@@ -300,7 +371,12 @@ public final class Interop {
         }
         if (best != null) {
             best = setAccessibleSafe(best, clazz);
-            METHOD_CACHE.put(key, best);
+            final Method resolved = best;
+            final Class<?>[] sig = captureArgTypes(args);
+            map.compute(name, (k, existing) -> {
+                if (lookupEntry(existing, args) != null) return existing;
+                return appendEntry(existing, new CacheEntry<>(sig, resolved));
+            });
         }
         return best;
     }

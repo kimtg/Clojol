@@ -234,9 +234,7 @@ public final class RT {
     private static ISeq seqFrom(Object coll) {
         if (coll instanceof CharSequence cs) {
             if (cs.isEmpty()) return null;
-            Object[] chars = new Object[cs.length()];
-            for (int i = 0; i < cs.length(); i++) chars[i] = cs.charAt(i);
-            return PersistentList.createFromArray(chars);
+            return new StringSeq(cs, 0);
         }
         if (coll instanceof Iterable<?> it) {
             return iteratorSeq(it.iterator());

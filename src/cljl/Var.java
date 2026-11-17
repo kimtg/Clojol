@@ -140,8 +140,7 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
         if (dynamic) {
             Deque<Map<Var, Object>> stack = BINDING_STACK.get();
             if (stack != null && !stack.isEmpty() && stack.peek().containsKey(this)) {
-                Object old = stack.peek().put(this, val);
-                notifyWatches(old, val);
+                stack.peek().put(this, val);
                 return val;
             }
         }
@@ -188,6 +187,17 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
     @Override
     public PersistentHashMap meta() {
         return meta;
+    }
+
+    public synchronized Var mergeMeta(PersistentHashMap m) {
+        if (m == null || m.count() == 0) return this;
+        PersistentHashMap merged = this.meta != null ? this.meta : PersistentHashMap.EMPTY;
+        for (ISeq s = m.seq(); s != null; s = s.next()) {
+            @SuppressWarnings("unchecked")
+            Map.Entry<Object, Object> e = (Map.Entry<Object, Object>) s.first();
+            merged = merged.assoc(e.getKey(), e.getValue());
+        }
+        return setMeta(merged);
     }
 
     public Var setMeta(PersistentHashMap m) {

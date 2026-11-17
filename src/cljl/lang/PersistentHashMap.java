@@ -20,7 +20,7 @@ public final class PersistentHashMap extends Fn
     public final Object nullValue;
     private final PersistentHashMap meta;
     private int hash;
-    private boolean hasHash;
+    private volatile boolean hasHash;
 
     public PersistentHashMap(PersistentHashMap meta, int count, INode root, boolean hasNull, Object nullValue) {
         this.meta = meta;
@@ -32,6 +32,18 @@ public final class PersistentHashMap extends Fn
 
     public static PersistentHashMap create(Object... init) {
         if (init == null || init.length == 0) return EMPTY;
+        if ((init.length & 1) != 0) {
+            throw new IllegalArgumentException("No value supplied for key: " + init[init.length - 1]);
+        }
+        if (init.length == 2) {
+            Object k = init[0];
+            Object v = init[1];
+            if (k == null) {
+                return new PersistentHashMap(null, 1, null, true, v);
+            }
+            int bit = bitpos(RT.hash(k), 0);
+            return new PersistentHashMap(null, 1, new BitmapIndexedNode(bit, new Object[]{k, v}), false, null);
+        }
         TransientHashMap t = EMPTY.asTransient();
         for (int i = 0; i < init.length; i += 2) {
             t = t.assoc(init[i], init[i + 1]);
@@ -172,16 +184,17 @@ public final class PersistentHashMap extends Fn
 
     @Override
     public int hashCode() {
-        int h = this.hash;
         if (!hasHash) {
+            int h = 0;
             for (ISeq s = seq(); s != null; s = s.next()) {
                 Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
                 h += (RT.hash(e.getKey()) ^ RT.hash(e.getValue()));
             }
             this.hash = h;
             this.hasHash = true;
+            return h;
         }
-        return h;
+        return this.hash;
     }
 
     @Override

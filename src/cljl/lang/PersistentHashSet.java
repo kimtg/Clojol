@@ -12,7 +12,7 @@ public final class PersistentHashSet extends Fn
     public final PersistentHashMap impl;
     private final PersistentHashMap meta;
     private int hash;
-    private boolean hasHash;
+    private volatile boolean hasHash;
 
     public PersistentHashSet(PersistentHashMap meta, PersistentHashMap impl) {
         this.meta = meta;
@@ -115,15 +115,16 @@ public final class PersistentHashSet extends Fn
 
     @Override
     public int hashCode() {
-        int h = this.hash;
         if (!hasHash) {
+            int h = 0;
             for (ISeq s = seq(); s != null; s = s.next()) {
                 h += RT.hash(s.first());
             }
             this.hash = h;
             this.hasHash = true;
+            return h;
         }
-        return h;
+        return this.hash;
     }
 
     @Override

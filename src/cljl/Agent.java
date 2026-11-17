@@ -153,9 +153,10 @@ public final class Agent extends Fn implements IDeref, IReference {
         }
         if (schedule) {
             try {
-                action.exec.execute(this::processQueue);
+                action.exec.execute(() -> processQueue(action.exec));
             } catch (Throwable t) {
                 synchronized (lock) {
+                    queue.remove(action);
                     running = false;
                     ACTIVE_AGENTS.remove(this);
                     lock.notifyAll();
@@ -170,15 +171,43 @@ public final class Agent extends Fn implements IDeref, IReference {
         a.agent.enqueueAction(a);
     }
 
-    private void processQueue() {
+    private void processQueue(Executor currentExec) {
         while (true) {
             Action act;
+            Executor handoffExec = null;
             synchronized (lock) {
-                if (this.error != null || (act = queue.poll()) == null) {
+                if (this.error != null) {
                     running = false;
                     ACTIVE_AGENTS.remove(this);
                     lock.notifyAll();
                     return;
+                }
+                Action peeked = queue.peek();
+                if (peeked == null) {
+                    running = false;
+                    ACTIVE_AGENTS.remove(this);
+                    lock.notifyAll();
+                    return;
+                }
+                if (peeked.exec != currentExec) {
+                    handoffExec = peeked.exec;
+                    act = null;
+                } else {
+                    act = queue.poll();
+                }
+            }
+            if (handoffExec != null) {
+                final Executor nextExec = handoffExec;
+                try {
+                    nextExec.execute(() -> processQueue(nextExec));
+                    return;
+                } catch (Throwable t) {
+                    synchronized (lock) {
+                        running = false;
+                        ACTIVE_AGENTS.remove(this);
+                        lock.notifyAll();
+                    }
+                    throw t;
                 }
             }
             executeAction(act);
@@ -226,6 +255,7 @@ public final class Agent extends Fn implements IDeref, IReference {
     }
 
     public Object restart(Object newState, boolean clearActions) {
+        Action nextToRun = null;
         synchronized (lock) {
             if (this.error == null) {
                 throw new IllegalStateException("Agent does not need a restart");
@@ -240,32 +270,43 @@ public final class Agent extends Fn implements IDeref, IReference {
             } else if (!queue.isEmpty() && !running) {
                 running = true;
                 ACTIVE_AGENTS.put(this, Boolean.TRUE);
-                Action next = queue.peek();
-                try {
-                    next.exec.execute(this::processQueue);
-                } catch (Throwable t) {
+                nextToRun = queue.peek();
+            }
+            lock.notifyAll();
+        }
+        if (nextToRun != null) {
+            final Executor exec = nextToRun.exec;
+            try {
+                exec.execute(() -> processQueue(exec));
+            } catch (Throwable t) {
+                synchronized (lock) {
                     running = false;
                     ACTIVE_AGENTS.remove(this);
                     lock.notifyAll();
-                    throw t;
                 }
+                throw t;
             }
-            lock.notifyAll();
-            return newState;
         }
+        return newState;
     }
 
     public boolean await(long timeoutMs) throws InterruptedException {
         if (NESTED_SENDS.get() != null) {
             throw new IllegalStateException("Can't await in agent action");
         }
-        long deadline = timeoutMs > 0 ? System.currentTimeMillis() + timeoutMs : Long.MAX_VALUE;
+        long deadlineNanos = timeoutMs > 0 ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs) : 0L;
         synchronized (lock) {
             while (running || (!queue.isEmpty() && this.error == null)) {
                 if (timeoutMs == 0) return false;
-                long rem = deadline - System.currentTimeMillis();
-                if (rem <= 0) return false;
-                lock.wait(rem);
+                if (timeoutMs < 0) {
+                    lock.wait();
+                } else {
+                    long remNanos = deadlineNanos - System.nanoTime();
+                    if (remNanos <= 0) return false;
+                    long millis = remNanos / 1_000_000L;
+                    int nanos = (int) (remNanos % 1_000_000L);
+                    lock.wait(millis, nanos);
+                }
             }
             return true;
         }
@@ -278,10 +319,10 @@ public final class Agent extends Fn implements IDeref, IReference {
     }
 
     public static boolean awaitForAll(long ms, Agent[] agents) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + ms;
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, ms));
         for (Agent a : agents) {
-            long rem = Math.max(0, deadline - System.currentTimeMillis());
-            if (!a.await(rem)) return false;
+            long remMs = ms <= 0 ? 0L : Math.max(0L, TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
+            if (!a.await(remMs)) return false;
         }
         return true;
     }

@@ -427,6 +427,9 @@ public final class Main {
             }
             if (c == ';') {
                 inComment = true;
+            } else if (c == '\\') {
+                // Skip character literal (e.g. \", \(, \), \\, \newline)
+                if (i + 1 < s.length()) i++;
             } else if (c == '"') {
                 inString = true;
             } else if (c == '(' || c == '[' || c == '{') {

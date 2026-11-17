@@ -176,8 +176,13 @@ public final class BytecodeJIT {
                 || n instanceof Recur0Node || n instanceof StaticFieldNode) {
             return true;
         }
-        if (n instanceof TryNode) {
-            return false;
+        if (n instanceof TryNode tn) {
+            if (!stackEmpty) return false;
+            if (!canCompileNode(tn.body, true)) return false;
+            for (CatchClause cc : tn.catches) {
+                if (!canCompileNode(cc.handler(), true)) return false;
+            }
+            return tn.finallyNode == null || canCompileNode(tn.finallyNode, true);
         }
         if (n instanceof MonitorNode mn) {
             return canCompileNode(mn.target, false);
@@ -378,6 +383,28 @@ public final class BytecodeJIT {
         throw new IllegalArgumentException("No matching clause: " + val);
     }
 
+    public static int caseIdentityLookup(Object val, IdentityHashMap<Object, Integer> table) {
+        Integer idx = table.get(val);
+        return idx != null ? idx : -1;
+    }
+
+    public static int caseIdentityLookupOrThrow(Object val, IdentityHashMap<Object, Integer> table) {
+        Integer idx = table.get(val);
+        if (idx != null) return idx;
+        throw new IllegalArgumentException("No matching clause: " + val);
+    }
+
+    public static int caseDirectLookup(Object val, Map<Object, Integer> table) {
+        Integer idx = table.get(val);
+        return idx != null ? idx : -1;
+    }
+
+    public static int caseDirectLookupOrThrow(Object val, Map<Object, Integer> table) {
+        Integer idx = table.get(val);
+        if (idx != null) return idx;
+        throw new IllegalArgumentException("No matching clause: " + val);
+    }
+
     public static RuntimeException throwNoMatchingClause(Object val) {
         throw new IllegalArgumentException("No matching clause: " + val);
     }
@@ -455,11 +482,14 @@ public final class BytecodeJIT {
             }
         }
 
-        // Pass 3: emit invoke()..invoke(Object,Object,Object,Object) for fixed arities 0..4
+        // Pass 3: emit invoke()..invoke(Object,Object,Object,Object) for fixed arities 0..4,
+        // plus direct bridges for variadic arities 0..4 not covered by fixed methods
         for (int arity = 0; arity <= 4; arity++) {
             FnMethod m = fixed[arity];
             if (m != null) {
                 emitFixedInvoke(ce, m, arity, arity, genericFixed[arity], ce.primSpecsByArity.get(arity));
+            } else if (variadic != null && arity >= variadic.fixedArity) {
+                emitVariadicBridgeInvoke(ce, variadic, arity, fixed.length, genericVariadic);
             }
         }
 
@@ -608,6 +638,58 @@ public final class BytecodeJIT {
         cg.finish();
     }
 
+    private static void emitVariadicBridgeInvoke(
+            ClassEmitter ce, FnMethod m, int callArity, int methodCaptureIdx, AnalysisResult analysis) {
+        StringBuilder desc = new StringBuilder("(");
+        for (int i = 0; i < callArity; i++) desc.append("Ljava/lang/Object;");
+        desc.append(")Ljava/lang/Object;");
+
+        int baseSlot = 1 + callArity;
+        SlotLayout layout = new SlotLayout(m, analysis.slotTypes, baseSlot);
+        CodeGen cg = ce.beginMethod("invoke", desc.toString(), layout.totalLocals);
+        cg.setContext(m, analysis, layout);
+
+        if (m.selfSlot != -1) {
+            cg.aload(0);
+            cg.astore(layout.jvmSlot[m.selfSlot]);
+        }
+        emitInitCaptured(ce, cg, m, methodCaptureIdx, layout);
+        for (int i = 0; i < m.fixedArity; i++) {
+            int logicalSlot = m.paramSlots[i];
+            ValType targetT = layout.slotTypes[logicalSlot];
+            cg.aload(1 + i);
+            cg.unboxFromObject(targetT);
+            cg.storeLogicalSlot(logicalSlot);
+        }
+
+        if (callArity == m.fixedArity) {
+            cg.aconstNull();
+        } else {
+            cg.newInst("cljl/lang/PersistentList");
+            cg.dup();
+            cg.aload(callArity);
+            cg.invokespecial("cljl/lang/PersistentList", "<init>", "(Ljava/lang/Object;)V", 2, 0);
+            for (int j = callArity - 1; j >= m.fixedArity + 1; j--) {
+                cg.aload(j);
+                cg.invokevirtual("cljl/lang/PersistentList", "cons",
+                        "(Ljava/lang/Object;)Lcljl/lang/PersistentList;", 2, 1);
+            }
+        }
+        int restSlot = m.paramSlots[m.fixedArity];
+        cg.unboxFromObject(layout.slotTypes[restSlot]);
+        cg.storeLogicalSlot(restSlot);
+
+        Label fnLoopStart = new Label();
+        cg.markLabel(fnLoopStart);
+        cg.pushLoopTarget(m.paramSlots, fnLoopStart);
+        boolean terminated = cg.emitBoxed(m.body);
+        cg.popLoopTarget();
+        if (!terminated) {
+            cg.areturn();
+        }
+        cg.finish();
+    }
+
     private static void emitVarargsInvoke(
             ClassEmitter ce, FnMethod[] fixed, AnalysisResult[] genericFixed,
             FnMethod variadic, AnalysisResult genericVariadic) {
@@ -697,19 +779,19 @@ public final class BytecodeJIT {
             cg.storeLogicalSlot(logicalSlot);
         }
         if (isVariadic) {
-            cg.aload(1);
-            cg.iconst(m.fixedArity);
-            cg.invokestatic("cljl/lang/PersistentList", "createFromArraySlice",
-                    "([Ljava/lang/Object;I)Lcljl/lang/ISeq;", 2, 1);
             Label nonEmpty = new Label();
             Label doneRest = new Label();
             cg.iload(2);
             cg.iconst(m.fixedArity);
             cg.ifIcmpGt(nonEmpty);
-            cg.pop();
             cg.aconstNull();
             cg.gotoLabel(doneRest);
+            cg.curStack = 0;
             cg.markLabel(nonEmpty);
+            cg.aload(1);
+            cg.iconst(m.fixedArity);
+            cg.invokestatic("cljl/lang/PersistentList", "createFromArraySlice",
+                    "([Ljava/lang/Object;I)Lcljl/lang/ISeq;", 2, 1);
             cg.markLabel(doneRest);
             int restSlot = m.paramSlots[m.fixedArity];
             cg.unboxFromObject(layout.slotTypes[restSlot]);
@@ -1043,6 +1125,13 @@ public final class BytecodeJIT {
             return slot;
         }
 
+        int allocTempLocal(int words) {
+            int slot = maxLocals + curTempLocals;
+            curTempLocals += words;
+            if (curTempLocals > maxTempLocals) maxTempLocals = curTempLocals;
+            return slot;
+        }
+
         void freeTempLocals(int n) {
             curTempLocals -= n;
         }
@@ -1222,6 +1311,13 @@ public final class BytecodeJIT {
             else if (t == ValType.DOUBLE) dload(phys);
             else if (t == ValType.BOOL) iload(phys);
             else aload(phys);
+        }
+
+        void storeJvmLocal(int phys, ValType t) {
+            if (t == ValType.LONG) lstore(phys);
+            else if (t == ValType.DOUBLE) dstore(phys);
+            else if (t == ValType.BOOL) istore(phys);
+            else astore(phys);
         }
 
         void storeLogicalSlot(int logicalSlot) {
@@ -1589,6 +1685,9 @@ public final class BytecodeJIT {
             if (node instanceof LockingNode ln) {
                 return emitLockingTyped(ln, ValType.LONG);
             }
+            if (node instanceof TryNode tn) {
+                return emitTryTyped(tn, ValType.LONG);
+            }
             if (node instanceof CaseNode cn) {
                 return emitCaseTyped(cn, ValType.LONG);
             }
@@ -1893,6 +1992,7 @@ public final class BytecodeJIT {
             if (node instanceof LetNode ln) return emitLetTyped(ln, ValType.DOUBLE);
             if (node instanceof LoopNode lp) return emitLoopTyped(lp, ValType.DOUBLE);
             if (node instanceof LockingNode ln) return emitLockingTyped(ln, ValType.DOUBLE);
+            if (node instanceof TryNode tn) return emitTryTyped(tn, ValType.DOUBLE);
             if (node instanceof CaseNode cn) return emitCaseTyped(cn, ValType.DOUBLE);
             if (node instanceof Recur0Node || node instanceof Recur1Node
                     || node instanceof Recur2Node || node instanceof RecurNNode) {
@@ -2244,6 +2344,7 @@ public final class BytecodeJIT {
             if (node instanceof LetNode ln) return emitLetTyped(ln, ValType.BOOL);
             if (node instanceof LoopNode lp) return emitLoopTyped(lp, ValType.BOOL);
             if (node instanceof LockingNode ln) return emitLockingTyped(ln, ValType.BOOL);
+            if (node instanceof TryNode tn) return emitTryTyped(tn, ValType.BOOL);
             if (node instanceof CaseNode cn) return emitCaseTyped(cn, ValType.BOOL);
             if (node instanceof Recur0Node || node instanceof Recur1Node
                     || node instanceof Recur2Node || node instanceof RecurNNode) {
@@ -2598,11 +2699,141 @@ public final class BytecodeJIT {
             }
         }
 
+        private boolean emitTryTyped(TryNode tn, ValType targetT) {
+            int stackAtEntry = curStack;
+            int valWords = (targetT == ValType.LONG || targetT == ValType.DOUBLE) ? 2 : 1;
+
+            if (tn.finallyNode == null) {
+                Label tryStart = new Label();
+                Label tryEnd = new Label();
+                Label done = new Label();
+
+                markLabel(tryStart);
+                boolean bodyTerm = emitTyped(tn.body, targetT);
+                markLabel(tryEnd);
+
+                boolean anyNonTerm = !bodyTerm;
+                if (!bodyTerm && tn.catches.length > 0) {
+                    gotoLabel(done);
+                }
+
+                for (CatchClause cc : tn.catches) {
+                    Label catchStart = new Label();
+                    curStack = stackAtEntry + 1;
+                    if (curStack > maxStack) maxStack = curStack;
+                    markLabel(catchStart);
+                    astore(layout.jvmSlot[cc.slot()]);
+                    boolean hTerm = emitTyped(cc.handler(), targetT);
+                    if (!hTerm) {
+                        anyNonTerm = true;
+                        gotoLabel(done);
+                    }
+                    if (tryEnd.pos > tryStart.pos) {
+                        int exTypeIdx = ce.cp.addClass(cc.exClass().getName().replace('.', '/'));
+                        exceptionTable.add(new ExceptionEntry(tryStart, tryEnd, catchStart, exTypeIdx));
+                    }
+                }
+
+                if (anyNonTerm) {
+                    curStack = stackAtEntry + valWords;
+                    markLabel(done);
+                    return false;
+                } else {
+                    curStack = stackAtEntry;
+                    return true;
+                }
+            }
+
+            int savedTemp = curTempLocals;
+            int resLocal = allocTempLocal(valWords);
+            int exLocal = allocTempLocal(1);
+
+            Label tryStart = new Label();
+            Label tryEnd = new Label();
+            Label catchAllStart = new Label();
+            Label done = new Label();
+            boolean anyNonTerm = false;
+
+            markLabel(tryStart);
+            boolean bodyTerm = emitTyped(tn.body, targetT);
+            markLabel(tryEnd);
+            if (!bodyTerm) {
+                storeJvmLocal(resLocal, targetT);
+                boolean fTerm = emitDiscard(tn.finallyNode);
+                if (!fTerm) {
+                    loadJvmLocal(resLocal, targetT);
+                    anyNonTerm = true;
+                    gotoLabel(done);
+                }
+            }
+
+            List<ExceptionEntry> pendingCatchAll = new ArrayList<>();
+            if (tryEnd.pos > tryStart.pos) {
+                pendingCatchAll.add(new ExceptionEntry(tryStart, tryEnd, catchAllStart, 0));
+            }
+
+            for (CatchClause cc : tn.catches) {
+                Label catchStart = new Label();
+                Label catchEnd = new Label();
+                curStack = stackAtEntry + 1;
+                if (curStack > maxStack) maxStack = curStack;
+                markLabel(catchStart);
+                astore(layout.jvmSlot[cc.slot()]);
+                boolean hTerm = emitTyped(cc.handler(), targetT);
+                markLabel(catchEnd);
+                if (!hTerm) {
+                    storeJvmLocal(resLocal, targetT);
+                    boolean fTerm = emitDiscard(tn.finallyNode);
+                    if (!fTerm) {
+                        loadJvmLocal(resLocal, targetT);
+                        anyNonTerm = true;
+                        gotoLabel(done);
+                    }
+                }
+                if (tryEnd.pos > tryStart.pos) {
+                    int exTypeIdx = ce.cp.addClass(cc.exClass().getName().replace('.', '/'));
+                    exceptionTable.add(new ExceptionEntry(tryStart, tryEnd, catchStart, exTypeIdx));
+                }
+                if (catchEnd.pos > catchStart.pos) {
+                    pendingCatchAll.add(new ExceptionEntry(catchStart, catchEnd, catchAllStart, 0));
+                }
+            }
+
+            if (!pendingCatchAll.isEmpty()) {
+                exceptionTable.addAll(pendingCatchAll);
+                curStack = stackAtEntry + 1;
+                if (curStack > maxStack) maxStack = curStack;
+                markLabel(catchAllStart);
+                astore(exLocal);
+                boolean fTerm = emitDiscard(tn.finallyNode);
+                if (!fTerm) {
+                    aload(exLocal);
+                    athrow();
+                }
+            }
+
+            curTempLocals = savedTemp;
+            if (anyNonTerm) {
+                curStack = stackAtEntry + valWords;
+                markLabel(done);
+                return false;
+            } else {
+                curStack = stackAtEntry;
+                return true;
+            }
+        }
+
         private boolean emitCaseTyped(CaseNode cn, ValType targetT) {
             int valWords = (targetT == ValType.LONG || targetT == ValType.DOUBLE) ? 2 : 1;
             List<Node> branches = new ArrayList<>();
             IdentityHashMap<Node, Integer> nodeToIdx = new IdentityHashMap<>();
             Map<RT.EquivKey, Integer> keyToIdx = new HashMap<>(cn.table.size() * 2 + 1);
+            boolean allLongs = true;
+            boolean allInterned = true;
+            boolean anyNumber = false;
+            long minKey = Long.MAX_VALUE;
+            long maxKey = Long.MIN_VALUE;
+
             for (Map.Entry<RT.EquivKey, Node> e : cn.table.entrySet()) {
                 Integer idx = nodeToIdx.get(e.getValue());
                 if (idx == null) {
@@ -2610,7 +2841,23 @@ public final class BytecodeJIT {
                     nodeToIdx.put(e.getValue(), idx);
                     branches.add(e.getValue());
                 }
-                keyToIdx.put(e.getKey(), idx);
+                RT.EquivKey ek = e.getKey();
+                keyToIdx.put(ek, idx);
+                Object kv = ek.val;
+                if (kv instanceof Long || kv instanceof Integer || kv instanceof Short || kv instanceof Byte) {
+                    long lv = ((Number) kv).longValue();
+                    if (lv < Integer.MIN_VALUE || lv > Integer.MAX_VALUE) allLongs = false;
+                    if (lv < minKey) minKey = lv;
+                    if (lv > maxKey) maxKey = lv;
+                } else {
+                    allLongs = false;
+                }
+                if (!(kv instanceof Keyword || kv instanceof Symbol)) {
+                    allInterned = false;
+                }
+                if (kv instanceof Number) {
+                    anyNumber = true;
+                }
             }
 
             if (branches.isEmpty()) {
@@ -2625,22 +2872,71 @@ public final class BytecodeJIT {
             }
 
             int stackAtEntry = curStack;
-            emitBoxed(cn.expr);
-            loadConstObj(keyToIdx);
-            checkcast("java/util/Map");
-            if (cn.hasDefault) {
-                invokestatic("cljl/BytecodeJIT", "caseLookup", "(Ljava/lang/Object;Ljava/util/Map;)I", 2, 1);
-            } else {
-                invokestatic("cljl/BytecodeJIT", "caseLookupOrThrow", "(Ljava/lang/Object;Ljava/util/Map;)I", 2, 1);
-            }
-
             int n = branches.size();
             Label[] branchLabels = new Label[n];
             for (int i = 0; i < n; i++) branchLabels[i] = new Label();
             Label defaultLabel = new Label();
             Label endLabel = new Label();
 
-            tableswitch(0, n - 1, defaultLabel, branchLabels);
+            long span = allLongs ? (maxKey - minKey) : Long.MAX_VALUE;
+            if (allLongs && typeOf(cn.expr) == ValType.LONG
+                    && span >= 0 && span <= 256 && span <= 4L * cn.table.size() + 8) {
+                int range = (int) span + 1;
+                Label[] denseTargets = new Label[range];
+                Arrays.fill(denseTargets, defaultLabel);
+                for (Map.Entry<RT.EquivKey, Integer> e : keyToIdx.entrySet()) {
+                    long lv = ((Number) e.getKey().val).longValue();
+                    denseTargets[(int) (lv - minKey)] = branchLabels[e.getValue()];
+                }
+                int savedTemp = curTempLocals;
+                int valLocal = allocTempLocal(2);
+                emitLong(cn.expr);
+                lstore(valLocal);
+                lload(valLocal);
+                ldcLong(minKey);
+                lcmp();
+                iflt(defaultLabel);
+                lload(valLocal);
+                ldcLong(maxKey);
+                lcmp();
+                ifgt(defaultLabel);
+                lload(valLocal);
+                ldcLong(minKey);
+                lsub();
+                l2i();
+                curTempLocals = savedTemp;
+                tableswitch(0, range - 1, defaultLabel, denseTargets);
+            } else {
+                emitBoxed(cn.expr);
+                if (allInterned) {
+                    IdentityHashMap<Object, Integer> idMap = new IdentityHashMap<>(keyToIdx.size() * 2);
+                    for (Map.Entry<RT.EquivKey, Integer> e : keyToIdx.entrySet()) {
+                        idMap.put(e.getKey().val, e.getValue());
+                    }
+                    loadConstObj(idMap);
+                    checkcast("java/util/IdentityHashMap");
+                    invokestatic("cljl/BytecodeJIT",
+                            cn.hasDefault ? "caseIdentityLookup" : "caseIdentityLookupOrThrow",
+                            "(Ljava/lang/Object;Ljava/util/IdentityHashMap;)I", 2, 1);
+                } else if (!anyNumber) {
+                    HashMap<Object, Integer> directMap = new HashMap<>(keyToIdx.size() * 2);
+                    for (Map.Entry<RT.EquivKey, Integer> e : keyToIdx.entrySet()) {
+                        directMap.put(e.getKey().val, e.getValue());
+                    }
+                    loadConstObj(directMap);
+                    checkcast("java/util/Map");
+                    invokestatic("cljl/BytecodeJIT",
+                            cn.hasDefault ? "caseDirectLookup" : "caseDirectLookupOrThrow",
+                            "(Ljava/lang/Object;Ljava/util/Map;)I", 2, 1);
+                } else {
+                    loadConstObj(keyToIdx);
+                    checkcast("java/util/Map");
+                    invokestatic("cljl/BytecodeJIT",
+                            cn.hasDefault ? "caseLookup" : "caseLookupOrThrow",
+                            "(Ljava/lang/Object;Ljava/util/Map;)I", 2, 1);
+                }
+                tableswitch(0, n - 1, defaultLabel, branchLabels);
+            }
 
             boolean anyNonTerm = false;
             for (int i = 0; i < n; i++) {
@@ -2804,8 +3100,13 @@ public final class BytecodeJIT {
             curStack = stackAtStart + 1;
             markLabel(slowLabel);
             checkcast("cljl/Fn");
-            for (Node a : args) emitBoxed(a);
-            invokevirtual("cljl/Fn", "invoke", boxedInvokeDesc(arity), 1 + arity, 1);
+            if (arity <= 4) {
+                for (Node a : args) emitBoxed(a);
+                invokevirtual("cljl/Fn", "invoke", boxedInvokeDesc(arity), 1 + arity, 1);
+            } else {
+                emitObjectArray(args);
+                invokevirtual("cljl/Fn", "invokeVarargs", "([Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+            }
             if (desiredT != ValType.ANY) {
                 unboxFromObject(desiredT);
             }
@@ -2838,8 +3139,13 @@ public final class BytecodeJIT {
             curStack = stackAtStart + 1;
             markLabel(slowLabel);
             checkcast("cljl/Fn");
-            for (Node a : args) emitBoxed(a);
-            invokevirtual("cljl/Fn", "invoke", boxedInvokeDesc(arity), 1 + arity, 1);
+            if (arity <= 4) {
+                for (Node a : args) emitBoxed(a);
+                invokevirtual("cljl/Fn", "invoke", boxedInvokeDesc(arity), 1 + arity, 1);
+            } else {
+                emitObjectArray(args);
+                invokevirtual("cljl/Fn", "invokeVarargs", "([Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+            }
             markLabel(doneLabel);
             curStack = stackAtStart + 1;
             if (curStack > maxStack) maxStack = curStack;
@@ -3097,6 +3403,7 @@ public final class BytecodeJIT {
             if (node instanceof LetNode ln) return emitLetTyped(ln, ValType.ANY);
             if (node instanceof LoopNode lp) return emitLoopTyped(lp, ValType.ANY);
             if (node instanceof LockingNode ln) return emitLockingTyped(ln, ValType.ANY);
+            if (node instanceof TryNode tn) return emitTryTyped(tn, ValType.ANY);
             if (node instanceof CaseNode cn) return emitCaseTyped(cn, ValType.ANY);
             if (node instanceof Recur0Node || node instanceof Recur1Node
                     || node instanceof Recur2Node || node instanceof RecurNNode) {

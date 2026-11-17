@@ -58,6 +58,18 @@ public final class Compiler {
 
     public static Object eval(Object form) {
         Node node = compile(form, null);
+        if (node instanceof TopFrameNode tf && CompiledFn.containsLoop(tf.body)) {
+            FnMethod[] fixed = new FnMethod[21];
+            ValType[] slotHints = new ValType[tf.maxSlots];
+            Arrays.fill(slotHints, ValType.ANY);
+            fixed[0] = new FnMethod(0, false, -1, new int[0], new int[0], new int[0],
+                    tf.maxSlots, false, tf.body, new ValType[0], slotHints, ValType.ANY);
+            CompiledFn cf = new CompiledFn("<eval>", false, fixed, null, null);
+            Fn compiled = BytecodeJIT.compile(cf);
+            if (compiled != null) {
+                return compiled.invoke();
+            }
+        }
         return node.eval(Fn.EMPTY_ARGS);
     }
 
@@ -1271,11 +1283,18 @@ public final class Compiler {
         boolean isTopLevel = (scope == null);
         if (isTopLevel) scope = new Scope(null);
 
+        boolean seenCatch = false;
+        boolean seenFinally = false;
+
         for (ISeq s = args; s != null; s = s.next()) {
             Object f = s.first();
             if (f instanceof ISeq clause && clause.seq() != null) {
                 Object head = clause.first();
                 if (Symbol.intern("catch").equals(head)) {
+                    if (seenFinally) {
+                        throw new IllegalArgumentException("catch clause cannot follow finally in try" + locSuffix());
+                    }
+                    seenCatch = true;
                     ISeq cargs = clause.next();
                     Symbol classSym = (Symbol) cargs.first();
                     Class<?> exClass = Interop.resolveClass(RT.currentNS(), classSym.toString());
@@ -1289,9 +1308,16 @@ public final class Compiler {
                     catches.add(new CatchClause(exClass, slot, handler));
                     continue;
                 } else if (Symbol.intern("finally").equals(head)) {
+                    if (seenFinally) {
+                        throw new IllegalArgumentException("Only one finally clause allowed in try" + locSuffix());
+                    }
+                    seenFinally = true;
                     finallyForms = clause.next();
                     continue;
                 }
+            }
+            if (seenCatch || seenFinally) {
+                throw new IllegalArgumentException("Only catch or finally clauses can follow catch/finally in try" + locSuffix());
             }
             bodyForms.add(f);
         }
@@ -1962,6 +1988,18 @@ public final class Compiler {
             if (n instanceof LetNode ln) {
                 for (Node init : ln.inits) if (containsLoop(init)) return true;
                 return containsLoop(ln.body);
+            }
+            if (n instanceof TryNode tn) {
+                if (containsLoop(tn.body)) return true;
+                for (CatchClause cc : tn.catches) if (containsLoop(cc.handler())) return true;
+                return containsLoop(tn.finallyNode);
+            }
+            if (n instanceof CaseNode cn) {
+                if (containsLoop(cn.expr) || (cn.hasDefault && containsLoop(cn.defaultNode))) return true;
+                for (Node b : cn.table.values()) if (containsLoop(b)) return true;
+            }
+            if (n instanceof LockingNode ln) {
+                return containsLoop(ln.target) || containsLoop(ln.body);
             }
             return false;
         }

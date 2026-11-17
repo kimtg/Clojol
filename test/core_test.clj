@@ -965,6 +965,133 @@
         (aset grid 1 0 99)
         (is (= 99 (aget grid 1 0)))))))
 
+(deftest jit-try-variadic-case-and-fixes-test
+  (testing "try/catch/finally JIT compilation including primitive types"
+    (let [safe-div (fn [a b]
+                     (try
+                       (quot a b)
+                       (catch ArithmeticException _ -1)))
+          with-fin (fn [x a]
+                     (try
+                       (if (= x 0)
+                         (throw (IllegalStateException. "boom"))
+                         (+ x 10))
+                       (catch IllegalStateException _
+                         (swap! a conj :caught)
+                         99)
+                       (finally
+                         (swap! a conj :finally))))
+          nested-try (fn [x]
+                       (try
+                         (try
+                           (if (< x 0) (throw (IllegalArgumentException. "neg")) (* x 2))
+                           (catch IllegalArgumentException _ -10))
+                         (finally
+                           (+ 1 2))))
+          rethrow-fin (fn [a]
+                        (try
+                          (throw (RuntimeException. "err"))
+                          (finally
+                            (swap! a conj :cleaned))))]
+      (dotimes [_ 30]
+        (is (= 5 (safe-div 10 2)))
+        (is (= -1 (safe-div 10 0)))
+        (is (= 10 (nested-try 5)))
+        (is (= -10 (nested-try -1))))
+      (let [log (atom [])]
+        (dotimes [_ 20]
+          (reset! log [])
+          (is (= 15 (with-fin 5 log)))
+          (is (= [:finally] @log))
+          (reset! log [])
+          (is (= 99 (with-fin 0 log)))
+          (is (= [:caught :finally] @log))
+          (reset! log [])
+          (is (= "err" (try (rethrow-fin log) (catch RuntimeException e (.getMessage e)))))
+          (is (= [:cleaned] @log))))))
+
+  (testing "variadic fast-path bridges for 0-4 args"
+    (let [vfn (fn [a & more]
+                (if more
+                  [a (vec more)]
+                  [a :none]))
+          vsum (fn [acc & nums]
+                 (loop [s acc xs nums]
+                   (if xs
+                     (recur (+ s (first xs)) (next xs))
+                     s)))]
+      (dotimes [_ 30]
+        (is (= [1 :none] (vfn 1)))
+        (is (= [1 [2]] (vfn 1 2)))
+        (is (= [1 [2 3]] (vfn 1 2 3)))
+        (is (= [1 [2 3 4]] (vfn 1 2 3 4)))
+        (is (= 10 (vsum 10)))
+        (is (= 15 (vsum 10 5)))
+        (is (= 18 (vsum 10 5 3)))
+        (is (= 20 (vsum 10 5 3 2))))))
+
+  (testing "case direct tableswitch, keyword/symbol identity, and string lookup"
+    (let [dense-int (fn [^long n]
+                      (case n
+                        0 100
+                        1 200
+                        3 400
+                        -1))
+          kw-case (fn [k]
+                    (case k
+                      :alpha 1
+                      :beta 2
+                      :gamma 3
+                      0))
+          str-case (fn [s]
+                     (case s
+                       "one" 1
+                       "two" 2
+                       0))]
+      (dotimes [_ 30]
+        (is (= 100 (dense-int 0)))
+        (is (= 200 (dense-int 1)))
+        (is (= -1 (dense-int 2)))
+        (is (= 400 (dense-int 3)))
+        (is (= -1 (dense-int 99)))
+        (is (= 1 (kw-case :alpha)))
+        (is (= 3 (kw-case :gamma)))
+        (is (= 0 (kw-case :other)))
+        (is (= 1 (str-case "one")))
+        (is (= 0 (str-case "three"))))))
+
+  (testing "lazy StringSeq and single-entry PersistentHashMap"
+    (let [s (seq "hello")]
+      (is (= \h (first s)))
+      (is (= 5 (count s)))
+      (is (= 4 (count (next s))))
+      (is (= '(\h \e \l \l \o) s))
+      (is (= {:only 1} (hash-map :only 1)))
+      (is (thrown? IllegalArgumentException (cljl.lang.PersistentHashMap/create (object-array [:a]))))))
+
+  (testing "Var watches ignore thread-local set!, Namespace intern preserves meta, mixed Agent send/send-off"
+    (let [watch-calls (atom 0)
+          ^:dynamic *dyn* 1]
+      (def ^:dynamic *test-watch-var* 10)
+      (add-watch #'*test-watch-var* :w (fn [_ _ _ _] (swap! watch-calls inc)))
+      (binding [*test-watch-var* 20]
+        (set! *test-watch-var* 30)
+        (is (= 30 *test-watch-var*)))
+      (is (= 0 @watch-calls))
+      (alter-var-root #'*test-watch-var* inc)
+      (is (= 1 @watch-calls))
+      (remove-watch #'*test-watch-var* :w))
+    (eval '(def ^{:doc "keep-me"} meta-preserve-var 1))
+    (eval '(def ^{:added "0.2"} meta-preserve-var 2))
+    (is (= "keep-me" (:doc (meta (resolve 'meta-preserve-var)))))
+    (is (= "0.2" (:added (meta (resolve 'meta-preserve-var)))))
+    (let [ag (agent [])]
+      (send ag conj :a)
+      (send-off ag conj :b)
+      (send ag conj :c)
+      (is (await-for 5000 ag))
+      (is (= [:a :b :c] @ag)))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

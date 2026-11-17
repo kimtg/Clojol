@@ -22,7 +22,7 @@ public final class PersistentVector extends Fn
     public final Object[] tail;
     private final PersistentHashMap meta;
     private int hash;
-    private boolean hasHash;
+    private volatile boolean hasHash;
 
     public static final class Node {
         public final AtomicReference<Thread> edit;
@@ -357,16 +357,16 @@ public final class PersistentVector extends Fn
 
     @Override
     public int hashCode() {
-        int h = this.hash;
         if (!hasHash) {
-            h = 1;
+            int h = 1;
             for (int i = 0; i < cnt; i++) {
                 h = 31 * h + RT.hash(nth(i));
             }
             this.hash = h;
             this.hasHash = true;
+            return h;
         }
-        return h;
+        return this.hash;
     }
 
     @Override
@@ -512,7 +512,7 @@ public final class PersistentVector extends Fn
         public final int end;
         private final PersistentHashMap meta;
         private int hash;
-        private boolean hasHash;
+        private volatile boolean hasHash;
 
         public SubVec(PersistentHashMap meta, PersistentVector v, int start, int end) {
             if (v instanceof PersistentVector pv) {
@@ -683,15 +683,15 @@ public final class PersistentVector extends Fn
         }
 
         @Override public int hashCode() {
-            int h = this.hash;
             if (!hasHash) {
-                h = 1;
+                int h = 1;
                 int cnt = count();
                 for (int i = 0; i < cnt; i++) h = 31 * h + RT.hash(nth(i));
                 this.hash = h;
                 this.hasHash = true;
+                return h;
             }
-            return h;
+            return this.hash;
         }
 
         @Override public String toString() { return RT.printString(this); }

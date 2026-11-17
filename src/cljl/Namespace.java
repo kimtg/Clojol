@@ -89,14 +89,20 @@ public final class Namespace implements IMeta, IReference {
             throw new IllegalArgumentException("Can't intern namespace-qualified symbol: " + sym);
         }
         Symbol key = sym.withMeta(null);
-        Object existing = mappings.get(key);
-        if (existing instanceof Var v && v.ns == this) {
-            if (sym.meta() != null) v.setMeta(sym.meta());
+        Var[] holder = new Var[1];
+        mappings.compute(key, (k, existing) -> {
+            if (existing instanceof Var v && v.ns == this) {
+                holder[0] = v;
+                return v;
+            }
+            Var v = new Var(this, key);
+            holder[0] = v;
             return v;
+        });
+        Var v = holder[0];
+        if (sym.meta() != null) {
+            v.mergeMeta(sym.meta());
         }
-        Var v = new Var(this, key);
-        if (sym.meta() != null) v.setMeta(sym.meta());
-        mappings.put(key, v);
         return v;
     }
 

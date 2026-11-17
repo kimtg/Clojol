@@ -6,7 +6,7 @@ import java.util.*;
 public abstract class ASeq implements ISeq, IObj {
     protected final PersistentHashMap meta;
     private int hash;
-    private boolean hasHash;
+    private volatile boolean hasHash;
 
     protected ASeq() {
         this.meta = null;
@@ -133,16 +133,16 @@ public abstract class ASeq implements ISeq, IObj {
 
     @Override
     public int hashCode() {
-        int h = this.hash;
         if (!hasHash) {
-            h = 1;
+            int h = 1;
             for (ISeq s = seq(); s != null; s = s.next()) {
                 h = 31 * h + RT.hash(s.first());
             }
             this.hash = h;
             this.hasHash = true;
+            return h;
         }
-        return h;
+        return this.hash;
     }
 
     @Override
