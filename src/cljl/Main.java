@@ -599,7 +599,7 @@ public final class Main {
     private static void printHelp() {
         System.out.println("Version: " + Deps.CLJ_TOOLS_VERSION + " (Clojol " + VERSION + ")");
         System.out.println();
-        System.out.println("You use the Clojure tools ('cljl') to run Clojure programs");
+        System.out.println("You use the Clojol tools ('cljl') to run Clojure programs");
         System.out.println("on the JVM, e.g. to start a REPL or invoke a specific function with data.");
         System.out.println();
         System.out.println("Usage:");
