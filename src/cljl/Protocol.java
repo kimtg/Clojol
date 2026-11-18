@@ -150,6 +150,46 @@ public final class Protocol {
                         + " found for class: " + (cls == NIL_CLASS ? "nil" : cls.getName()));
     }
 
+    public Fn resolveMethodOrNull(Keyword methodKey, Object target) {
+        if (target instanceof Dispatchable d) {
+            Fn df = d.__protocolFn(this, methodKey);
+            if (df != null) return df;
+        }
+        Class<?> cls = (target == null) ? NIL_CLASS : target.getClass();
+        ConcurrentHashMap<Keyword, Fn> cmap = methodCache.computeIfAbsent(cls, k -> new ConcurrentHashMap<>());
+        Fn f = cmap.get(methodKey);
+        if (f == null) {
+            Fn resolved = resolveUncached(cls, methodKey);
+            f = (resolved != null) ? resolved : MISSING_IMPL;
+            cmap.putIfAbsent(methodKey, f);
+        }
+        return f != MISSING_IMPL ? f : null;
+    }
+
+    public PersistentHashMap findImplFor(Object target) {
+        if (target instanceof Dispatchable d && d.__satisfies(this)) {
+            return PersistentHashMap.EMPTY;
+        }
+        Class<?> cls = (target == null) ? NIL_CLASS : target.getClass();
+        ConcurrentHashMap<Keyword, Fn> m = findImplMap(cls == NIL_CLASS ? null : cls);
+        if (m == null) {
+            if (cls != NIL_CLASS && onInterface != null && onInterface.isAssignableFrom(cls)) {
+                return PersistentHashMap.EMPTY;
+            }
+            return null;
+        }
+        PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
+        for (Map.Entry<Keyword, Fn> e : m.entrySet()) {
+            tm = tm.assoc(e.getKey(), e.getValue());
+        }
+        return tm.persistent();
+    }
+
+    public void resetCaches() {
+        methodCache.clear();
+        satisfiesCache.clear();
+    }
+
     @Override
     public String toString() {
         return "#<Protocol " + name + ">";

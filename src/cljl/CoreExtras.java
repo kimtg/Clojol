@@ -215,6 +215,39 @@ public final class CoreExtras {
         def(ns, "unchecked-char", Fn.of1("unchecked-char", Numbers::uncheckedChar));
         def(ns, "unchecked-float", Fn.of1("unchecked-float", Numbers::uncheckedFloat));
         def(ns, "unchecked-double", Fn.of1("unchecked-double", Numbers::uncheckedDouble));
+        def(ns, "unchecked-add-int", Fn.of2("unchecked-add-int", Numbers::uncheckedAddInt));
+        def(ns, "unchecked-subtract-int", Fn.of2("unchecked-subtract-int", Numbers::uncheckedSubtractInt));
+        def(ns, "unchecked-multiply-int", Fn.of2("unchecked-multiply-int", Numbers::uncheckedMultiplyInt));
+        def(ns, "unchecked-inc-int", Fn.of1("unchecked-inc-int", Numbers::uncheckedIncInt));
+        def(ns, "unchecked-dec-int", Fn.of1("unchecked-dec-int", Numbers::uncheckedDecInt));
+        def(ns, "unchecked-negate-int", Fn.of1("unchecked-negate-int", Numbers::uncheckedNegateInt));
+        def(ns, "unchecked-divide-int", Fn.of2("unchecked-divide-int", Numbers::uncheckedDivideInt));
+        def(ns, "unchecked-remainder-int", Fn.of2("unchecked-remainder-int", Numbers::uncheckedRemainderInt));
+        def(ns, "numerator", Fn.of1("numerator", r -> ((Ratio) r).numerator));
+        def(ns, "denominator", Fn.of1("denominator", r -> ((Ratio) r).denominator));
+        def(ns, "hash-combine", Fn.of2("hash-combine", (x, y) -> (long) RT.hashCombine((int) Numbers.toLong(x), (int) Numbers.toLong(y))));
+        def(ns, "mix-collection-hash", Fn.of2("mix-collection-hash", (b, c) -> (long) RT.mixCollectionHash((int) Numbers.toLong(b), (int) Numbers.toLong(c))));
+        def(ns, "hash-ordered-coll", Fn.of1("hash-ordered-coll", coll -> (long) RT.hashOrderedColl((Iterable<?>) coll)));
+        def(ns, "hash-unordered-coll", Fn.of1("hash-unordered-coll", coll -> (long) RT.hashUnorderedColl((Iterable<?>) coll)));
+        def(ns, "munge", Fn.of1("munge", CoreExtras::mungeObj));
+        def(ns, "namespace-munge", Fn.of1("namespace-munge", CoreExtras::namespaceMunge));
+
+        Protocol instProto = new Protocol(Symbol.intern("clojure.core", "Inst"), "Protocol for instant-like types", null);
+        def(ns, "Inst", instProto);
+        def(ns, "inst-ms*", Fn.of1("inst-ms*", inst -> {
+            if (inst instanceof Date d) return d.getTime();
+            if (inst instanceof java.time.Instant ins) return ins.toEpochMilli();
+            Fn impl = instProto.resolveMethod(Keyword.intern("inst-ms*"), inst);
+            return impl.invoke(inst);
+        }));
+        instProto.addImpl(Date.class, Map.of(Keyword.intern("inst-ms*"), Fn.of1("inst-ms*", d -> ((Date) d).getTime())));
+        instProto.addImpl(java.time.Instant.class, Map.of(Keyword.intern("inst-ms*"), Fn.of1("inst-ms*", i -> ((java.time.Instant) i).toEpochMilli())));
+        def(ns, "inst-ms", Fn.of1("inst-ms", inst -> {
+            if (inst instanceof Date d) return d.getTime();
+            if (inst instanceof java.time.Instant ins) return ins.toEpochMilli();
+            Fn impl = instProto.resolveMethod(Keyword.intern("inst-ms*"), inst);
+            return impl.invoke(inst);
+        }));
         def(ns, "num", Fn.of1("num", x -> (Number) x));
         def(ns, "biginteger", Fn.of1("biginteger", x -> {
             if (x instanceof BigInteger bi) return bi;
@@ -237,6 +270,11 @@ public final class CoreExtras {
             }
             return x;
         }));
+
+        def(ns, "tagged-literal", Fn.of2("tagged-literal", (tag, form) -> TaggedLiteral.create((Symbol) tag, form)));
+        def(ns, "tagged-literal?", Fn.of1("tagged-literal?", x -> x instanceof TaggedLiteral));
+        def(ns, "reader-conditional", Fn.of2("reader-conditional", (form, splicing) -> ReaderConditional.create(form, RT.truthy(splicing))));
+        def(ns, "reader-conditional?", Fn.of1("reader-conditional?", x -> x instanceof ReaderConditional));
 
         def(ns, "parse-boolean", Fn.of1("parse-boolean", s -> {
             String str = (String) s;
@@ -314,11 +352,14 @@ public final class CoreExtras {
         def(ns, "with-precision*", Fn.of3("with-precision*", (prec, rounding, bodyFn) -> {
             int p = (int) Numbers.toLong(prec);
             RoundingMode rm = rounding != null ? RoundingMode.valueOf(rounding.toString()) : RoundingMode.HALF_UP;
+            MathContext mc = new MathContext(p, rm);
             MathContext prev = MATH_CONTEXT.get();
-            MATH_CONTEXT.set(new MathContext(p, rm));
+            MATH_CONTEXT.set(mc);
+            Var.pushThreadBindings(Map.of(RT.MATH_CONTEXT, mc));
             try {
                 return ((Fn) bodyFn).invoke();
             } finally {
+                Var.popThreadBindings();
                 if (prev == null) MATH_CONTEXT.remove();
                 else MATH_CONTEXT.set(prev);
             }
@@ -542,6 +583,62 @@ public final class CoreExtras {
             for (int i = 1; i < args.length; i++) tv = tv.conj(args[i]);
             return tv.persistent();
         }));
+
+        // Structs
+        def(ns, "create-struct", Fn.ofVarargs("create-struct", args ->
+                PersistentStructMap.createSlotMap(PersistentList.createFromArray(args))));
+        defMacro(ns, "defstruct", Fn.ofVarargs("defstruct", args -> {
+            Symbol sname = (Symbol) args[0];
+            List<Object> createCall = new ArrayList<>();
+            createCall.add(Symbol.intern("clojure.core", "create-struct"));
+            for (int i = 1; i < args.length; i++) createCall.add(args[i]);
+            return PersistentList.createFromArray(Symbol.intern("def"), sname, PersistentList.create(createCall));
+        }));
+        def(ns, "struct", Fn.ofVarargs("struct", args ->
+                PersistentStructMap.construct(
+                        (PersistentStructMap.Def) args[0],
+                        args.length > 1 ? PersistentList.createFromArraySlice(args, 1) : null)));
+        def(ns, "struct-map", Fn.ofVarargs("struct-map", args ->
+                PersistentStructMap.create(
+                        (PersistentStructMap.Def) args[0],
+                        args.length > 1 ? PersistentList.createFromArraySlice(args, 1) : null)));
+        def(ns, "accessor", Fn.of2("accessor", (s, k) ->
+                PersistentStructMap.accessor((PersistentStructMap.Def) s, k)));
+
+        // Chunked sequences & primitive vector constructors
+        def(ns, "chunk-buffer", Fn.of1("chunk-buffer", cap -> new ChunkBuffer((int) Numbers.toLong(cap))));
+        def(ns, "chunk-append", Fn.of2("chunk-append", (b, x) -> { ((ChunkBuffer) b).add(x); return null; }));
+        def(ns, "chunk", Fn.of1("chunk", b -> ((ChunkBuffer) b).chunk()));
+        def(ns, "chunk-cons", Fn.of2("chunk-cons", (c, rest) -> {
+            IChunk ch = (IChunk) c;
+            if (ch.count() == 0) return rest;
+            return new ChunkedCons(ch, RT.seq(rest));
+        }));
+        def(ns, "chunk-first", Fn.of1("chunk-first", s -> ((IChunkedSeq) s).chunkedFirst()));
+        def(ns, "chunk-next", Fn.of1("chunk-next", s -> ((IChunkedSeq) s).chunkedNext()));
+        def(ns, "chunk-rest", Fn.of1("chunk-rest", s -> ((IChunkedSeq) s).chunkedMore()));
+        def(ns, "chunked-seq?", Fn.of1("chunked-seq?", s -> s instanceof IChunkedSeq));
+        def(ns, "->ArrayChunk", Fn.ofVarargs("->ArrayChunk", args ->
+                new ArrayChunk(args[1], (int) Numbers.toLong(args[2]), (int) Numbers.toLong(args[3]))));
+        def(ns, "->VecNode", Fn.of2("->VecNode", (edit, arr) ->
+                new Vec.VecNode((java.util.concurrent.atomic.AtomicReference<Thread>) edit, (Object[]) arr)));
+        def(ns, "->Vec", Fn.ofVarargs("->Vec", args ->
+                new Vec(args[0], (int) Numbers.toLong(args[1]), (int) Numbers.toLong(args[2]),
+                        (Vec.VecNode) args[3], args[4], (PersistentHashMap) args[5])));
+        def(ns, "->VecSeq", Fn.ofVarargs("->VecSeq", args ->
+                new Vec.VecSeq(args[0], (Vec) args[1], (Vec.VecNode) args[2],
+                        (int) Numbers.toLong(args[3]), (int) Numbers.toLong(args[4]), (PersistentHashMap) args[5])));
+        def(ns, "->Eduction", Fn.of2("->Eduction", (xf, coll) -> new Eduction((Fn) xf, coll)));
+        def(ns, "EMPTY-NODE", PersistentHashMap.BitmapIndexedNode.EMPTY);
+        def(ns, "primitives-classnames", PersistentHashMap.create(
+                Boolean.TYPE, "Boolean",
+                Byte.TYPE, "Byte",
+                Character.TYPE, "Character",
+                Short.TYPE, "Short",
+                Integer.TYPE, "Integer",
+                Long.TYPE, "Long",
+                Float.TYPE, "Float",
+                Double.TYPE, "Double"));
     }
 
     @SuppressWarnings("unchecked")
@@ -1119,6 +1216,82 @@ public final class CoreExtras {
                 }
             };
         });
+        wrapTransducer1(ns, "partitionv-all", nObj -> rf -> {
+            int n = (int) Numbers.toLong(nObj); Fn r = (Fn) rf;
+            return new Fn.NamedFn("partitionv-all-xf") {
+                List<Object> buf = new ArrayList<>(n);
+                @Override public Object invoke() { return r.invoke(); }
+                @Override public Object invoke(Object acc) {
+                    Object res = acc;
+                    if (!buf.isEmpty()) {
+                        PersistentVector v = PersistentVector.create(buf);
+                        buf.clear();
+                        res = r.invoke(res, v);
+                        if (res instanceof Reduced red) res = red.deref();
+                    }
+                    return r.invoke(res);
+                }
+                @Override public Object invoke(Object acc, Object x) {
+                    buf.add(x);
+                    if (buf.size() == n) {
+                        PersistentVector v = PersistentVector.create(buf);
+                        buf.clear();
+                        return r.invoke(acc, v);
+                    }
+                    return acc;
+                }
+            };
+        });
+
+        // Clojure 1.12 Java Stream helpers
+        def(ns, "stream-seq!", Fn.of1("stream-seq!", s ->
+                s == null ? null : RT.iteratorSeq(((java.util.stream.BaseStream<?, ?>) s).iterator())));
+        def(ns, "stream-reduce!", Fn.of23("stream-reduce!",
+                (f, s) -> {
+                    Fn fn = (Fn) f;
+                    Iterator<?> it = ((java.util.stream.BaseStream<?, ?>) s).iterator();
+                    if (!it.hasNext()) return fn.invoke();
+                    Object acc = it.next();
+                    while (it.hasNext()) {
+                        acc = fn.invoke(acc, it.next());
+                        if (acc instanceof Reduced r) return r.deref();
+                    }
+                    return acc;
+                },
+                (f, init, s) -> {
+                    Fn fn = (Fn) f;
+                    Iterator<?> it = ((java.util.stream.BaseStream<?, ?>) s).iterator();
+                    Object acc = init;
+                    while (it.hasNext()) {
+                        acc = fn.invoke(acc, it.next());
+                        if (acc instanceof Reduced r) return r.deref();
+                    }
+                    return acc;
+                }));
+        def(ns, "stream-transduce!", Fn.ofVarargs("stream-transduce!", args -> {
+            Fn xf = (Fn) args[0];
+            Fn f = (Fn) args[1];
+            Fn rf = (Fn) xf.invoke(f);
+            Object acc = (args.length == 4) ? args[2] : rf.invoke();
+            Iterator<?> it = ((java.util.stream.BaseStream<?, ?>) args[args.length - 1]).iterator();
+            while (it.hasNext()) {
+                acc = rf.invoke(acc, it.next());
+                if (acc instanceof Reduced r) {
+                    acc = r.deref();
+                    break;
+                }
+            }
+            return rf.invoke(acc);
+        }));
+        def(ns, "stream-into!", Fn.of23("stream-into!",
+                (to, s) -> {
+                    Iterator<?> it = ((java.util.stream.BaseStream<?, ?>) s).iterator();
+                    return intoIterator(to, null, it);
+                },
+                (to, xform, s) -> {
+                    Iterator<?> it = ((java.util.stream.BaseStream<?, ?>) s).iterator();
+                    return intoIterator(to, (Fn) xform, it);
+                }));
         wrapTransducer1(ns, "partition-by", f -> rf -> {
             Fn fn = (Fn) f; Fn r = (Fn) rf;
             return new Fn.NamedFn("partition-by-xf") {
@@ -1691,6 +1864,20 @@ public final class CoreExtras {
             try { return Agent.awaitForAll(ms, arr); } catch (InterruptedException e) { throw RT.sneakyThrow(e); }
         }));
         def(ns, "agent-error", Fn.of1("agent-error", a -> ((Agent) a).getError()));
+        def(ns, "agent-errors", Fn.of1("agent-errors", a -> {
+            Object err = ((Agent) a).getError();
+            return err == null ? null : PersistentList.createFromArray(err);
+        }));
+        def(ns, "clear-agent-errors", Fn.of1("clear-agent-errors", a -> {
+            Agent ag = (Agent) a;
+            if (ag.getError() != null) ag.restart(ag.getRawState(), false);
+            return null;
+        }));
+        def(ns, "await1", Fn.of1("await1", a -> {
+            Agent ag = (Agent) a;
+            try { ag.await(-1); } catch (InterruptedException e) { throw RT.sneakyThrow(e); }
+            return ag;
+        }));
         def(ns, "restart-agent", Fn.ofVarargs("restart-agent", args -> {
             Agent a = (Agent) args[0];
             Object newState = args[1];
@@ -1778,6 +1965,13 @@ public final class CoreExtras {
             Collection<Class<?>> ex = ((Protocol) p).extenders();
             return ex.isEmpty() ? null : PersistentList.create(new ArrayList<>(ex));
         }));
+        def(ns, "find-protocol-impl", Fn.of2("find-protocol-impl", (p, x) -> ((Protocol) p).findImplFor(x)));
+        def(ns, "find-protocol-method", Fn.of3("find-protocol-method", (p, mk, x) -> ((Protocol) p).resolveMethodOrNull((Keyword) mk, x)));
+        def(ns, "-cache-protocol-fn", Fn.ofVarargs("-cache-protocol-fn", args -> {
+            Fn pf = (Fn) args[0];
+            return pf.invoke(args[1]);
+        }));
+        def(ns, "-reset-methods", Fn.of1("-reset-methods", p -> { ((Protocol) p).resetCaches(); return p; }));
 
         def(ns, "extend", Fn.ofVarargs("extend", args -> {
             Class<?> atype = (Class<?>) args[0];
@@ -2003,6 +2197,41 @@ public final class CoreExtras {
         def(ns, "init-proxy", Fn.of2("init-proxy", (p, m) -> TypeFactory.initProxy(p, (PersistentHashMap) m)));
         def(ns, "update-proxy", Fn.of2("update-proxy", (p, m) -> TypeFactory.updateProxy(p, (PersistentHashMap) m)));
         def(ns, "proxy-mappings", Fn.of1("proxy-mappings", TypeFactory::proxyMappings));
+        def(ns, "proxy-name", Fn.of2("proxy-name", (sup, ifaces) -> {
+            List<Class<?>> ifs = new ArrayList<>();
+            for (ISeq s = RT.seq(ifaces); s != null; s = s.next()) ifs.add((Class<?>) s.first());
+            return TypeFactory.proxyName((Class<?>) sup, ifs.toArray(new Class<?>[0]));
+        }));
+        def(ns, "proxy-call-with-super", Fn.of3("proxy-call-with-super", (call, proxy, meth) ->
+                TypeFactory.proxyCallWithSuper((Fn) call, proxy, meth.toString())));
+        def(ns, "method-sig", Fn.of1("method-sig", m -> TypeFactory.methodSig((java.lang.reflect.Method) m)));
+
+        // Printing multimethods & PrintWriter helpers
+        MultiFn printMethod = new MultiFn("print-method", Fn.of2("print-method-dispatch", (o, w) -> o == null ? null : o.getClass()), Keyword.intern("default"));
+        printMethod.addMethod(Keyword.intern("default"), Fn.of2("print-method-default", (o, w) -> { RT.printSimple(o, (Writer) w); return null; }));
+        RT.PRINT_METHOD_FN = printMethod;
+        def(ns, "print-method", printMethod);
+
+        MultiFn printDup = new MultiFn("print-dup", Fn.of2("print-dup-dispatch", (o, w) -> o == null ? null : o.getClass()), Keyword.intern("default"));
+        printDup.addMethod(Keyword.intern("default"), Fn.of2("print-dup-default", (o, w) -> { RT.printSimple(o, (Writer) w); return null; }));
+        RT.PRINT_DUP_FN = printDup;
+        def(ns, "print-dup", printDup);
+
+        def(ns, "print-simple", Fn.of2("print-simple", (o, w) -> { RT.printSimple(o, (Writer) w); return null; }));
+        def(ns, "print-ctor", Fn.of3("print-ctor", (o, printArgs, w) -> {
+            try {
+                Writer wr = (Writer) w;
+                wr.write("#=(" + o.getClass().getName() + ". ");
+                ((Fn) printArgs).invoke(o, wr);
+                wr.write(")");
+                return null;
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        }));
+        def(ns, "PrintWriter-on", Fn.of23("PrintWriter-on",
+                (flushFn, closeFn) -> makePrintWriter((Fn) flushFn, (Fn) closeFn, false),
+                (flushFn, closeFn, autoFlush) -> makePrintWriter((Fn) flushFn, (Fn) closeFn, RT.truthy(autoFlush))));
 
         defMacro(ns, "proxy", Fn.ofVarargs("proxy", args -> {
             PersistentVector classAndIfaces = (PersistentVector) args[0];
@@ -2400,6 +2629,117 @@ public final class CoreExtras {
             }
         }
         return m;
+    }
+
+    private static PrintWriter makePrintWriter(Fn flushFn, Fn closeFn, boolean autoFlush) {
+        Writer w = new Writer() {
+            @Override public void write(char[] cbuf, int off, int len) {}
+            @Override public void flush() { if (flushFn != null) flushFn.invoke(); }
+            @Override public void close() { if (closeFn != null) closeFn.invoke(); }
+        };
+        return new PrintWriter(w, autoFlush);
+    }
+
+    private static Object intoIterator(Object to, Fn xform, Iterator<?> it) {
+        if (to == null) to = PersistentList.EMPTY;
+        if (xform != null) {
+            if (to instanceof PersistentVector pv) {
+                PersistentVector.TransientVector tv = pv.asTransient();
+                Fn rf = (Fn) xform.invoke(new Fn.NamedFn("conj!") {
+                    @Override public Object invoke() { return tv; }
+                    @Override public Object invoke(Object acc) { return ((PersistentVector.TransientVector) acc).persistent(); }
+                    @Override public Object invoke(Object acc, Object x) { return ((PersistentVector.TransientVector) acc).conj(x); }
+                });
+                Object acc = tv;
+                while (it.hasNext()) {
+                    acc = rf.invoke(acc, it.next());
+                    if (acc instanceof Reduced r) { acc = r.deref(); break; }
+                }
+                return rf.invoke(acc);
+            }
+            Fn rf = (Fn) xform.invoke(new Fn.NamedFn("conj") {
+                @Override public Object invoke() { return PersistentVector.EMPTY; }
+                @Override public Object invoke(Object acc) { return acc; }
+                @Override public Object invoke(Object acc, Object x) { return RT.conj(acc, x); }
+            });
+            Object acc = to;
+            while (it.hasNext()) {
+                acc = rf.invoke(acc, it.next());
+                if (acc instanceof Reduced r) { acc = r.deref(); break; }
+            }
+            return rf.invoke(acc);
+        }
+        if (to instanceof PersistentVector pv) {
+            PersistentVector.TransientVector tv = pv.asTransient();
+            while (it.hasNext()) tv = tv.conj(it.next());
+            return tv.persistent();
+        }
+        Object acc = to;
+        while (it.hasNext()) acc = RT.conj(acc, it.next());
+        return acc;
+    }
+
+    private static final Map<Character, String> MUNGE_MAP = createMungeMap();
+
+    private static Map<Character, String> createMungeMap() {
+        Map<Character, String> m = new HashMap<>();
+        m.put('-', "_");
+        m.put('.', "_DOT_");
+        m.put(':', "_COLON_");
+        m.put('+', "_PLUS_");
+        m.put('>', "_GT_");
+        m.put('<', "_LT_");
+        m.put('=', "_EQ_");
+        m.put('~', "_TILDE_");
+        m.put('!', "_BANG_");
+        m.put('@', "_CIRCA_");
+        m.put('#', "_SHARP_");
+        m.put('\'', "_SINGLEQUOTE_");
+        m.put('"', "_DOUBLEQUOTE_");
+        m.put('%', "_PERCENT_");
+        m.put('^', "_CARET_");
+        m.put('&', "_AMP_");
+        m.put('*', "_STAR_");
+        m.put('|', "_BAR_");
+        m.put('{', "_LBRACE_");
+        m.put('}', "_RBRACE_");
+        m.put('[', "_LBRACK_");
+        m.put(']', "_RBRACK_");
+        m.put('/', "_SLASH_");
+        m.put('\\', "_BSLASH_");
+        m.put('?', "_QMARK_");
+        return m;
+    }
+
+    public static String mungeString(String s) {
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            String repl = MUNGE_MAP.get(c);
+            if (repl != null) sb.append(repl);
+            else sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    private static Object mungeObj(Object x) {
+        if (x instanceof Symbol sym) {
+            if (sym.ns == null) return Symbol.intern(mungeString(sym.name));
+            return Symbol.intern(mungeString(sym.ns), mungeString(sym.name));
+        }
+        return mungeString(x.toString());
+    }
+
+    private static Object namespaceMunge(Object nsObj) {
+        String s;
+        if (nsObj instanceof Namespace ns) s = ns.name.name;
+        else if (nsObj instanceof Symbol sym) s = sym.name;
+        else s = nsObj.toString();
+        String[] parts = s.split("\\.", -1);
+        for (int i = 0; i < parts.length; i++) {
+            parts[i] = mungeString(parts[i]);
+        }
+        return String.join(".", parts);
     }
 
     private static Map<Protocol, Map<Keyword, Fn>> toProtoMap(Object mapObj) {

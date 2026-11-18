@@ -349,6 +349,36 @@ public final class TypeFactory {
         return ((ProxyObject) proxy).__getMappings();
     }
 
+    public static String proxyName(Class<?> superClass, Class<?>[] interfaces) {
+        StringBuilder sb = new StringBuilder("cljl.proxy.");
+        sb.append((superClass != null ? superClass : Object.class).getName());
+        if (interfaces != null) {
+            for (Class<?> c : interfaces) {
+                sb.append('$').append(c.getName());
+            }
+        }
+        return sb.toString();
+    }
+
+    public static Object proxyCallWithSuper(Fn call, Object proxy, String methName) {
+        ProxyObject p = (ProxyObject) proxy;
+        PersistentHashMap orig = p.__getMappings();
+        PersistentHashMap temp = orig != null ? orig.without(methName).without(Keyword.intern(methName)) : PersistentHashMap.EMPTY;
+        p.__setMappings(temp);
+        try {
+            return call.invoke();
+        } finally {
+            p.__setMappings(orig);
+        }
+    }
+
+    public static PersistentVector methodSig(Method m) {
+        return PersistentVector.createOwning(
+                m.getName(),
+                PersistentVector.createOwning((Object[]) m.getParameterTypes()),
+                m.getReturnType());
+    }
+
     public static Object coerceReturn(Class<?> retType, Object val) {
         if (retType == void.class) return null;
         if (!retType.isPrimitive()) return val;

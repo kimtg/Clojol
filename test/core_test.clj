@@ -1092,6 +1092,160 @@
       (is (await-for 5000 ag))
       (is (= [:a :b :c] @ag)))))
 
+(defrecord CustomPrintRec [x])
+(defstruct person-struct :name :age)
+(defprotocol PTest (pmeth [this]))
+
+(deftest clojure-core-parity-test
+  (testing "all 92 parity symbols exist in clojure.core"
+    (let [pubs (ns-publics 'clojure.core)
+          expected '[*allow-unresolved-vars* *assert* *compiler-options* *flush-on-newline*
+                     *fn-loader* *math-context* *print-namespace-maps* *read-eval*
+                     *reader-resolver* *repl* *source-path* *suppress-read*
+                     *use-context-classloader* *verbose-defrecords*
+                     ->ArrayChunk ->Eduction ->Vec ->VecNode ->VecSeq
+                     -cache-protocol-fn -reset-methods EMPTY-NODE Inst PrintWriter-on
+                     accessor add-classpath agent-errors await1
+                     chunk chunk-append chunk-buffer chunk-cons chunk-first chunk-next chunk-rest chunked-seq?
+                     clear-agent-errors create-struct defmacro defstruct denominator destructure
+                     find-protocol-impl find-protocol-method
+                     hash-combine hash-ordered-coll hash-unordered-coll
+                     inst-ms inst-ms* method-sig mix-collection-hash munge namespace-munge numerator
+                     partitionv partitionv-all primitives-classnames
+                     print-ctor print-dup print-method print-simple
+                     proxy-call-with-super proxy-name
+                     read+string reader-conditional reader-conditional? refer-clojure replicate
+                     seq-to-map-for-destructuring special-symbol? splitv-at
+                     stream-into! stream-reduce! stream-seq! stream-transduce!
+                     struct struct-map tagged-literal tagged-literal?
+                     unchecked-add-int unchecked-dec-int unchecked-divide-int unchecked-inc-int
+                     unchecked-multiply-int unchecked-negate-int unchecked-remainder-int unchecked-subtract-int
+                     unquote unquote-splicing with-bindings with-bindings* with-loading-context]]
+      (doseq [sym expected]
+        (is (contains? pubs sym) (str "Missing from clojure.core: " sym)))))
+
+  (testing "Clojure 1.12 partitionv, partitionv-all, splitv-at, and stream-* ops"
+    (is (= [[1 2] [3 4]] (partitionv 2 [1 2 3 4 5])))
+    (is (= [[1 2] [3 4] [5 0]] (partitionv 2 2 [0] [1 2 3 4 5])))
+    (is (vector? (first (partitionv 2 [1 2 3 4]))))
+    (is (= [[1 2] [3 4] [5]] (partitionv-all 2 [1 2 3 4 5])))
+    (is (= [[1 2] [3 4] [5]] (into [] (partitionv-all 2) [1 2 3 4 5])))
+    (is (= [[1 2] '(3 4 5)] (splitv-at 2 [1 2 3 4 5])))
+    (is (vector? (first (splitv-at 2 '(1 2 3 4)))))
+    (is (= '(1 2 3) (stream-seq! (.stream [1 2 3]))))
+    (is (nil? (stream-seq! (.stream []))))
+    (is (= 10 (stream-reduce! + (.stream [1 2 3 4]))))
+    (is (= 100 (stream-reduce! + 90 (.stream [1 2 3 4]))))
+    (is (= 12 (stream-transduce! (map #(* 2 %)) + (.stream [1 2 3]))))
+    (is (= [2 4 6] (stream-into! [] (map #(* 2 %)) (.stream [1 2 3]))))
+    (is (= [1 2 3] (stream-into! [] (.stream [1 2 3])))))
+
+  (testing "ratios, unchecked-*-int, Inst/inst-ms, hashing, munge, replicate"
+    (is (= 3 (numerator 3/2)))
+    (is (= 2 (denominator 3/2)))
+    (is (= Integer/MIN_VALUE (unchecked-add-int Integer/MAX_VALUE 1)))
+    (is (= Integer/MAX_VALUE (unchecked-subtract-int Integer/MIN_VALUE 1)))
+    (is (= -2 (unchecked-multiply-int Integer/MAX_VALUE 2)))
+    (is (= Integer/MIN_VALUE (unchecked-inc-int Integer/MAX_VALUE)))
+    (is (= Integer/MAX_VALUE (unchecked-dec-int Integer/MIN_VALUE)))
+    (is (= Integer/MIN_VALUE (unchecked-negate-int Integer/MIN_VALUE)))
+    (is (= 3 (unchecked-divide-int 10 3)))
+    (is (= 1 (unchecked-remainder-int 10 3)))
+    (is (= 12345 (inst-ms (java.util.Date. 12345))))
+    (is (= 12345 (inst-ms* (java.time.Instant/ofEpochMilli 12345))))
+    (is (integer? (hash-combine 1 2)))
+    (is (integer? (mix-collection-hash 42 3)))
+    (is (= (hash-ordered-coll [1 2 3]) (hash-ordered-coll (java.util.List/of 1 2 3))))
+    (is (= (hash-unordered-coll #{1 2}) (hash-unordered-coll (java.util.Set/of 2 1))))
+    (is (= "foo_bar_QMARK__BANG_" (munge "foo-bar?!")))
+    (is (= 'foo_bar_STAR_ (munge 'foo-bar*)))
+    (is (= "my_app.core_util" (namespace-munge 'my-app.core-util)))
+    (is (= '(:x :x :x) (replicate 3 :x))))
+
+  (testing "defmacro, special-symbol?, destructure, with-bindings, tagged-literal, reader-conditional, read+string"
+    (is (false? (special-symbol? 'defmacro)))
+    (is (true? (special-symbol? 'if)))
+    (is (true? (special-symbol? 'recur)))
+    (is (vector? (destructure '[[a b] [1 2]])))
+    (is (= {:a 1 :b 2} (seq-to-map-for-destructuring '(:a 1 :b 2))))
+    (def ^:dynamic *wb-test* 1)
+    (is (= 42 (with-bindings {#'*wb-test* 42} *wb-test*)))
+    (is (= 43 (with-bindings* {#'*wb-test* 42} #(inc *wb-test*))))
+    (is (= 1 *wb-test*))
+    (is (= :ok (with-loading-context :ok)))
+    (let [tl (tagged-literal 'foo [1 2])
+          rc (reader-conditional '(:clj 1 :cljs 2) false)]
+      (is (tagged-literal? tl))
+      (is (= 'foo (:tag tl)))
+      (is (= [1 2] (:form tl)))
+      (is (= "#foo [1 2]" (pr-str tl)))
+      (is (reader-conditional? rc))
+      (is (= '(:clj 1 :cljs 2) (:form rc)))
+      (is (= false (:splicing? rc)))
+      (let [preserved (read-string {:read-cond :preserve} "#?@(:clj [1 2])")]
+        (is (reader-conditional? preserved))
+        (is (= true (:splicing? preserved))))
+      (let [[form raw] (read+string (java.io.StringReader. "  {:a 1}  rest"))]
+        (is (= {:a 1} form))
+        (is (= "{:a 1}" raw))))
+    (is (thrown? IllegalStateException (unquote 1)))
+    (is (thrown? IllegalStateException (unquote-splicing [1]))))
+
+  (testing "structs, agent helpers, chunked seqs, ->Eduction, printing, protocols & proxy helpers"
+    (let [s1 (struct person-struct "Alice" 30)
+          s2 (struct-map person-struct :age 25 :name "Bob" :city "NYC")
+          get-name (accessor person-struct :name)]
+      (is (= "Alice" (get-name s1)))
+      (is (= 30 (:age s1)))
+      (is (= "Bob" (get-name s2)))
+      (is (= "NYC" (:city s2)))
+      (is (thrown? IllegalArgumentException (dissoc s1 :name)))
+      (is (= {:name "Bob" :age 25} (dissoc s2 :city))))
+    (let [ag (agent 10)]
+      (send ag (fn [_] (throw (RuntimeException. "boom"))))
+      (await1 ag)
+      (is (= 1 (count (agent-errors ag))))
+      (clear-agent-errors ag)
+      (is (nil? (agent-errors ag)))
+      (is (= 10 @ag)))
+    (let [cb (chunk-buffer 4)]
+      (chunk-append cb 10)
+      (chunk-append cb 20)
+      (let [ch (chunk cb)
+            cs (chunk-cons ch '(30))]
+        (is (chunked-seq? cs))
+        (is (= 2 (count (chunk-first cs))))
+        (is (= '(30) (chunk-next cs)))
+        (is (= '(10 20 30) cs)))
+      (is (= 2 (count (->ArrayChunk nil (object-array [:a :b :c]) 1 3)))))
+    (let [vn (->VecNode nil (object-array [10 20 30]))
+          v (->Vec nil 3 5 vn (.arr vn) nil)
+          vs (->VecSeq nil v vn 0 0 nil)]
+      (is (= [10 20 30] (vec v)))
+      (is (= '(10 20 30) vs)))
+    (is (= [2 4 6] (vec (->Eduction (map #(* 2 %)) [1 2 3]))))
+    (is (some? EMPTY-NODE))
+    (is (= "Long" (get primitives-classnames Long/TYPE)))
+    (let [flushed (atom 0)
+          closed (atom 0)
+          pw (PrintWriter-on #(swap! flushed inc) #(swap! closed inc))]
+      (.flush pw)
+      (.close pw)
+      (is (= 1 @flushed))
+      (is (= 1 @closed)))
+    (defmethod print-method CustomPrintRec [r w]
+      (.write ^java.io.Writer w (str "#Custom[" (:x r) "]")))
+    (is (= "#Custom[99]" (pr-str (->CustomPrintRec 99))))
+    (extend-type String PTest (pmeth [s] (.length s)))
+    (is (some? (find-protocol-impl PTest "abc")))
+    (is (fn? (find-protocol-method PTest :pmeth "abc")))
+    (is (= PTest (-reset-methods PTest)))
+    (is (string? (proxy-name Object [java.lang.Runnable])))
+    (let [^Class c String]
+      (is (vector? (method-sig (first (.getMethods c))))))
+    (binding [*assert* false]
+      (is (nil? (eval '(assert false "should not fire")))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

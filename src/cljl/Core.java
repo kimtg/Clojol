@@ -504,6 +504,7 @@ public final class Core {
         def(ns, "repeat", Fn.of12("repeat",
                 x -> repeatInfSeq(x),
                 (n, x) -> repeatNSeq(Numbers.toLong(n), x)));
+        def(ns, "replicate", Fn.of2("replicate", (n, x) -> repeatNSeq(Numbers.toLong(n), x)));
 
         def(ns, "repeatedly", Fn.of12("repeatedly",
                 f -> repeatedlyInfSeq((Fn) f),
@@ -735,21 +736,43 @@ public final class Core {
         }));
 
         def(ns, "partition", Fn.ofVarargs("partition", args -> switch (args.length) {
-            case 2 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[0]), null, RT.seq(args[1]), false);
-            case 3 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), null, RT.seq(args[2]), false);
-            case 4 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), RT.seq(args[2]), RT.seq(args[3]), false);
+            case 2 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[0]), null, RT.seq(args[1]), false, false);
+            case 3 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), null, RT.seq(args[2]), false, false);
+            case 4 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), RT.seq(args[2]), RT.seq(args[3]), false, false);
             default -> throw new IllegalArgumentException("Wrong number of args to partition");
         }));
 
         def(ns, "partition-all", Fn.of23("partition-all",
-                (n, coll) -> partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(n), null, RT.seq(coll), true),
-                (n, step, coll) -> partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(step), null, RT.seq(coll), true)));
+                (n, coll) -> partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(n), null, RT.seq(coll), true, false),
+                (n, step, coll) -> partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(step), null, RT.seq(coll), true, false)));
+
+        def(ns, "partitionv", Fn.ofVarargs("partitionv", args -> switch (args.length) {
+            case 2 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[0]), null, RT.seq(args[1]), false, true);
+            case 3 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), null, RT.seq(args[2]), false, true);
+            case 4 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), RT.seq(args[2]), RT.seq(args[3]), false, true);
+            default -> throw new IllegalArgumentException("Wrong number of args to partitionv");
+        }));
+
+        def(ns, "partitionv-all", Fn.of23("partitionv-all",
+                (n, coll) -> partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(n), null, RT.seq(coll), true, true),
+                (n, step, coll) -> partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(step), null, RT.seq(coll), true, true)));
 
         def(ns, "partition-by", Fn.of2("partition-by", (f, coll) -> partitionBySeq((Fn) f, RT.seq(coll))));
 
         def(ns, "split-at", Fn.of2("split-at", (n, coll) -> {
             long k = Numbers.toLong(n);
             return PersistentVector.createOwning(takeSeq(k, RT.seq(coll)), dropSeq(k, coll));
+        }));
+
+        def(ns, "splitv-at", Fn.of2("splitv-at", (n, coll) -> {
+            long k = Numbers.toLong(n);
+            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
+            ISeq s = RT.seq(coll);
+            for (long i = 0; i < k && s != null; i++) {
+                tv = tv.conj(s.first());
+                s = s.next();
+            }
+            return PersistentVector.createOwning(tv.persistent(), s == null ? PersistentList.EMPTY : s);
         }));
 
         def(ns, "split-with", Fn.of2("split-with", (pred, coll) ->
@@ -1272,7 +1295,7 @@ public final class Core {
         }));
     }
 
-    private static ISeq partitionSeq(int n, int step, ISeq pad, ISeq s, boolean allowPartial) {
+    private static ISeq partitionSeq(int n, int step, ISeq pad, ISeq s, boolean allowPartial, boolean asVector) {
         if (s == null) return null;
         return new LazySeq(Fn.of0("partition", () -> {
             ISeq sq = s.seq();
@@ -1296,8 +1319,9 @@ public final class Core {
             }
             ISeq nextStart = sq;
             for (int i = 0; i < step && nextStart != null; i++) nextStart = nextStart.next();
-            return new Cons(PersistentList.create(chunk),
-                    partitionSeq(n, step, pad, nextStart, allowPartial));
+            Object part = asVector ? PersistentVector.create(chunk) : PersistentList.create(chunk);
+            return new Cons(part,
+                    partitionSeq(n, step, pad, nextStart, allowPartial, asVector));
         }));
     }
 
@@ -2006,6 +2030,26 @@ public final class Core {
         def(ns, "read-string", Fn.of12("read-string",
                 s -> Reader.readString((String) s),
                 (opts, s) -> Reader.readString((Map<?, ?>) opts, (String) s)));
+        def(ns, "read+string", new Fn.NamedFn("read+string") {
+            @Override public Object invoke() {
+                return Reader.readFromStreamWithString((java.io.Reader) RT.IN.deref(), true, null, null);
+            }
+            @Override public Object invoke(Object stream) {
+                return Reader.readFromStreamWithString((java.io.Reader) stream, true, null, null);
+            }
+            @Override public Object invoke(Object streamOrOpts, Object streamOrEofError) {
+                if (streamOrOpts instanceof Map<?, ?> opts) {
+                    return Reader.readFromStreamWithString(opts, (java.io.Reader) streamOrEofError);
+                }
+                return Reader.readFromStreamWithString((java.io.Reader) streamOrOpts, RT.truthy(streamOrEofError), null, null);
+            }
+            @Override public Object invoke(Object stream, Object eofErrorP, Object eofValue) {
+                return Reader.readFromStreamWithString((java.io.Reader) stream, RT.truthy(eofErrorP), eofValue, null);
+            }
+            @Override public Object invoke(Object stream, Object eofErrorP, Object eofValue, Object recursiveP) {
+                return Reader.readFromStreamWithString((java.io.Reader) stream, RT.truthy(eofErrorP), eofValue, null);
+            }
+        });
         def(ns, "slurp", Fn.ofVarargs("slurp", args -> {
             if (args.length == 0) throw new IllegalArgumentException("Wrong number of args (0) passed to: slurp");
             Charset charset = StandardCharsets.UTF_8;
@@ -2111,14 +2155,21 @@ public final class Core {
 
     private static void writeOut(String s, boolean newline) {
         Object out = RT.OUT.deref();
+        boolean flushNl = RT.truthy(RT.FLUSH_ON_NEWLINE.get());
         if (out instanceof PrintWriter pw) {
-            if (newline) pw.println(s);
-            else { pw.print(s); pw.flush(); }
+            if (newline) {
+                pw.print(s);
+                pw.print(System.lineSeparator());
+                if (flushNl) pw.flush();
+            } else {
+                pw.print(s);
+                pw.flush();
+            }
         } else if (out instanceof Writer w) {
             try {
                 w.write(s);
                 if (newline) w.write(System.lineSeparator());
-                w.flush();
+                if (!newline || flushNl) w.flush();
             } catch (IOException e) {
                 throw RT.sneakyThrow(e);
             }
@@ -2516,6 +2567,16 @@ public final class Core {
 
         def(ns, "macroexpand-1", Fn.of1("macroexpand-1", Compiler::macroexpand1));
         def(ns, "macroexpand", Fn.of1("macroexpand", Compiler::macroexpand));
+        def(ns, "special-symbol?", Fn.of1("special-symbol?", x -> x instanceof Symbol sym && sym.ns == null && Compiler.isSpecial(sym)));
+        def(ns, "destructure", Fn.of1("destructure", b -> Compiler.destructure((PersistentVector) b)));
+        def(ns, "seq-to-map-for-destructuring", Fn.of1("seq-to-map-for-destructuring", RT::destructureMap));
+        def(ns, "add-classpath", Fn.of1("add-classpath", RT::addClasspath));
+        def(ns, "unquote", Fn.ofVarargs("unquote", args -> {
+            throw new IllegalStateException("unquote used outside syntax-quote");
+        }));
+        def(ns, "unquote-splicing", Fn.ofVarargs("unquote-splicing", args -> {
+            throw new IllegalStateException("unquote-splicing used outside syntax-quote");
+        }));
 
         // Multimethods
         def(ns, "methods", Fn.of1("methods", mf -> ((MultiFn) mf).getMethodTable()));
@@ -3336,6 +3397,68 @@ public final class Core {
             return null;
         }));
 
+        defMacro(ns, "defmacro", Fn.ofVarargs("defmacro", args -> {
+            List<Object> out = new ArrayList<>(args.length + 1);
+            out.add(Symbol.intern("defmacro*"));
+            Collections.addAll(out, args);
+            return PersistentList.create(out);
+        }));
+
+        defMacro(ns, "refer-clojure", Fn.ofVarargs("refer-clojure", args -> {
+            List<Object> out = new ArrayList<>(args.length + 2);
+            out.add(Symbol.intern("clojure.core", "refer"));
+            out.add(PersistentList.createFromArray(Symbol.intern("quote"), Symbol.intern("clojure.core")));
+            Collections.addAll(out, args);
+            return PersistentList.create(out);
+        }));
+
+        def(ns, "with-bindings*", Fn.ofVarargs("with-bindings*", args -> {
+            Object bmap = args[0];
+            Fn f = (Fn) args[1];
+            Object[] fargs = args.length > 2 ? Arrays.copyOfRange(args, 2, args.length) : Fn.EMPTY_ARGS;
+            Map<Var, Object> map = new HashMap<>();
+            for (ISeq s = RT.seq(bmap); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                map.put((Var) e.getKey(), e.getValue());
+            }
+            Var.pushThreadBindings(map);
+            try {
+                return f.applyTo(fargs);
+            } finally {
+                Var.popThreadBindings();
+            }
+        }));
+
+        defMacro(ns, "with-bindings", Fn.ofVarargs("with-bindings", args -> {
+            List<Object> fnBody = new ArrayList<>();
+            fnBody.add(doSym);
+            for (int i = 1; i < args.length; i++) fnBody.add(args[i]);
+            return PersistentList.createFromArray(
+                    Symbol.intern("clojure.core", "with-bindings*"),
+                    args[0],
+                    PersistentList.createFromArray(Symbol.intern("fn*"), PersistentVector.EMPTY, PersistentList.create(fnBody)));
+        }));
+
+        def(ns, "with-loading-context*", Fn.of1("with-loading-context*", fnObj -> {
+            ClassLoader savedCl = Thread.currentThread().getContextClassLoader();
+            Var.pushThreadBindings(Collections.emptyMap());
+            try {
+                return ((Fn) fnObj).invoke();
+            } finally {
+                Var.popThreadBindings();
+                Thread.currentThread().setContextClassLoader(savedCl);
+            }
+        }));
+
+        defMacro(ns, "with-loading-context", Fn.ofVarargs("with-loading-context", args -> {
+            List<Object> body = new ArrayList<>();
+            body.add(doSym);
+            Collections.addAll(body, args);
+            return PersistentList.createFromArray(
+                    Symbol.intern("clojure.core", "with-loading-context*"),
+                    PersistentList.createFromArray(Symbol.intern("fn*"), PersistentVector.EMPTY, PersistentList.create(body)));
+        }));
+
         defMacro(ns, "binding", Fn.ofVarargs("binding", args -> {
             PersistentVector vec = (PersistentVector) args[0];
             List<Object> kvs = new ArrayList<>();
@@ -3425,6 +3548,7 @@ public final class Core {
         }));
 
         defMacro(ns, "assert", Fn.ofVarargs("assert", args -> {
+            if (!RT.truthy(RT.ASSERT.deref())) return null;
             Object x = args[0];
             Object msg = args.length > 1 ? args[1] : RT.printString(x);
             return PersistentList.createFromArray(Symbol.intern("when-not"), x,

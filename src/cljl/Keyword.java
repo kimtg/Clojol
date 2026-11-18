@@ -1,6 +1,6 @@
 package cljl;
 
-import cljl.lang.Associative;
+import cljl.lang.ILookup;
 import cljl.lang.PersistentHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -52,8 +52,8 @@ public final class Keyword extends Fn implements Comparable<Keyword> {
         if (coll instanceof PersistentHashMap phm) {
             return phm.valAt(this, null);
         }
-        if (coll instanceof Associative a) {
-            return a.valAt(this, null);
+        if (coll instanceof ILookup lu) {
+            return lu.valAt(this, null);
         }
         return RT.get(coll, this);
     }
@@ -63,8 +63,8 @@ public final class Keyword extends Fn implements Comparable<Keyword> {
         if (coll instanceof PersistentHashMap phm) {
             return phm.valAt(this, notFound);
         }
-        if (coll instanceof Associative a) {
-            return a.valAt(this, notFound);
+        if (coll instanceof ILookup lu) {
+            return lu.valAt(this, notFound);
         }
         return RT.get(coll, this, notFound);
     }

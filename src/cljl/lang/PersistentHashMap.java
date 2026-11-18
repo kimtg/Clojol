@@ -276,8 +276,8 @@ public final class PersistentHashMap extends Fn
         return 1 << mask(hash, shift);
     }
 
-    static final class BitmapIndexedNode implements INode {
-        static final BitmapIndexedNode EMPTY = new BitmapIndexedNode(null, 0, new Object[0]);
+    public static final class BitmapIndexedNode implements INode {
+        public static final BitmapIndexedNode EMPTY = new BitmapIndexedNode(null, 0, new Object[0]);
 
         final AtomicReference<Thread> edit;
         int bitmap;

@@ -40,6 +40,23 @@ public final class RT {
     public static final Var WARN_ON_REFLECTION = CLOJURE_NS.intern(Symbol.intern("*warn-on-reflection*")).bindRoot(Boolean.FALSE).setDynamic();
     public static final Var DATA_READERS = CLOJURE_NS.intern(Symbol.intern("*data-readers*")).bindRoot(PersistentHashMap.EMPTY).setDynamic();
     public static final Var DEFAULT_DATA_READER_FN = CLOJURE_NS.intern(Symbol.intern("*default-data-reader-fn*")).bindRoot(null).setDynamic();
+    public static final Var ASSERT = CLOJURE_NS.intern(Symbol.intern("*assert*")).bindRoot(Boolean.TRUE).setDynamic();
+    public static final Var MATH_CONTEXT = CLOJURE_NS.intern(Symbol.intern("*math-context*")).bindRoot(null).setDynamic();
+    public static final Var READ_EVAL = CLOJURE_NS.intern(Symbol.intern("*read-eval*")).bindRoot(Boolean.TRUE).setDynamic();
+    public static final Var READER_RESOLVER = CLOJURE_NS.intern(Symbol.intern("*reader-resolver*")).bindRoot(null).setDynamic();
+    public static final Var SUPPRESS_READ = CLOJURE_NS.intern(Symbol.intern("*suppress-read*")).bindRoot(Boolean.FALSE).setDynamic();
+    public static final Var PRINT_NAMESPACE_MAPS = CLOJURE_NS.intern(Symbol.intern("*print-namespace-maps*")).bindRoot(Boolean.TRUE).setDynamic();
+    public static final Var FLUSH_ON_NEWLINE = CLOJURE_NS.intern(Symbol.intern("*flush-on-newline*")).bindRoot(Boolean.TRUE).setDynamic();
+    public static final Var REPL = CLOJURE_NS.intern(Symbol.intern("*repl*")).bindRoot(Boolean.FALSE).setDynamic();
+    public static final Var SOURCE_PATH = CLOJURE_NS.intern(Symbol.intern("*source-path*")).bindRoot("NO_SOURCE_PATH").setDynamic();
+    public static final Var FN_LOADER = CLOJURE_NS.intern(Symbol.intern("*fn-loader*")).bindRoot(null).setDynamic();
+    public static final Var USE_CONTEXT_CLASSLOADER = CLOJURE_NS.intern(Symbol.intern("*use-context-classloader*")).bindRoot(Boolean.TRUE).setDynamic();
+    public static final Var ALLOW_UNRESOLVED_VARS = CLOJURE_NS.intern(Symbol.intern("*allow-unresolved-vars*")).bindRoot(Boolean.FALSE).setDynamic();
+    public static final Var COMPILER_OPTIONS = CLOJURE_NS.intern(Symbol.intern("*compiler-options*")).bindRoot(null).setDynamic();
+    public static final Var VERBOSE_DEFRECORDS = CLOJURE_NS.intern(Symbol.intern("*verbose-defrecords*")).bindRoot(Boolean.FALSE).setDynamic();
+
+    public static volatile MultiFn PRINT_METHOD_FN = null;
+    public static volatile MultiFn PRINT_DUP_FN = null;
     public static final PersistentHashMap DEFAULT_DATA_READERS_MAP = PersistentHashMap.create(
             Symbol.intern("uuid"), Fn.of1("uuid-reader", s -> UUID.fromString(s.toString())),
             Symbol.intern("inst"), Fn.of1("inst-reader", s -> Date.from(java.time.Instant.parse(normalizeInst(s.toString()))))
@@ -97,6 +114,27 @@ public final class RT {
 
     public static boolean isStrictRuntimeLoader() {
         return strictRuntimeLoader;
+    }
+
+    public static Object addClasspath(Object urlObj) {
+        try {
+            java.net.URL url;
+            if (urlObj instanceof java.net.URL u) {
+                url = u;
+            } else {
+                String s = urlObj.toString();
+                if (s.startsWith("file:") || s.startsWith("http:") || s.startsWith("https:") || s.startsWith("jar:")) {
+                    url = java.net.URI.create(s).toURL();
+                } else {
+                    url = java.nio.file.Path.of(s).toUri().toURL();
+                }
+            }
+            java.net.URLClassLoader ucl = new java.net.URLClassLoader(new java.net.URL[]{url}, baseLoader());
+            setRuntimeClassLoader(ucl, isStrictRuntimeLoader());
+            return null;
+        } catch (Exception e) {
+            throw sneakyThrow(e);
+        }
     }
 
     public static Namespace currentNS() {
@@ -160,6 +198,45 @@ public final class RT {
             return bd.stripTrailingZeros().hashCode();
         }
         return o.hashCode();
+    }
+
+    public static int hashCombine(int x, int y) {
+        return x ^ (y + 0x9e3779b9 + (x << 6) + (x >>> 2));
+    }
+
+    public static int mixCollectionHash(int hashBasis, int count) {
+        int k1 = hashBasis * 0xcc9e2d51;
+        k1 = Integer.rotateLeft(k1, 15);
+        k1 *= 0x1b873593;
+        int h1 = Integer.rotateLeft(k1, 13);
+        h1 = h1 * 5 + 0xe6546b64;
+        h1 ^= count;
+        h1 ^= h1 >>> 16;
+        h1 *= 0x85ebca6b;
+        h1 ^= h1 >>> 13;
+        h1 *= 0xc2b2ae35;
+        h1 ^= h1 >>> 16;
+        return h1;
+    }
+
+    public static int hashOrderedColl(Iterable<?> coll) {
+        int n = 0;
+        int hash = 1;
+        for (Object x : coll) {
+            hash = 31 * hash + hash(x);
+            n++;
+        }
+        return mixCollectionHash(hash, n);
+    }
+
+    public static int hashUnorderedColl(Iterable<?> coll) {
+        int n = 0;
+        int hash = 0;
+        for (Object x : coll) {
+            hash += hash(x);
+            n++;
+        }
+        return mixCollectionHash(hash, n);
     }
 
     public static final class EquivKey {
@@ -401,6 +478,7 @@ public final class RT {
         if (coll instanceof PersistentHashMap m) return m.without(key);
         if (coll instanceof PersistentTreeMap m) return m.without(key);
         if (coll instanceof PersistentRecord rec) return rec.without(key);
+        if (coll instanceof PersistentStructMap sm) return sm.without(key);
         if (coll instanceof PersistentColl pc) return pc.without(key);
         if (coll instanceof Map<?, ?> m) return PersistentHashMap.createFromMap(m).without(key);
         throw new IllegalArgumentException("dissoc not supported on: " + coll.getClass().getName());
@@ -464,7 +542,7 @@ public final class RT {
     public static Object get(Object coll, Object key, Object notFound) {
         if (coll == null) return notFound;
         if (coll instanceof PersistentHashMap m) return m.valAt(key, notFound);
-        if (coll instanceof Associative a) return a.valAt(key, notFound);
+        if (coll instanceof ILookup lu) return lu.valAt(key, notFound);
         if (coll instanceof PersistentHashSet s) return s.get(key, notFound);
         if (coll instanceof PersistentTreeSet s) return s.get(key, notFound);
         if (coll instanceof Map<?, ?> m) {
@@ -758,7 +836,38 @@ public final class RT {
         printDepth(x, sb, readably, printMeta, maxLen, maxLevel, 0);
     }
 
+    public static void printSimple(Object x, Writer w) {
+        StringBuilder sb = new StringBuilder();
+        int maxLen = PRINT_LENGTH.get() instanceof Number n ? n.intValue() : -1;
+        int maxLevel = PRINT_LEVEL.get() instanceof Number n ? n.intValue() : -1;
+        boolean readably = truthy(PRINT_READABLY.get());
+        boolean printMeta = truthy(PRINT_META.get()) && readably;
+        printSimpleDepth(x, sb, readably, printMeta, maxLen, maxLevel, 0);
+        try {
+            w.write(sb.toString());
+        } catch (IOException e) {
+            throw sneakyThrow(e);
+        }
+    }
+
     private static void printDepth(Object x, StringBuilder sb, boolean readably, boolean printMeta, int maxLen, int maxLevel, int level) {
+        if (x != null) {
+            MultiFn mf = truthy(PRINT_DUP.get()) ? PRINT_DUP_FN : PRINT_METHOD_FN;
+            if (mf != null && mf.getMethodTable().count() > 1) {
+                Fn custom = mf.getMethod(x.getClass());
+                Fn defMethod = mf.getMethod(Keyword.intern("default"));
+                if (custom != null && custom != defMethod) {
+                    StringWriter sw = new StringWriter();
+                    custom.invoke(x, sw);
+                    sb.append(sw.toString());
+                    return;
+                }
+            }
+        }
+        printSimpleDepth(x, sb, readably, printMeta, maxLen, maxLevel, level);
+    }
+
+    private static void printSimpleDepth(Object x, StringBuilder sb, boolean readably, boolean printMeta, int maxLen, int maxLevel, int level) {
         if (x == null) {
             sb.append("nil");
             return;
@@ -916,6 +1025,16 @@ public final class RT {
         }
         if (x instanceof Class<?> c) {
             sb.append(c.getName());
+            return;
+        }
+        if (x instanceof TaggedLiteral tl) {
+            sb.append('#').append(tl.tag).append(' ');
+            printDepth(tl.form, sb, readably, printMeta, maxLen, maxLevel, level + 1);
+            return;
+        }
+        if (x instanceof ReaderConditional rc) {
+            sb.append(rc.splicing ? "#?@" : "#?");
+            printDepth(rc.form, sb, readably, printMeta, maxLen, maxLevel, level + 1);
             return;
         }
         sb.append(x.toString());

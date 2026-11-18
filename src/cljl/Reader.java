@@ -46,6 +46,8 @@ public final class Reader {
     private final String filename;
     private final Set<Object> features;
     private final boolean readCondAllowed;
+    private final boolean readCondPreserve;
+    private StringBuilder captureBuf = null;
 
     // Context for #(...) anonymous function reader
     private Deque<FnEnv> fnEnvStack;
@@ -183,11 +185,13 @@ public final class Reader {
         this.filename = filename != null ? filename : "<stdin>";
         if (opts != null) {
             Object rc = opts.get(Keyword.intern("read-cond"));
-            this.readCondAllowed = rc == null || Keyword.intern("allow").equals(rc);
+            this.readCondPreserve = Keyword.intern("preserve").equals(rc);
+            this.readCondAllowed = rc == null || Keyword.intern("allow").equals(rc) || this.readCondPreserve;
             Object feats = opts.get(Keyword.intern("features"));
             this.features = (feats instanceof Set<?> set) ? (Set<Object>) set : null;
         } else {
             this.readCondAllowed = true;
+            this.readCondPreserve = false;
             this.features = null;
         }
     }
@@ -234,6 +238,41 @@ public final class Reader {
         return readFromStream(stream, eofIsError, eofValue, opts);
     }
 
+    public static PersistentVector readFromStreamWithString(java.io.Reader stream, boolean eofIsError, Object eofValue, Map<?, ?> opts) {
+        if (stream == null) {
+            if (eofIsError) throw new RuntimeException("EOF while reading");
+            return PersistentVector.createOwning(eofValue, "");
+        }
+        Reader r = new Reader(stream, "<stream>", opts);
+        try {
+            return r.readFormWithString(eofIsError, eofValue);
+        } finally {
+            r.source.finish();
+        }
+    }
+
+    public static PersistentVector readFromStreamWithString(Map<?, ?> opts, java.io.Reader stream) {
+        boolean eofIsError = isEofError(opts, true);
+        Object eofValue = extractEofValue(opts, eofIsError, null);
+        return readFromStreamWithString(stream, eofIsError, eofValue, opts);
+    }
+
+    public PersistentVector readFormWithString(boolean eofIsError, Object eofValue) {
+        skipWhitespaceAndComments();
+        if (peek() == -1) {
+            if (eofIsError) throw readerError("EOF while reading");
+            return PersistentVector.createOwning(eofValue, "");
+        }
+        StringBuilder cap = new StringBuilder();
+        this.captureBuf = cap;
+        try {
+            Object form = readForm(eofIsError, eofValue);
+            return PersistentVector.createOwning(form, cap.toString().trim());
+        } finally {
+            this.captureBuf = null;
+        }
+    }
+
     private static boolean isEofError(Map<?, ?> opts, boolean defaultErr) {
         if (opts == null) return defaultErr;
         Keyword eofKw = Keyword.intern("eof");
@@ -277,6 +316,7 @@ public final class Reader {
     private int readChar() {
         int c = source.read();
         if (c == -1) return -1;
+        if (captureBuf != null) captureBuf.append((char) c);
         if (c == '\n') {
             line++;
             col = 1;
@@ -630,6 +670,9 @@ public final class Reader {
         }
         if (!readCondAllowed) {
             throw readerError("Conditional read not allowed");
+        }
+        if (readCondPreserve) {
+            return ReaderConditional.create(PersistentList.create(pairs), splicing);
         }
         Keyword cljlKw = Keyword.intern("cljl");
         Keyword cljKw = Keyword.intern("clj");

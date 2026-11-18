@@ -33,7 +33,7 @@ public final class Compiler {
             Symbol.intern("loop*"),
             Symbol.intern("recur"),
             Symbol.intern("fn*"),
-            Symbol.intern("defmacro"),
+            Symbol.intern("defmacro*"),
             Symbol.intern("var"),
             Symbol.intern("try"),
             Symbol.intern("catch"),
@@ -676,7 +676,7 @@ public final class Compiler {
                     case "fn*" -> {
                         return compileFn(args, scope);
                     }
-                    case "defmacro" -> {
+                    case "defmacro*" -> {
                         return compileDefmacro(args, scope);
                     }
                     case "var" -> {

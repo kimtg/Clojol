@@ -75,6 +75,10 @@ public final class Agent extends Fn implements IDeref, IReference {
         return error;
     }
 
+    public Object getRawState() {
+        return state;
+    }
+
     public Fn getErrorHandler() {
         return errorHandler;
     }

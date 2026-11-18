@@ -1045,7 +1045,9 @@ public final class TypeAnalyzer {
         if (n instanceof StaticMethodNode sm) {
             ValType[] argTypes = analyzeArray(sm.args);
             Method m = Interop.findPublicMethodForTypes(sm.clazz, sm.methodName, argTypes, true);
-            if (m != null) {
+            if (m != null && !m.getDeclaringClass().isInterface()) {
+                // Classfile version 49 disallows invokestatic to InterfaceMethodref under verification;
+                // leave interface static calls unresolved so BytecodeJIT routes them through Interop.
                 resolvedMethods.put(sm, m);
                 return record(n, ValType.fromJavaReturn(m.getReturnType()));
             }

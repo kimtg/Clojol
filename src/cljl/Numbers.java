@@ -797,6 +797,16 @@ public final class Numbers {
         return new Ratio(BigInteger.valueOf(toLong(x)), BigInteger.ONE);
     }
 
+    // Unchecked int arithmetic
+    public static int uncheckedAddInt(Object x, Object y) { return uncheckedInt(x) + uncheckedInt(y); }
+    public static int uncheckedSubtractInt(Object x, Object y) { return uncheckedInt(x) - uncheckedInt(y); }
+    public static int uncheckedMultiplyInt(Object x, Object y) { return uncheckedInt(x) * uncheckedInt(y); }
+    public static int uncheckedIncInt(Object x) { return uncheckedInt(x) + 1; }
+    public static int uncheckedDecInt(Object x) { return uncheckedInt(x) - 1; }
+    public static int uncheckedNegateInt(Object x) { return -uncheckedInt(x); }
+    public static int uncheckedDivideInt(Object x, Object y) { return uncheckedInt(x) / uncheckedInt(y); }
+    public static int uncheckedRemainderInt(Object x, Object y) { return uncheckedInt(x) % uncheckedInt(y); }
+
     // Bitwise operations
     public static long bitAnd(Object x, Object y) { return toLong(x) & toLong(y); }
     public static long bitOr(Object x, Object y) { return toLong(x) | toLong(y); }

@@ -347,45 +347,50 @@ public final class Main {
         Var v3 = RT.STAR_3;
         Var ve = RT.STAR_E;
 
+        Var.pushThreadBindings(Map.of(RT.REPL, Boolean.TRUE));
         System.out.println("Clojol " + VERSION + " (Java " + System.getProperty("java.version") + ")");
 
         BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         StringBuilder buf = new StringBuilder();
 
-        while (true) {
-            try {
-                if (buf.isEmpty()) {
-                    System.out.print(RT.currentNS().name.name + "=> ");
-                } else {
-                    System.out.print("...=> ");
-                }
-                System.out.flush();
-
-                String line = reader.readLine();
-                if (line == null) {
-                    if (!buf.isEmpty()) {
-                        processReplBuffer(buf.toString(), v1, v2, v3, ve, reportTarget);
+        try {
+            while (true) {
+                try {
+                    if (buf.isEmpty()) {
+                        System.out.print(RT.currentNS().name.name + "=> ");
+                    } else {
+                        System.out.print("...=> ");
                     }
-                    System.out.println();
-                    break;
-                }
+                    System.out.flush();
 
-                String trimmed = line.trim();
-                if (buf.isEmpty() && trimmed.isEmpty()) {
-                    continue;
-                }
+                    String line = reader.readLine();
+                    if (line == null) {
+                        if (!buf.isEmpty()) {
+                            processReplBuffer(buf.toString(), v1, v2, v3, ve, reportTarget);
+                        }
+                        System.out.println();
+                        break;
+                    }
 
-                buf.append(line).append('\n');
-                if (isBalanced(buf)) {
-                    String code = buf.toString();
+                    String trimmed = line.trim();
+                    if (buf.isEmpty() && trimmed.isEmpty()) {
+                        continue;
+                    }
+
+                    buf.append(line).append('\n');
+                    if (isBalanced(buf)) {
+                        String code = buf.toString();
+                        buf.setLength(0);
+                        processReplBuffer(code, v1, v2, v3, ve, reportTarget);
+                    }
+                } catch (Throwable t) {
                     buf.setLength(0);
-                    processReplBuffer(code, v1, v2, v3, ve, reportTarget);
+                    ve.bindRoot(t);
+                    printError(t, reportTarget);
                 }
-            } catch (Throwable t) {
-                buf.setLength(0);
-                ve.bindRoot(t);
-                printError(t, reportTarget);
             }
+        } finally {
+            Var.popThreadBindings();
         }
     }
 
