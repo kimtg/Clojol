@@ -9,7 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.function.Function;
+import java.util.function.*;
 import java.util.regex.Pattern;
 import javax.xml.parsers.SAXParserFactory;
 import org.xml.sax.Attributes;
@@ -44,6 +44,7 @@ public final class StdLibMore {
             case "clojure.xml" -> { initXml(); yield true; }
             case "clojure.zip" -> { initZip(); yield true; }
             case "clojure.spec.alpha" -> { initSpecAlpha(); yield true; }
+            case "clojure.math" -> { initMath(); yield true; }
             case "clojure.data.priority-map" -> { initDataPriorityMap(); yield true; }
             case "clojure.data.int-map" -> { initDataIntMap(); yield true; }
             case "clojure.data.avl" -> { initDataAvl(); yield true; }
@@ -2539,5 +2540,153 @@ public final class StdLibMore {
         } catch (Exception e) {
             throw RT.sneakyThrow(e);
         }
+    }
+
+    // ========================================================================
+    // clojure.math
+    // ========================================================================
+
+    private static synchronized void initMath() {
+        if (LOADED.contains("clojure.math")) return;
+        Namespace ns = Namespace.findOrCreate("clojure.math");
+        Keyword kwDoc = Keyword.intern("doc");
+        Keyword kwAdded = Keyword.intern("added");
+        Keyword kwArglists = Keyword.intern("arglists");
+        Keyword kwConst = Keyword.intern("const");
+
+        ns.intern(Symbol.intern("E")).bindRoot(Math.E).setMeta(PersistentHashMap.EMPTY
+                .assoc(kwDoc, "Constant for e, the base of the natural logarithms.")
+                .assoc(kwConst, Boolean.TRUE)
+                .assoc(kwAdded, "1.11"));
+        ns.intern(Symbol.intern("PI")).bindRoot(Math.PI).setMeta(PersistentHashMap.EMPTY
+                .assoc(kwDoc, "Constant for pi, the ratio of the circumference of a circle to its diameter.")
+                .assoc(kwConst, Boolean.TRUE)
+                .assoc(kwAdded, "1.11"));
+
+        defMathFn(ns, "random", Fn.of0("random", Math::random),
+                PersistentList.createFromArray(PersistentVector.EMPTY),
+                "Returns a double in the range [0.0, 1.0).", kwDoc, kwAdded, kwArglists);
+
+        // 1-arg double -> double
+        defMathD1(ns, "sin", "a", Math::sin, "Returns the sine of an angle in radians.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "cos", "a", Math::cos, "Returns the cosine of an angle in radians.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "tan", "a", Math::tan, "Returns the tangent of an angle in radians.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "asin", "a", Math::asin, "Returns the arc sine of a value in [-pi/2, pi/2].", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "acos", "a", Math::acos, "Returns the arc cosine of a value in [0.0, pi].", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "atan", "a", Math::atan, "Returns the arc tangent of a value in [-pi/2, pi/2].", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "to-radians", "deg", Math::toRadians, "Converts an angle measured in degrees to radians.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "to-degrees", "r", Math::toDegrees, "Converts an angle measured in radians to degrees.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "exp", "a", Math::exp, "Returns Euler's number e raised to the power of a.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "log", "a", Math::log, "Returns the natural logarithm (base e) of a.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "log10", "a", Math::log10, "Returns the base 10 logarithm of a.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "sqrt", "a", Math::sqrt, "Returns the correctly rounded positive square root of a.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "cbrt", "a", Math::cbrt, "Returns the cube root of a.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "ceil", "a", Math::ceil, "Returns the smallest double >= a that is equal to a mathematical integer.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "floor", "a", Math::floor, "Returns the largest double <= a that is equal to a mathematical integer.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "rint", "a", Math::rint, "Returns the double closest in value to a that is equal to a mathematical integer.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "ulp", "d", Math::ulp, "Returns the size of an ulp of the argument.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "signum", "d", Math::signum, "Returns the signum function of the argument (-1.0, 0.0, 1.0, or NaN).", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "sinh", "x", Math::sinh, "Returns the hyperbolic sine of x.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "cosh", "x", Math::cosh, "Returns the hyperbolic cosine of x.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "tanh", "x", Math::tanh, "Returns the hyperbolic tangent of x.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "expm1", "x", Math::expm1, "Returns e^x - 1.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "log1p", "x", Math::log1p, "Returns the natural logarithm of x + 1.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "next-up", "d", Math::nextUp, "Returns the floating-point value adjacent to d in the direction of positive infinity.", kwDoc, kwAdded, kwArglists);
+        defMathD1(ns, "next-down", "d", Math::nextDown, "Returns the floating-point value adjacent to d in the direction of negative infinity.", kwDoc, kwAdded, kwArglists);
+
+        // 1-arg double -> long
+        defMathFn(ns, "round", Fn.of1("round", a -> Math.round(Numbers.toDouble(a))),
+                arglist1("a"), "Returns the closest long to the argument, rounding ties to positive infinity.",
+                kwDoc, kwAdded, kwArglists);
+        defMathFn(ns, "get-exponent", Fn.of1("get-exponent", d -> (long) Math.getExponent(Numbers.toDouble(d))),
+                arglist1("d"), "Returns the unbiased exponent used in the representation of a double.",
+                kwDoc, kwAdded, kwArglists);
+
+        // 2-arg double, double -> double
+        defMathD2(ns, "IEEE-remainder", "dividend", "divisor", Math::IEEEremainder,
+                "Computes the remainder operation as prescribed by IEEE 754.", kwDoc, kwAdded, kwArglists);
+        defMathD2(ns, "atan2", "y", "x", Math::atan2,
+                "Returns the angle theta from converting rectangular (x, y) to polar coordinates (r, theta).",
+                kwDoc, kwAdded, kwArglists);
+        defMathD2(ns, "pow", "a", "b", Math::pow,
+                "Returns the value of a raised to the power of b.", kwDoc, kwAdded, kwArglists);
+        defMathD2(ns, "hypot", "x", "y", Math::hypot,
+                "Returns sqrt(x^2 + y^2) without intermediate overflow or underflow.", kwDoc, kwAdded, kwArglists);
+        defMathD2(ns, "copy-sign", "magnitude", "sign", Math::copySign,
+                "Returns the first floating-point argument with the sign of the second floating-point argument.",
+                kwDoc, kwAdded, kwArglists);
+        defMathD2(ns, "next-after", "start", "direction", Math::nextAfter,
+                "Returns the floating-point number adjacent to start in the direction of direction.",
+                kwDoc, kwAdded, kwArglists);
+
+        // 2-arg double, int -> double
+        defMathFn(ns, "scalb",
+                Fn.of2("scalb", (d, scaleFactor) -> Math.scalb(Numbers.toDouble(d), Numbers.intCast(scaleFactor))),
+                arglist2("d", "scale-factor"),
+                "Returns d * 2^scale-factor rounded as a single floating-point multiply.",
+                kwDoc, kwAdded, kwArglists);
+
+        // Exact & floor long operations
+        defMathL1(ns, "increment-exact", "a", Math::incrementExact,
+                "Returns a incremented by one, throwing ArithmeticException on long overflow.", kwDoc, kwAdded, kwArglists);
+        defMathL1(ns, "decrement-exact", "a", Math::decrementExact,
+                "Returns a decremented by one, throwing ArithmeticException on long overflow.", kwDoc, kwAdded, kwArglists);
+        defMathL1(ns, "negate-exact", "a", Math::negateExact,
+                "Returns the negation of a, throwing ArithmeticException on long overflow.", kwDoc, kwAdded, kwArglists);
+        defMathL1(ns, "to-int-exact", "a", a -> (long) Math.toIntExact(a),
+                "Returns the value of a long as an int, throwing ArithmeticException on int overflow.", kwDoc, kwAdded, kwArglists);
+
+        defMathL2(ns, "add-exact", "x", "y", Math::addExact,
+                "Returns the sum of x and y, throwing ArithmeticException on long overflow.", kwDoc, kwAdded, kwArglists);
+        defMathL2(ns, "subtract-exact", "x", "y", Math::subtractExact,
+                "Returns the difference x - y, throwing ArithmeticException on long overflow.", kwDoc, kwAdded, kwArglists);
+        defMathL2(ns, "multiply-exact", "x", "y", Math::multiplyExact,
+                "Returns the product of x and y, throwing ArithmeticException on long overflow.", kwDoc, kwAdded, kwArglists);
+        defMathL2(ns, "floor-div", "x", "y", Math::floorDiv,
+                "Returns the largest long value <= mathematical quotient x / y.", kwDoc, kwAdded, kwArglists);
+        defMathL2(ns, "floor-mod", "x", "y", Math::floorMod,
+                "Returns the floor modulus of the long arguments.", kwDoc, kwAdded, kwArglists);
+
+        LOADED.add("clojure.math");
+    }
+
+    private static ISeq arglist1(String a) {
+        return PersistentList.createFromArray(PersistentVector.createOwning(Symbol.intern(a)));
+    }
+
+    private static ISeq arglist2(String a, String b) {
+        return PersistentList.createFromArray(PersistentVector.createOwning(Symbol.intern(a), Symbol.intern(b)));
+    }
+
+    private static void defMathFn(Namespace ns, String name, Fn fn, ISeq arglists, String doc,
+                                  Keyword kwDoc, Keyword kwAdded, Keyword kwArglists) {
+        ns.intern(Symbol.intern(name)).bindRoot(fn).setMeta(PersistentHashMap.EMPTY
+                .assoc(kwArglists, arglists)
+                .assoc(kwDoc, doc)
+                .assoc(kwAdded, "1.11"));
+    }
+
+    private static void defMathD1(Namespace ns, String name, String p, DoubleUnaryOperator op, String doc,
+                                  Keyword kwDoc, Keyword kwAdded, Keyword kwArglists) {
+        defMathFn(ns, name, Fn.of1(name, a -> op.applyAsDouble(Numbers.toDouble(a))),
+                arglist1(p), doc, kwDoc, kwAdded, kwArglists);
+    }
+
+    private static void defMathD2(Namespace ns, String name, String p1, String p2, DoubleBinaryOperator op, String doc,
+                                  Keyword kwDoc, Keyword kwAdded, Keyword kwArglists) {
+        defMathFn(ns, name, Fn.of2(name, (a, b) -> op.applyAsDouble(Numbers.toDouble(a), Numbers.toDouble(b))),
+                arglist2(p1, p2), doc, kwDoc, kwAdded, kwArglists);
+    }
+
+    private static void defMathL1(Namespace ns, String name, String p, LongUnaryOperator op, String doc,
+                                  Keyword kwDoc, Keyword kwAdded, Keyword kwArglists) {
+        defMathFn(ns, name, Fn.of1(name, a -> op.applyAsLong(Numbers.longCast(a))),
+                arglist1(p), doc, kwDoc, kwAdded, kwArglists);
+    }
+
+    private static void defMathL2(Namespace ns, String name, String p1, String p2, LongBinaryOperator op, String doc,
+                                  Keyword kwDoc, Keyword kwAdded, Keyword kwArglists) {
+        defMathFn(ns, name, Fn.of2(name, (a, b) -> op.applyAsLong(Numbers.longCast(a), Numbers.longCast(b))),
+                arglist2(p1, p2), doc, kwDoc, kwAdded, kwArglists);
     }
 }

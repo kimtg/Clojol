@@ -14,6 +14,7 @@
             [clojure.xml :as xml]
             [clojure.zip :as zip]
             [clojure.spec.alpha :as s]
+            [clojure.math :as math]
             [clojure.data.priority-map :as pm]
             [clojure.data.int-map :as im]
             [clojure.data.avl :as avl]
@@ -345,6 +346,79 @@
       (async/>!! c2 :from-c2)
       (is (= [:from-c2 c2] (async/alts!! [c1 c2])))
       (is (nil? (async/<!! (async/timeout 10)))))))
+
+(deftest clojure-math-test
+  (testing "clojure.math public API completeness (46 vars)"
+    (let [pubs (ns-publics 'clojure.math)
+          expected '[E PI IEEE-remainder acos add-exact asin atan atan2 cbrt ceil
+                     copy-sign cos cosh decrement-exact exp expm1 floor floor-div
+                     floor-mod get-exponent hypot increment-exact log log10 log1p
+                     multiply-exact negate-exact next-after next-down next-up pow
+                     random rint round scalb signum sin sinh sqrt subtract-exact
+                     tan tanh to-degrees to-int-exact to-radians ulp]]
+      (is (= 46 (count pubs)))
+      (doseq [sym expected]
+        (is (contains? pubs sym) (str "Missing from clojure.math: " sym)))))
+  (testing "constants and trig/exp/log/pow/root"
+    (is (< (abs (- math/E 2.718281828459045)) 1e-15))
+    (is (< (abs (- math/PI 3.141592653589793)) 1e-15))
+    (is (< (abs (math/sin 0.0)) 1e-15))
+    (is (< (abs (- (math/sin (/ math/PI 2.0)) 1.0)) 1e-15))
+    (is (< (abs (- (math/cos 0.0) 1.0)) 1e-15))
+    (is (< (abs (math/tan 0.0)) 1e-15))
+    (is (< (abs (- (math/asin 1.0) (/ math/PI 2.0))) 1e-15))
+    (is (< (abs (math/acos 1.0)) 1e-15))
+    (is (< (abs (- (math/atan 1.0) (/ math/PI 4.0))) 1e-15))
+    (is (< (abs (- (math/atan2 1.0 1.0) (/ math/PI 4.0))) 1e-15))
+    (is (< (abs (- (math/to-radians 180) math/PI)) 1e-15))
+    (is (< (abs (- (math/to-degrees math/PI) 180.0)) 1e-15))
+    (is (< (abs (- (math/sinh 0.0) 0.0)) 1e-15))
+    (is (< (abs (- (math/cosh 0.0) 1.0)) 1e-15))
+    (is (< (abs (- (math/tanh 0.0) 0.0)) 1e-15))
+    (is (< (abs (- (math/exp 1.0) math/E)) 1e-15))
+    (is (< (abs (- (math/expm1 0.0) 0.0)) 1e-15))
+    (is (< (abs (- (math/log math/E) 1.0)) 1e-15))
+    (is (< (abs (- (math/log10 1000) 3.0)) 1e-15))
+    (is (< (abs (- (math/log1p 0.0) 0.0)) 1e-15))
+    (is (= 5.0 (math/sqrt 25)))
+    (is (= 3.0 (math/cbrt 27)))
+    (is (= 8.0 (math/pow 2 3)))
+    (is (= 5.0 (math/hypot 3 4))))
+  (testing "rounding, IEEE, float bit/exponent ops, random"
+    (is (= -1.0 (math/IEEE-remainder 11.0 4.0)))
+    (is (= 5.0 (math/ceil 4.2)))
+    (is (= 4.0 (math/floor 4.8)))
+    (is (= 4.0 (math/rint 4.5)))
+    (is (= 5 (math/round 4.5)))
+    (is (= -5.0 (math/copy-sign 5.0 -2.0)))
+    (is (= 1.0 (math/signum 42)))
+    (is (= -1.0 (math/signum -42)))
+    (is (= 0.0 (math/signum 0.0)))
+    (is (= 3 (math/get-exponent 8.0)))
+    (is (= 8.0 (math/scalb 1.0 3)))
+    (is (pos? (math/ulp 1.0)))
+    (is (> (math/next-up 1.0) 1.0))
+    (is (< (math/next-down 1.0) 1.0))
+    (is (= (math/next-up 1.0) (math/next-after 1.0 2.0)))
+    (let [r (math/random)]
+      (is (and (<= 0.0 r) (< r 1.0)))))
+  (testing "exact integer and floor div/mod operations"
+    (is (= 5 (math/add-exact 2 3)))
+    (is (= 4 (math/subtract-exact 7 3)))
+    (is (= 12 (math/multiply-exact 3 4)))
+    (is (= 6 (math/increment-exact 5)))
+    (is (= 4 (math/decrement-exact 5)))
+    (is (= -5 (math/negate-exact 5)))
+    (is (= 42 (math/to-int-exact 42)))
+    (is (= -3 (math/floor-div -7 3)))
+    (is (= 2 (math/floor-mod -7 3)))
+    (is (thrown? ArithmeticException (math/add-exact Long/MAX_VALUE 1)))
+    (is (thrown? ArithmeticException (math/subtract-exact Long/MIN_VALUE 1)))
+    (is (thrown? ArithmeticException (math/multiply-exact Long/MAX_VALUE 2)))
+    (is (thrown? ArithmeticException (math/increment-exact Long/MAX_VALUE)))
+    (is (thrown? ArithmeticException (math/decrement-exact Long/MIN_VALUE)))
+    (is (thrown? ArithmeticException (math/negate-exact Long/MIN_VALUE)))
+    (is (thrown? ArithmeticException (math/to-int-exact (inc Integer/MAX_VALUE))))))
 
 (let [res (run-tests 'cljl.cheatsheet-test)]
   (when (or (pos? (:fail res)) (pos? (:error res)))
