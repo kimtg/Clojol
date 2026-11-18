@@ -1,20 +1,14 @@
 # Clojol (`cljl`)
 
-A high-performance, fast-startup implementation of Clojure in pure Java (Java 21+), with zero external dependencies, full Clojure 1.12 `clojure.core` public API parity (`697` public vars), and broad [Clojure Cheatsheet](https://clojure.org/api/cheatsheet) compatibility.
+A high-performance, fast-startup implementation of Clojure in pure Java (Java 21+), with zero external dependencies, full Clojure 1.12 `clojure.core` public API parity, and broad [Clojure Cheatsheet](https://clojure.org/api/cheatsheet) compatibility.
 
 Clojol is an independent, clean-room implementation of the Clojure language and is not affiliated with or endorsed by Rich Hickey or Nubank.
 
 ## Why Clojol?
 
-Standard Clojure on the JVM parses and compiles thousands of lines of `clojure/core.clj` on every cold start. **Clojol** eliminates that bootstrap penalty while preserving idiomatic Clojure semantics:
-
-- **Direct Java-compiled `clojure.core`**: Core functions, macros, and dynamic vars (`Core.java`, `CoreExtras.java`) are implemented directly in Java with full Clojure 1.12 `clojure.core` public API coverage (`697` public vars) and registered without parsing bootstrap `.clj` files at startup.
-- **Lazy Standard Library Loading**: Standard and contrib namespaces (`StdLib.java`, `StdLibMore.java`) initialize only when required or referenced so unused namespaces add zero startup cost.
-- **AppCDS Support**: The launchers (`cljl.bat` / `cljl.sh`) automatically generate a JVM AppCDS shared class archive (`build/cljl.jsa`) on first build (~159 ms cold JVM startup + evaluation).
-- **Tier-0 AST Interpreter + Type-Inferred Tier-1 JVM Bytecode JIT**: `fn*`, `let*`, `loop*`, and `catch` locals compile to fixed integer slot indices in a flat `Object[]` frame, `loop`/`recur` compiles to in-place `while (true)` loops, `0`–`4` argument calls avoid varargs array allocation, and hot functions are compiled at runtime directly to JVM classfile bytecode (`BytecodeJIT.java`) backed by forward dataflow/fixpoint type inference & `^tag` propagation (`ValType.java`, `TypeAnalyzer.java`), unboxed `long`/`double`/`boolean` locals and operations, primitive-specialized method overloads (`invokePrim_*`) with guarded self-Var recursion (`with-redefs`-safe), direct typed Java interop, and collection/bitwise intrinsics.
-- **Virtual Thread Concurrency, Agents & STM**: `future`, `pmap`, `pcalls`, `pvalues`, and `clojure.core.async` run on Java Virtual Threads alongside asynchronous `agent` queues and Software Transactional Memory (`ref` / `dosync`).
-- **Runtime JVM Class Generation**: `defprotocol`, `defrecord`, `deftype`, `reify`, `definterface`, `gen-interface`, and `proxy` generate real JVM classes and interfaces dynamically (`TypeFactory.java`).
-- **Standard `clj` CLI & `deps.edn` Engine (`1.12.6.1673`)**: Pure-Java `deps.edn` resolver (`Deps.java`) with `.cpcache` caching, transitive `:local/root` / `:mvn/version` / `:git/url` dependencies, `-A`/`-M`/`-X`/`-T`/`-P`, `-J`/`-S*` flags (`-Sdeps-file`, `-Scommand`), `clojure.main` init/main options, and built-in `:deps` CLI programs.
+- Faster Startup
+- Faster Numeric Computation with Type Inference
+- Easier Build
 
 ## Performance (`fib(40)` vs. Official Clojure)
 
@@ -155,62 +149,6 @@ Environment variables `$CLJ_CONFIG`, `$CLJ_CACHE`, `$M2_REPO`, `$GITLIBS`, and `
 - **Standard Library & Contrib Namespaces**:
   - Core & JDK: `clojure.core`, `clojure.math`, `clojure.string`, `clojure.set`, `clojure.walk`, `clojure.edn`, `clojure.java.io`, `clojure.java.shell`, `clojure.java.browse`, `clojure.java.javadoc`, `clojure.main`, `clojure.tools.deps.cli.api`, `clojure.data`, `clojure.datafy`, `clojure.pprint`, `clojure.repl` (`doc`, `find-doc`, `apropos`, `dir`, `source`, `pst`), `clojure.test`, `clojure.xml`, `clojure.zip`, `clojure.spec.alpha`
   - Contrib-compatible: `clojure.core.async`, `clojure.data.priority-map`, `clojure.data.int-map`, `clojure.data.avl`, `flatland.ordered.map`, `flatland.ordered.set`, `flatland.useful.map`
-
-## Project Structure
-
-```text
-Clojol/
-├── cljl.bat                 # Windows launcher (auto-builds & uses AppCDS)
-├── cljl.sh                  # Unix/macOS launcher (auto-builds & uses AppCDS + -J pre-parsing)
-├── make.bat                 # Windows build script (build, rebuild, clean, test, bench)
-├── make.sh                  # Unix/macOS build script (build, rebuild, clean, test, bench)
-├── .gitignore
-├── README.md
-├── src/cljl/
-│   ├── Main.java            # clj/clojure.main CLI & REPL entry point
-│   ├── Deps.java            # deps.edn resolution, .cpcache, -X/-T execution, :deps API
-│   ├── RT.java              # Runtime utilities, dynamic vars, equivalence, printing
-│   ├── Core.java            # Core clojure.core functions & macros
-│   ├── CoreExtras.java      # Cheatsheet extensions, transducers, hierarchies, protocols, types
-│   ├── StdLib.java          # Lazy stdlib (string, set, walk, edn, io, test, repl)
-│   ├── StdLibMore.java      # Lazy stdlib (shell, browse, javadoc, main, data, datafy, pprint, xml, zip, spec, async, etc.)
-│   ├── Reader.java          # Clojure reader, tagged literals, syntax-quote expander
-│   ├── Compiler.java        # Macroexpander, destructuring, ^tag hints, lexical slots & AST engine
-│   ├── ValType.java         # Type lattice for primitive/reference inference & ^tag parsing
-│   ├── TypeAnalyzer.java    # Forward dataflow & fixpoint type inference and interop resolution
-│   ├── BytecodeJIT.java     # Type-inferred Tier-1 JVM bytecode JIT & primitive specialization
-│   ├── TypeFactory.java     # Runtime class generation (defrecord, deftype, reify, proxy, interface)
-│   ├── Protocol.java        # Protocol dispatch table
-│   ├── Interop.java         # Typed & cached-reflection Java interop
-│   ├── Numbers.java         # Numeric tower (Long, Double, BigInteger, BigDecimal, Ratio)
-│   ├── Fn.java              # Arity-specialized callable base class
-│   ├── Symbol.java          # Symbols
-│   ├── Keyword.java         # Interned keywords
-│   ├── Var.java             # Vars & thread-local dynamic binding frames
-│   ├── Namespace.java       # Namespaces, aliases, imports, refers
-│   ├── Atom.java            # Atom, Volatile, Delay, Promise, Future (Virtual Threads)
-│   ├── Agent.java           # Agents & async action queues
-│   ├── Ref.java             # STM mutable reference
-│   ├── LockingTransaction.java # MVCC Software Transactional Memory engine
-│   ├── MultiFn.java         # Multimethods
-│   └── lang/                # Persistent data structures, chunks & sequence interfaces
-│       ├── ASeq.java, Cons.java, ISeq.java, IPersistentList.java, Seqable.java, StringSeq.java
-│       ├── Counted.java, ILookup.java, Associative.java, Sorted.java, Reversible.java, PersistentColl.java
-│       ├── IChunk.java, IChunkedSeq.java, ArrayChunk.java, ChunkBuffer.java, ChunkedCons.java
-│       ├── IMeta.java, IObj.java, IReference.java, IDeref.java, Reduced.java, Ratio.java
-│       ├── TaggedLiteral.java, ReaderConditional.java
-│       ├── PersistentList.java, LazySeq.java
-│       ├── PersistentVector.java, Vec.java
-│       ├── PersistentHashMap.java, PersistentHashSet.java
-│       ├── PersistentTreeMap.java, PersistentTreeSet.java
-│       └── PersistentRecord.java, PersistentStructMap.java
-└── test/
-    ├── core_test.clj        # Core language & runtime test suite (clojure.test)
-    ├── cheatsheet_test.clj  # Clojure Cheatsheet & stdlib test suite (clojure.test)
-    ├── cli_test.clj         # clj / deps.edn / clojure.main / :deps CLI test suite (clojure.test)
-    ├── bench.clj            # Microbenchmarks
-    └── fib_bench.clj        # Recursive fib(40) benchmark
-```
 
 ## Building, Tests & Benchmarks
 
