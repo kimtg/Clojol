@@ -270,8 +270,9 @@ public final class TypeFactory {
         }
 
         ClassWriter cw = new ClassWriter(internalName, superInternal, ifaceList.toArray(new String[0]), 0x0001);
-        cw.addField(0x0042, "__mappings", "Lcljl/lang/PersistentHashMap;"); // PRIVATE | VOLATILE
+        cw.addField(0x00c2, "__mappings", "Lcljl/lang/PersistentHashMap;"); // PRIVATE | VOLATILE | TRANSIENT
         cw.emitProxyMappingsAccessors();
+        cw.emitProxySerializationGuards();
 
         // Forward constructors from superclass
         for (Constructor<?> ctor : superClass.getDeclaredConstructors()) {
@@ -343,6 +344,12 @@ public final class TypeFactory {
         }
         p.__setMappings(cur);
         return proxy;
+    }
+
+    public static void checkProxySerializable(Object proxy) throws java.io.NotSerializableException {
+        if (!Boolean.getBoolean("clojure.serializable.fns")) {
+            throw new java.io.NotSerializableException(proxy.getClass().getName());
+        }
     }
 
     public static PersistentHashMap proxyMappings(Object proxy) {
@@ -838,6 +845,32 @@ public final class TypeFactory {
             ma.invokespecial(superOwnerInternal, mname, desc);
             ma.emitTypedReturn(retType);
             addCodeMethod(0x0011, "__super_" + mname, desc, Math.max(4, slot + 1), slot, ma.toBytes());
+        }
+
+        void emitProxySerializationGuards() {
+            // Block Java serialization/deserialization of generated proxy classes by default
+            // (GHSA-x4c4-68gp-vrhc / CLJ-2993) unless -Dclojure.serializable.fns=true is set.
+            MethodAssembler wo = new MethodAssembler(this);
+            wo.aload(0);
+            wo.invokestatic("cljl/TypeFactory", "checkProxySerializable", "(Ljava/lang/Object;)V");
+            wo.aload(1);
+            wo.invokevirtual("java/io/ObjectOutputStream", "defaultWriteObject", "()V");
+            wo.vreturn();
+            addCodeMethod(0x0002, "writeObject", "(Ljava/io/ObjectOutputStream;)V", 2, 2, wo.toBytes());
+
+            MethodAssembler ro = new MethodAssembler(this);
+            ro.aload(0);
+            ro.invokestatic("cljl/TypeFactory", "checkProxySerializable", "(Ljava/lang/Object;)V");
+            ro.aload(1);
+            ro.invokevirtual("java/io/ObjectInputStream", "defaultReadObject", "()V");
+            ro.vreturn();
+            addCodeMethod(0x0002, "readObject", "(Ljava/io/ObjectInputStream;)V", 2, 2, ro.toBytes());
+
+            MethodAssembler rond = new MethodAssembler(this);
+            rond.aload(0);
+            rond.invokestatic("cljl/TypeFactory", "checkProxySerializable", "(Ljava/lang/Object;)V");
+            rond.vreturn();
+            addCodeMethod(0x0002, "readObjectNoData", "()V", 2, 1, rond.toBytes());
         }
 
         byte[] toByteArray() {

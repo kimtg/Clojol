@@ -2898,11 +2898,19 @@ public final class Core {
     }
 
     public static final class ExceptionInfo extends RuntimeException {
+        private static final long serialVersionUID = 1L;
         public final PersistentHashMap data;
 
         public ExceptionInfo(String msg, PersistentHashMap data, Throwable cause) {
             super(msg, cause);
             this.data = data != null ? data : PersistentHashMap.EMPTY;
+        }
+
+        private void readObject(java.io.ObjectInputStream in) throws IOException, ClassNotFoundException {
+            in.defaultReadObject();
+            if (data == null) {
+                throw new java.io.InvalidObjectException("ExceptionInfo data cannot be null");
+            }
         }
     }
 

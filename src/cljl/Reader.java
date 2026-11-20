@@ -47,6 +47,9 @@ public final class Reader {
     private final Set<Object> features;
     private final boolean readCondAllowed;
     private final boolean readCondPreserve;
+    private final boolean ednMode;
+    private final Map<?, ?> customReaders;
+    private final Fn defaultReaderFn;
     private StringBuilder captureBuf = null;
 
     // Context for #(...) anonymous function reader
@@ -179,21 +182,62 @@ public final class Reader {
         this(new StreamSource(reader), filename, opts);
     }
 
-    @SuppressWarnings("unchecked")
     private Reader(CharSource source, String filename, Map<?, ?> opts) {
+        this(source, filename, opts, false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Reader(CharSource source, String filename, Map<?, ?> opts, boolean ednMode) {
         this.source = source;
         this.filename = filename != null ? filename : "<stdin>";
+        this.ednMode = ednMode;
         if (opts != null) {
             Object rc = opts.get(Keyword.intern("read-cond"));
-            this.readCondPreserve = Keyword.intern("preserve").equals(rc);
-            this.readCondAllowed = rc == null || Keyword.intern("allow").equals(rc) || this.readCondPreserve;
+            this.readCondPreserve = !ednMode && Keyword.intern("preserve").equals(rc);
+            this.readCondAllowed = !ednMode && (rc == null || Keyword.intern("allow").equals(rc) || this.readCondPreserve);
             Object feats = opts.get(Keyword.intern("features"));
             this.features = (feats instanceof Set<?> set) ? (Set<Object>) set : null;
+            Object readersObj = opts.get(Keyword.intern("readers"));
+            this.customReaders = (readersObj instanceof Map<?, ?> m) ? m : null;
+            Object defObj = opts.get(Keyword.intern("default"));
+            this.defaultReaderFn = (defObj instanceof Fn f) ? f : null;
         } else {
-            this.readCondAllowed = true;
+            this.readCondAllowed = !ednMode;
             this.readCondPreserve = false;
             this.features = null;
+            this.customReaders = null;
+            this.defaultReaderFn = null;
         }
+    }
+
+    public static Object readEdnString(Map<?, ?> opts, String s) {
+        boolean eofIsError = isEofError(opts, false);
+        Object eofValue = extractEofValue(opts, eofIsError, null);
+        if (s == null) {
+            if (eofIsError) throw new RuntimeException("EOF while reading");
+            return eofValue;
+        }
+        Reader r = new Reader(new StringSource(s), "<edn>", opts, true);
+        return r.readForm(eofIsError, eofValue);
+    }
+
+    public static Object readEdnFromStream(java.io.Reader stream, boolean eofIsError, Object eofValue, Map<?, ?> opts) {
+        if (stream == null) {
+            if (eofIsError) throw new RuntimeException("EOF while reading");
+            return eofValue;
+        }
+        Reader r = new Reader(new StreamSource(stream), "<edn>", opts, true);
+        try {
+            return r.readForm(eofIsError, eofValue);
+        } finally {
+            r.source.finish();
+        }
+    }
+
+    public static Object readEdnFromStream(Map<?, ?> opts, java.io.Reader stream) {
+        boolean eofIsError = isEofError(opts, true);
+        Object eofValue = extractEofValue(opts, eofIsError, null);
+        return readEdnFromStream(stream, eofIsError, eofValue, opts);
     }
 
     public static Object readString(String s) {
@@ -374,15 +418,21 @@ public final class Reader {
             case '"' -> readStringLiteral();
             case '\\' -> readCharacter();
             case '\'' -> {
+                if (ednMode) throw readerError("Invalid EDN reader macro: '");
                 Object form = readForm(true, null);
                 yield PersistentList.createFromArray(QUOTE, form);
             }
             case '@' -> {
+                if (ednMode) throw readerError("Invalid EDN reader macro: @");
                 Object form = readForm(true, null);
                 yield PersistentList.createFromArray(DEREF, form);
             }
-            case '`' -> readSyntaxQuote();
+            case '`' -> {
+                if (ednMode) throw readerError("Invalid EDN reader macro: `");
+                yield readSyntaxQuote();
+            }
             case '~' -> {
+                if (ednMode) throw readerError("Invalid EDN reader macro: ~");
                 if (peek() == '@') {
                     readChar();
                     Object form = readForm(true, null);
@@ -392,7 +442,10 @@ public final class Reader {
                     yield PersistentList.createFromArray(UNQUOTE, form);
                 }
             }
-            case '^' -> readMeta();
+            case '^' -> {
+                if (ednMode) throw readerError("Invalid EDN reader macro: ^");
+                yield readMeta();
+            }
             case '#' -> readDispatch();
             default -> {
                 if (c >= '0' && c <= '9') {
@@ -568,17 +621,28 @@ public final class Reader {
                 yield DISCARD;
             }
             case '\'' -> {
+                if (ednMode) throw readerError("No EDN dispatch macro for: '");
                 Object sym = readForm(true, null);
                 yield PersistentList.createFromArray(VAR, sym);
             }
-            case '"' -> readRegex();
-            case '(' -> readAnonFn();
+            case '"' -> {
+                if (ednMode) throw readerError("No EDN dispatch macro for: \"");
+                yield readRegex();
+            }
+            case '(' -> {
+                if (ednMode) throw readerError("No EDN dispatch macro for: (");
+                yield readAnonFn();
+            }
             case '!' -> {
+                if (ednMode) throw readerError("No EDN dispatch macro for: !");
                 int ch = readChar();
                 while (ch != -1 && ch != '\n') ch = readChar();
                 yield DISCARD;
             }
-            case '?' -> readConditional();
+            case '?' -> {
+                if (ednMode) throw readerError("No EDN dispatch macro for: ?");
+                yield readConditional();
+            }
             case ':' -> readNamespacedMap();
             case '#' -> readSymbolicValue();
             default -> {
@@ -596,6 +660,19 @@ public final class Reader {
             throw readerError("Reader tag must be a symbol");
         }
         Object form = readForm(true, null);
+        if (ednMode) {
+            Object readerFn = (customReaders != null) ? customReaders.get(tag) : null;
+            if (readerFn == null) {
+                readerFn = RT.DEFAULT_DATA_READERS_MAP.valAt(tag);
+            }
+            if (readerFn instanceof Fn f) {
+                return f.invoke(form);
+            }
+            if (defaultReaderFn != null) {
+                return defaultReaderFn.invoke(tag, form);
+            }
+            throw readerError("No reader function for tag " + tag);
+        }
         Object readersObj = RT.DATA_READERS.get();
         Object readerFn = (readersObj != null) ? RT.get(readersObj, tag) : null;
         if (readerFn == null) {

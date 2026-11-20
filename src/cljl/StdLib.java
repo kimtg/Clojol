@@ -477,21 +477,18 @@ public final class StdLib {
         Namespace ns = Namespace.findOrCreate("clojure.edn");
         ns.intern("read", new Fn.NamedFn("read") {
             @Override public Object invoke() {
-                return Reader.readFromStream((java.io.Reader) RT.IN.get(), true, null, null);
+                return Reader.readEdnFromStream((java.io.Reader) RT.IN.get(), true, null, null);
             }
             @Override public Object invoke(Object stream) {
-                return Reader.readFromStream((java.io.Reader) stream, true, null, null);
+                return Reader.readEdnFromStream((java.io.Reader) stream, true, null, null);
             }
             @Override public Object invoke(Object opts, Object stream) {
-                return Reader.readFromStream(opts instanceof Map<?, ?> m ? m : null, (java.io.Reader) stream);
+                return Reader.readEdnFromStream(opts instanceof Map<?, ?> m ? m : null, (java.io.Reader) stream);
             }
         });
         ns.intern("read-string", Fn.of12("read-string",
-                s -> s == null ? null : Reader.readString((String) s, false, null),
-                (opts, s) -> {
-                    Object eof = opts instanceof PersistentHashMap m ? m.valAt(Keyword.intern("eof"), null) : null;
-                    return s == null ? eof : Reader.readString((String) s, false, eof);
-                }));
+                s -> Reader.readEdnString(null, (String) s),
+                (opts, s) -> Reader.readEdnString(opts instanceof Map<?, ?> m ? m : null, (String) s)));
         LOADED.add("clojure.edn");
     }
 

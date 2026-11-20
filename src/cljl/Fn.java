@@ -1,5 +1,10 @@
 package cljl;
 
+import java.io.IOException;
+import java.io.NotSerializableException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.ObjectStreamException;
 import java.util.Comparator;
 import java.util.concurrent.Callable;
 import java.util.function.Function;
@@ -9,6 +14,9 @@ import java.util.function.Predicate;
  * Base functional class for all callable objects in Clojol (functions, macros,
  * keywords, symbols, vectors, maps, sets, vars, multimethods).
  *
+ * Intentionally does NOT implement java.io.Serializable (GHSA-x4c4-68gp-vrhc / CLJ-2993)
+ * and guards serialization hooks unless -Dclojure.serializable.fns=true is explicitly set.
+ *
  * Provides arity-specialized invoke() overloads (0 to 4 args) to eliminate Object[]
  * allocation on the vast majority of calls, plus applyTo(Object[]) for variable arity.
  */
@@ -16,6 +24,24 @@ public abstract class Fn implements Callable<Object>, Runnable,
         Function<Object, Object>, Predicate<Object> {
 
     public static final Object[] EMPTY_ARGS = new Object[0];
+
+    private void writeObject(ObjectOutputStream out) throws IOException {
+        if (!Boolean.getBoolean("clojure.serializable.fns")) {
+            throw new NotSerializableException(getClass().getName());
+        }
+        out.defaultWriteObject();
+    }
+
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+        if (!Boolean.getBoolean("clojure.serializable.fns")) {
+            throw new NotSerializableException(getClass().getName());
+        }
+        in.defaultReadObject();
+    }
+
+    private void readObjectNoData() throws ObjectStreamException {
+        throw new NotSerializableException(getClass().getName());
+    }
 
     public Object invoke() {
         return invokeVarargs(EMPTY_ARGS);

@@ -1,12 +1,23 @@
 package cljl.lang;
 
+import java.io.IOException;
+import java.io.InvalidObjectException;
+import java.io.ObjectInputStream;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.MathContext;
 
 public final class Ratio extends Number implements Comparable<Number> {
+    private static final long serialVersionUID = 1L;
     public final BigInteger numerator;
     public final BigInteger denominator;
+
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        if (numerator == null || denominator == null || denominator.signum() <= 0) {
+            throw new InvalidObjectException("Invalid Ratio state: numerator=" + numerator + ", denominator=" + denominator);
+        }
+    }
 
     public Ratio(BigInteger numerator, BigInteger denominator) {
         if (denominator.equals(BigInteger.ZERO)) {

@@ -1672,7 +1672,7 @@ public final class Deps {
 
     private static Object readEdn(String src) {
         if (src == null || src.isBlank()) return null;
-        return Reader.readString(src, false, null);
+        return Reader.readEdnString(null, src);
     }
 
     private static void recordAliasSources(Map<Object, Object> depsMap, String source, Map<Keyword, String> out) {

@@ -1325,6 +1325,76 @@
     (binding [*assert* false]
       (is (nil? (eval '(assert false "should not fire")))))))
 
+(deftest deserialization-security-test
+  (let [serialize (fn [obj]
+                    (let [baos (java.io.ByteArrayOutputStream.)
+                          oos (java.io.ObjectOutputStream. baos)]
+                      (.writeObject oos obj)
+                      (.close oos)
+                      (.toByteArray baos)))
+        deserialize (fn [^bytes bs]
+                      (let [ois (java.io.ObjectInputStream. (java.io.ByteArrayInputStream. bs))]
+                        (.readObject ois)))
+        deserialize-with (fn [^ClassLoader cl ^bytes bs]
+                           (let [bais (java.io.ByteArrayInputStream. bs)
+                                 ois (proxy [java.io.ObjectInputStream] [bais]
+                                       (resolveClass [^java.io.ObjectStreamClass desc]
+                                         (Class/forName (.getName desc) false cl)))]
+                             (.readObject ois)))]
+    (testing "Clojol functions reject Java serialization (GHSA-x4c4-68gp-vrhc)"
+      (is (thrown? java.io.NotSerializableException (serialize (fn [x] x))))
+      (is (thrown? java.io.NotSerializableException (serialize inc)))
+      (is (thrown? java.io.NotSerializableException (serialize eval))))
+
+    (testing "Generated proxy classes over Serializable superclasses reject Java serialization/deserialization by default"
+      (let [p (proxy [javax.swing.table.AbstractTableModel] []
+                (getRowCount [] 0)
+                (getColumnCount [] 0)
+                (getValueAt [r c] nil))
+            e (proxy [java.lang.Exception] ["test"])
+            cl (.getClassLoader (class e))]
+        (is (thrown? java.io.NotSerializableException (serialize p)))
+        (is (thrown? java.io.NotSerializableException (serialize e)))
+        ;; Even if a proxy is serialized under -Dclojure.serializable.fns=true,
+        ;; deserialization without the flag is blocked AND __mappings is transient.
+        (let [bs (try
+                   (System/setProperty "clojure.serializable.fns" "true")
+                   (serialize e)
+                   (finally
+                     (System/clearProperty "clojure.serializable.fns")))]
+          (is (thrown? java.io.NotSerializableException (deserialize-with cl bs)))
+          (let [restored (try
+                           (System/setProperty "clojure.serializable.fns" "true")
+                           (deserialize-with cl bs)
+                           (finally
+                             (System/clearProperty "clojure.serializable.fns")))]
+            (is (nil? (proxy-mappings restored)))))))
+
+    (testing "Ratio Java serialization round-trip preserves invariants"
+      (let [r 3/7
+            r2 (deserialize (serialize r))]
+        (is (= r r2))
+        (is (= 3 (numerator r2)))
+        (is (= 7 (denominator r2)))))
+
+    (testing "clojure.edn rejects non-EDN reader syntax and ignores global *data-readers*"
+      (require '[clojure.edn :as edn])
+      (let [called (atom false)]
+        (binding [*data-readers* {'evil (fn [x] (reset! called true) x)}
+                  *default-data-reader-fn* (fn [t v] (reset! called true) [t v])]
+          (is (thrown? RuntimeException (edn/read-string "#evil 1")))
+          (is (false? @called))))
+      (is (= [1 2 3] (edn/read-string {:readers {'vec3 (fn [x] (vec x))}} "#vec3 (1 2 3)")))
+      (is (= [:custom 42] (edn/read-string {:default (fn [t v] [(keyword (name t)) v])} "#custom 42")))
+      (is (thrown? RuntimeException (edn/read-string "#(+ 1 %)")))
+      (is (thrown? RuntimeException (edn/read-string "#'clojure.core/inc")))
+      (is (thrown? RuntimeException (edn/read-string "@foo")))
+      (is (thrown? RuntimeException (edn/read-string "'foo")))
+      (is (thrown? RuntimeException (edn/read-string "`foo")))
+      (is (thrown? RuntimeException (edn/read-string "^:a {}")))
+      (is (thrown? RuntimeException (edn/read-string "#?(:clj 1)")))
+      (is (thrown? RuntimeException (edn/read-string "#=(+ 1 2)"))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))
