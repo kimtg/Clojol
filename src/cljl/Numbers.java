@@ -453,8 +453,22 @@ public final class Numbers {
         return add(rem, y);
     }
 
+    private static ArithmeticException throwOverflow() {
+        return new ArithmeticException("long overflow");
+    }
+
+    public static long incExact(long x) {
+        if (x == Long.MAX_VALUE) throw throwOverflow();
+        return x + 1L;
+    }
+
+    public static long decExact(long x) {
+        if (x == Long.MIN_VALUE) throw throwOverflow();
+        return x - 1L;
+    }
+
     public static Number inc(Object x) {
-        if (x instanceof Long lx) return Math.incrementExact(lx);
+        if (x instanceof Long lx) return incExact(lx);
         return add(x, 1L);
     }
 
@@ -467,7 +481,7 @@ public final class Numbers {
     }
 
     public static Number dec(Object x) {
-        if (x instanceof Long lx) return Math.decrementExact(lx);
+        if (x instanceof Long lx) return decExact(lx);
         return minus(x, 1L);
     }
 

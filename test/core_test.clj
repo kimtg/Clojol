@@ -221,9 +221,88 @@
       (is (= 5 @a))
       (reset! a 10)
       (is (= 10 @a)))
+    ;; Fast-long Atom: concurrent increments, demotion, compare-and-set!, watches, validators, overflow
+    (let [a (atom 0)]
+      (dotimes [_ 100] (swap! a inc))
+      (is (= 100 @a))
+      (swap! a dec)
+      (is (= 99 @a))
+      (swap! a + 1001)
+      (is (= 1100 @a))
+      (is (true? (compare-and-set! a @a 1101)))
+      (is (= 1101 @a))
+      (is (false? (compare-and-set! a 999 1102)))
+      (is (true? (compare-and-set! a @a :demoted)))
+      (is (= :demoted @a))
+      (reset! a 50)
+      (swap! a inc)
+      (is (= 51 @a)))
+    (let [a (atom 0)
+          seen (atom 0)]
+      (add-watch a :w (fn [_ _ o n] (swap! seen + (- n o))))
+      (set-validator! a #(>= % 0))
+      (is (thrown? IllegalStateException (reset! a -1)))
+      (swap! a inc)
+      (swap! a + 4)
+      (is (= 5 @a))
+      (is (= 5 @seen)))
+    (let [a (atom 0)
+          futs (doall (for [_ (range 4)]
+                        (future (dotimes [_ 2500] (swap! a inc)))))]
+      (doseq [f futs] @f)
+      (is (= 10000 @a)))
+    (let [a (atom Long/MAX_VALUE)]
+      (is (thrown? ArithmeticException (swap! a inc))))
     (let [v (volatile! 1)]
       (vswap! v * 7)
       (is (= 7 @v)))
+    ;; Scalar-replaced local volatile in loop, try/catch, mixed types, and return value
+    (let [f (fn [n]
+              (let [v (volatile! 0)]
+                (loop [i 0]
+                  (if (< i n)
+                    (do (vswap! v + i)
+                        (recur (inc i)))
+                    @v))))]
+      (is (= 4950 (f 100))))
+    (let [f (fn []
+              (let [v (volatile! 0)]
+                (try
+                  (vreset! v 10)
+                  (vswap! v + 5 7)
+                  (throw (RuntimeException. "stop"))
+                  (catch RuntimeException _
+                    @v))))]
+      (is (= 22 (f))))
+    (let [f (fn []
+              (let [v (volatile! 0)]
+                (vswap! v inc)
+                (vreset! v 2.5)
+                (vreset! v :done)
+                (vreset! v 99)
+                @v))]
+      (is (= 99 (f))))
+    ;; Escaping volatile (closure, parameter, cross-thread, single-eval of vol expr, type transitions)
+    (let [evals (atom 0)
+          v (volatile! 0)
+          get-v (fn [] (swap! evals inc) v)
+          bump (fn [vol d] (vswap! vol + d))]
+      (is (volatile? v))
+      (is (= 3 (vswap! (get-v) + 1 2)))
+      (is (= 1 @evals))
+      (is (= 13 (bump v 10)))
+      (is (= 13 @v))
+      (let [fut (future (vswap! v + 7))]
+        (is (= 20 @fut))
+        (is (= 20 @v)))
+      (is (= :switched (vreset! v :switched)))
+      (is (= :switched @v))
+      (is (= 42 (vreset! v 42)))
+      (is (= 42 @v)))
+    (let [vd (volatile! 1.5)
+          add-d (fn [vol x] (vswap! vol + x))]
+      (is (= 4.0 (add-d vd 2.5)))
+      (is (= 4.0 @vd)))
     (let [cnt (atom 0)
           d (delay (swap! cnt inc) 42)]
       (is (not (realized? d)))

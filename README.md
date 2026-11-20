@@ -24,6 +24,19 @@ Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measu
 
 With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns and dispatches guarded self-recursive calls directly to `invokePrim_J_J` with no user type hints required—running `fib(40)` ~1.9–2.1x faster than official Clojure (matching raw Java `Math.addExact`/`subtractExact` speed) while reducing total wall-clock execution time by ~62%. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) also drop from ~8.74 ms to ~0.56–0.76 ms.
 
+### `loop/recur`, `volatile!`, and `atom` (vs. Clojure 1.12.6)
+
+`1,000,000` iterations incrementing a counter (median of 7 runs after 5 warmups, OpenJDK 25.0.4.1 on Windows):
+
+| Benchmark (`N = 1,000,000`) | Clojol (`cljl`) | Clojure 1.12.6 | Speedup |
+| :--- | :---: | :---: | :---: |
+| `loop/recur` | **0.14 ms** | 0.20 ms | **1.47x faster** |
+| `volatile!` (local `vswap!`) | **0.18 ms** | 9.56 ms | **54.0x faster** |
+| `volatile!` (escaping `vswap!`) | **6.72 ms** | 8.07 ms | **1.20x faster** |
+| `atom` (`swap!`) | **8.89 ms** | 11.97 ms | **1.35x faster** |
+
+`BytecodeJIT.java` eliminates redundant overflow checks on range-bounded `long` loop counters (`(< i n)` -> `(inc i)`), scalar-replaces non-escaping local `volatile!` bindings into unboxed JVM locals, uses tagged-primitive storage in `Atom.Volatile` for escaping volatiles, and uses a lock-free 63-bit fast-long `VarHandle` CAS path in `Atom` to eliminate `Long` allocation and GC write barriers on numeric `swap!`/`reset!`.
+
 ### AppCDS Cold Startup Impact
 
 Cold startup + eval (`java ... -jar build/cljl.jar -Srepro -Sdeps "{}" -e "(+ 1 2)"`) measured across 8 runs on OpenJDK 25.0.4.1 (Windows):

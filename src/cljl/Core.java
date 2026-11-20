@@ -27,7 +27,9 @@ public final class Core {
 
     private static volatile boolean initialized = false;
     private static final Set<String> LOADED_LIBS = ConcurrentHashMap.newKeySet();
-    private static Fn addFn;
+    static Fn addFn;
+    static Fn incFn;
+    static Fn decFn;
 
     private Core() {}
 
@@ -323,10 +325,20 @@ public final class Core {
         def(ns, "quot", Fn.of2("quot", Numbers::quotient));
         def(ns, "rem", Fn.of2("rem", Numbers::remainder));
         def(ns, "mod", Fn.of2("mod", Numbers::mod));
-        def(ns, "inc", Fn.of1("inc", Numbers::inc));
-        def(ns, "inc'", Fn.of1("inc'", Numbers::incP));
-        def(ns, "dec", Fn.of1("dec", Numbers::dec));
-        def(ns, "dec'", Fn.of1("dec'", Numbers::decP));
+        incFn = new Fn.NamedFn("inc") {
+            @Override public Object invoke(Object x) { return Numbers.inc(x); }
+        };
+        def(ns, "inc", incFn);
+        def(ns, "inc'", new Fn.NamedFn("inc'") {
+            @Override public Object invoke(Object x) { return Numbers.incP(x); }
+        });
+        decFn = new Fn.NamedFn("dec") {
+            @Override public Object invoke(Object x) { return Numbers.dec(x); }
+        };
+        def(ns, "dec", decFn);
+        def(ns, "dec'", new Fn.NamedFn("dec'") {
+            @Override public Object invoke(Object x) { return Numbers.decP(x); }
+        });
         def(ns, "abs", Fn.of1("abs", Numbers::abs));
 
         def(ns, "<", Fn.ofVarargs("<", args -> {
@@ -2309,11 +2321,19 @@ public final class Core {
             return a;
         }));
 
-        def(ns, "deref", Fn.ofVarargs("deref", args -> {
-            IDeref d = (IDeref) args[0];
-            if (args.length == 1) return d.deref();
-            return d.deref(Numbers.toLong(args[1]), args[2]);
-        }));
+        def(ns, "deref", new Fn.NamedFn("deref") {
+            @Override public Object invoke(Object ref) {
+                return ((IDeref) ref).deref();
+            }
+            @Override public Object invoke(Object ref, Object timeoutMs, Object timeoutVal) {
+                return ((IDeref) ref).deref(Numbers.toLong(timeoutMs), timeoutVal);
+            }
+            @Override public Object invokeVarargs(Object[] args) {
+                if (args.length == 1) return ((IDeref) args[0]).deref();
+                if (args.length == 3) return ((IDeref) args[0]).deref(Numbers.toLong(args[1]), args[2]);
+                throw arityError(args.length);
+            }
+        });
 
         def(ns, "reset!", Fn.of2("reset!", (a, v) -> ((Atom) a).reset(v)));
         def(ns, "reset-vals!", Fn.of2("reset-vals!", (a, v) -> {
@@ -2325,20 +2345,32 @@ public final class Core {
         }));
         def(ns, "compare-and-set!", Fn.of3("compare-and-set!", (a, o, n) -> ((Atom) a).compareAndSet(o, n)));
 
-        def(ns, "swap!", Fn.ofVarargs("swap!", args -> {
-            Atom a = (Atom) args[0];
-            Fn f = (Fn) args[1];
-            return switch (args.length) {
-                case 2 -> a.swap(f);
-                case 3 -> a.swap(f, args[2]);
-                case 4 -> a.swap(f, args[2], args[3]);
-                default -> {
-                    Object[] rest = new Object[args.length - 4];
-                    System.arraycopy(args, 4, rest, 0, rest.length);
-                    yield a.swap(f, args[2], args[3], rest);
-                }
-            };
-        }));
+        def(ns, "swap!", new Fn.NamedFn("swap!") {
+            @Override public Object invoke(Object a, Object f) {
+                return ((Atom) a).swap((Fn) f);
+            }
+            @Override public Object invoke(Object a, Object f, Object x) {
+                return ((Atom) a).swap((Fn) f, x);
+            }
+            @Override public Object invoke(Object a, Object f, Object x, Object y) {
+                return ((Atom) a).swap((Fn) f, x, y);
+            }
+            @Override public Object invokeVarargs(Object[] args) {
+                if (args.length < 2) throw arityError(args.length);
+                Atom a = (Atom) args[0];
+                Fn f = (Fn) args[1];
+                return switch (args.length) {
+                    case 2 -> a.swap(f);
+                    case 3 -> a.swap(f, args[2]);
+                    case 4 -> a.swap(f, args[2], args[3]);
+                    default -> {
+                        Object[] rest = new Object[args.length - 4];
+                        System.arraycopy(args, 4, rest, 0, rest.length);
+                        yield a.swap(f, args[2], args[3], rest);
+                    }
+                };
+            }
+        });
 
         def(ns, "swap-vals!", Fn.ofVarargs("swap-vals!", args -> {
             Atom a = (Atom) args[0];
@@ -2355,13 +2387,20 @@ public final class Core {
 
         def(ns, "volatile!", Fn.of1("volatile!", Atom.Volatile::new));
         def(ns, "vreset!", Fn.of2("vreset!", (v, val) -> ((Atom.Volatile) v).reset(val)));
-        def(ns, "vswap!", Fn.ofVarargs("vswap!", args -> {
-            Atom.Volatile vol = (Atom.Volatile) args[0];
-            Fn f = (Fn) args[1];
-            Object[] callArgs = new Object[args.length - 1];
-            callArgs[0] = vol.val;
-            System.arraycopy(args, 2, callArgs, 1, args.length - 2);
-            return vol.reset(f.applyTo(callArgs));
+        defMacro(ns, "vswap!", Fn.ofVarargs("vswap!", args -> {
+            if (args.length < 2) throw new IllegalArgumentException("vswap! requires at least 2 arguments");
+            Symbol volSym = Symbol.intern("vol__" + RT.nextID());
+            List<Object> call = new ArrayList<>(args.length);
+            call.add(args[1]);
+            call.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "deref"), volSym));
+            for (int i = 2; i < args.length; i++) call.add(args[i]);
+            return PersistentList.createFromArray(
+                    Symbol.intern("let*"),
+                    PersistentVector.createOwning(volSym, args[0]),
+                    PersistentList.createFromArray(
+                            Symbol.intern("clojure.core", "vreset!"),
+                            volSym,
+                            PersistentList.create(call)));
         }));
         def(ns, "volatile?", Fn.of1("volatile?", x -> x instanceof Atom.Volatile));
 

@@ -851,6 +851,13 @@ public final class Compiler {
             case "identical?" -> arity == 2 ? new IdenticalNode(args[0], args[1]) : null;
             case "rem" -> arity == 2 ? new Rem2Node(args[0], args[1]) : null;
             case "quot" -> arity == 2 ? new Quot2Node(args[0], args[1]) : null;
+            case "volatile!" -> arity == 1 ? new VolatileNode(args[0]) : null;
+            case "deref" -> arity == 1 ? new DerefNode(args[0]) : null;
+            case "vreset!" -> arity == 2 ? new VresetNode(args[0], args[1]) : null;
+            case "atom" -> arity == 1 ? new AtomNode(args[0]) : null;
+            case "reset!" -> arity == 2 ? new ResetBangNode(args[0], args[1]) : null;
+            case "swap!" -> (arity >= 2 && arity <= 4)
+                    ? new SwapBangNode(args[0], args[1], Arrays.copyOfRange(args, 2, arity)) : null;
             default -> null;
         };
     }
@@ -2001,6 +2008,25 @@ public final class Compiler {
             if (n instanceof LockingNode ln) {
                 return containsLoop(ln.target) || containsLoop(ln.body);
             }
+            if (n instanceof VolatileNode vn) {
+                return containsLoop(vn.init);
+            }
+            if (n instanceof DerefNode dn) {
+                return containsLoop(dn.target);
+            }
+            if (n instanceof VresetNode vr) {
+                return containsLoop(vr.target) || containsLoop(vr.val);
+            }
+            if (n instanceof AtomNode an) {
+                return containsLoop(an.init);
+            }
+            if (n instanceof ResetBangNode rb) {
+                return containsLoop(rb.target) || containsLoop(rb.val);
+            }
+            if (n instanceof SwapBangNode sb) {
+                if (containsLoop(sb.target) || containsLoop(sb.fn)) return true;
+                for (Node a : sb.extraArgs) if (containsLoop(a)) return true;
+            }
             return false;
         }
 
@@ -2990,6 +3016,70 @@ public final class Compiler {
         public final Node coll;
         public PopNode(Node coll) { this.coll = coll; }
         @Override public Object eval(Object[] frame) { return RT.pop(coll.eval(frame)); }
+    }
+
+    public static final class VolatileNode extends Node {
+        public final Node init;
+        public VolatileNode(Node init) { this.init = init; }
+        @Override public Object eval(Object[] frame) { return new Atom.Volatile(init.eval(frame)); }
+    }
+
+    public static final class DerefNode extends Node {
+        public final Node target;
+        public DerefNode(Node target) { this.target = target; }
+        @Override public Object eval(Object[] frame) { return ((IDeref) target.eval(frame)).deref(); }
+    }
+
+    public static final class VresetNode extends Node {
+        public final Node target, val;
+        public VresetNode(Node target, Node val) {
+            this.target = target;
+            this.val = val;
+        }
+        @Override public Object eval(Object[] frame) {
+            return ((Atom.Volatile) target.eval(frame)).reset(val.eval(frame));
+        }
+    }
+
+    public static final class AtomNode extends Node {
+        public final Node init;
+        public AtomNode(Node init) { this.init = init; }
+        @Override public Object eval(Object[] frame) { return new Atom(init.eval(frame)); }
+    }
+
+    public static final class ResetBangNode extends Node {
+        public final Node target, val;
+        public ResetBangNode(Node target, Node val) {
+            this.target = target;
+            this.val = val;
+        }
+        @Override public Object eval(Object[] frame) {
+            return ((Atom) target.eval(frame)).reset(val.eval(frame));
+        }
+    }
+
+    public static final class SwapBangNode extends Node {
+        public final Node target, fn;
+        public final Node[] extraArgs;
+        public SwapBangNode(Node target, Node fn, Node[] extraArgs) {
+            this.target = target;
+            this.fn = fn;
+            this.extraArgs = extraArgs;
+        }
+        @Override public Object eval(Object[] frame) {
+            Atom a = (Atom) target.eval(frame);
+            Fn f = (Fn) fn.eval(frame);
+            return switch (extraArgs.length) {
+                case 0 -> a.swap(f);
+                case 1 -> a.swap(f, extraArgs[0].eval(frame));
+                case 2 -> a.swap(f, extraArgs[0].eval(frame), extraArgs[1].eval(frame));
+                default -> {
+                    Object[] rest = new Object[extraArgs.length - 2];
+                    for (int i = 2; i < extraArgs.length; i++) rest[i - 2] = extraArgs[i].eval(frame);
+                    yield a.swap(f, extraArgs[0].eval(frame), extraArgs[1].eval(frame), rest);
+                }
+            };
+        }
     }
 
     public static final class EvenPNode extends Node {
