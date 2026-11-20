@@ -358,8 +358,6 @@ public final class Main {
                 try {
                     if (buf.isEmpty()) {
                         System.out.print(RT.currentNS().name.name + "=> ");
-                    } else {
-                        System.out.print("...=> ");
                     }
                     System.out.flush();
 
