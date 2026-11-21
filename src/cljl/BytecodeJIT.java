@@ -517,8 +517,174 @@ public final class BytecodeJIT {
         }
     }
 
+    private static boolean isPureConstantForStatic(ConstNode cn) {
+        Object v = cn.val;
+        return v == null || v instanceof Long || v instanceof Double || v instanceof Boolean || v instanceof String;
+    }
+
+    private static boolean containsSelfCall(Node n, Var ownerVar, int selfSlot, int arity) {
+        if (n == null) return false;
+        if (n instanceof VarCall1Node c) return (arity == 1 && ownerVar != null && c.v == ownerVar) || containsSelfCall(c.a, ownerVar, selfSlot, arity);
+        if (n instanceof VarCall2Node c) return (arity == 2 && ownerVar != null && c.v == ownerVar) || containsSelfCall(c.a, ownerVar, selfSlot, arity) || containsSelfCall(c.b, ownerVar, selfSlot, arity);
+        if (n instanceof VarCall3Node c) return (arity == 3 && ownerVar != null && c.v == ownerVar) || containsSelfCall(c.a, ownerVar, selfSlot, arity) || containsSelfCall(c.b, ownerVar, selfSlot, arity) || containsSelfCall(c.c, ownerVar, selfSlot, arity);
+        if (n instanceof Call1Node c) return (arity == 1 && selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot) || containsSelfCall(c.fn, ownerVar, selfSlot, arity) || containsSelfCall(c.a, ownerVar, selfSlot, arity);
+        if (n instanceof Call2Node c) return (arity == 2 && selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot) || containsSelfCall(c.fn, ownerVar, selfSlot, arity) || containsSelfCall(c.a, ownerVar, selfSlot, arity) || containsSelfCall(c.b, ownerVar, selfSlot, arity);
+        if (n instanceof Call3Node c) return (arity == 3 && selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot) || containsSelfCall(c.fn, ownerVar, selfSlot, arity) || containsSelfCall(c.a, ownerVar, selfSlot, arity) || containsSelfCall(c.b, ownerVar, selfSlot, arity) || containsSelfCall(c.c, ownerVar, selfSlot, arity);
+        if (n instanceof IfNode iff) return containsSelfCall(iff.test, ownerVar, selfSlot, arity) || containsSelfCall(iff.thenNode, ownerVar, selfSlot, arity) || containsSelfCall(iff.elseNode, ownerVar, selfSlot, arity);
+        if (n instanceof DoNode dn) { for (Node c : dn.nodes) if (containsSelfCall(c, ownerVar, selfSlot, arity)) return true; return false; }
+        if (n instanceof LetNode ln) { for (Node i : ln.inits) if (containsSelfCall(i, ownerVar, selfSlot, arity)) return true; return containsSelfCall(ln.body, ownerVar, selfSlot, arity); }
+        if (n instanceof Add2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Sub2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Mul2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Div2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Rem2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Quot2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof UncheckedAdd2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof UncheckedSub2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof UncheckedMul2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof BitOp2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Lt2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Lte2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Gt2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Gte2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Equiv2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof NumEq2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof NegateNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof IncNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof DecNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof UncheckedIncNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof UncheckedDecNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof UncheckedNegateNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof BitNotNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof LongCastNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof DoubleCastNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof ZeroPNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof PosPNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof NegPNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof EvenPNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof OddPNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        if (n instanceof NotNode a) return containsSelfCall(a.a, ownerVar, selfSlot, arity);
+        return false;
+    }
+
+    private static boolean isPureSelfRecursiveBody(
+            Node n, Var ownerVar, int selfSlot, int arity, AnalysisResult analysis, PrimSpec ps, int[] stats) {
+        if (n == null) return true;
+        stats[0]++;
+        if (n instanceof ConstNode cn) return isPureConstantForStatic(cn);
+        if (n instanceof LocalNode ln) return ln.slot != selfSlot;
+        if (n instanceof IfNode iff) {
+            return isPureSelfRecursiveBody(iff.test, ownerVar, selfSlot, arity, analysis, ps, stats)
+                    && isPureSelfRecursiveBody(iff.thenNode, ownerVar, selfSlot, arity, analysis, ps, stats)
+                    && isPureSelfRecursiveBody(iff.elseNode, ownerVar, selfSlot, arity, analysis, ps, stats);
+        }
+        if (n instanceof DoNode dn) {
+            for (Node c : dn.nodes) {
+                if (!isPureSelfRecursiveBody(c, ownerVar, selfSlot, arity, analysis, ps, stats)) return false;
+            }
+            return true;
+        }
+        if (n instanceof LetNode ln) {
+            for (Node i : ln.inits) {
+                if (!isPureSelfRecursiveBody(i, ownerVar, selfSlot, arity, analysis, ps, stats)) return false;
+            }
+            return isPureSelfRecursiveBody(ln.body, ownerVar, selfSlot, arity, analysis, ps, stats);
+        }
+        if (n instanceof VarCall1Node c && arity == 1 && ownerVar != null && c.v == ownerVar) {
+            if (analysis.typeOf(c.a) != ps.paramTypes[0]) return false;
+            stats[1]++;
+            return isPureSelfRecursiveBody(c.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        }
+        if (n instanceof VarCall2Node c && arity == 2 && ownerVar != null && c.v == ownerVar) {
+            if (analysis.typeOf(c.a) != ps.paramTypes[0] || analysis.typeOf(c.b) != ps.paramTypes[1]) return false;
+            stats[1]++;
+            return isPureSelfRecursiveBody(c.a, ownerVar, selfSlot, arity, analysis, ps, stats)
+                    && isPureSelfRecursiveBody(c.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        }
+        if (n instanceof VarCall3Node c && arity == 3 && ownerVar != null && c.v == ownerVar) {
+            if (analysis.typeOf(c.a) != ps.paramTypes[0] || analysis.typeOf(c.b) != ps.paramTypes[1]
+                    || analysis.typeOf(c.c) != ps.paramTypes[2]) return false;
+            stats[1]++;
+            return isPureSelfRecursiveBody(c.a, ownerVar, selfSlot, arity, analysis, ps, stats)
+                    && isPureSelfRecursiveBody(c.b, ownerVar, selfSlot, arity, analysis, ps, stats)
+                    && isPureSelfRecursiveBody(c.c, ownerVar, selfSlot, arity, analysis, ps, stats);
+        }
+        if (n instanceof Call1Node c && arity == 1 && selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot) {
+            if (analysis.typeOf(c.a) != ps.paramTypes[0]) return false;
+            stats[1]++;
+            return isPureSelfRecursiveBody(c.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        }
+        if (n instanceof Call2Node c && arity == 2 && selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot) {
+            if (analysis.typeOf(c.a) != ps.paramTypes[0] || analysis.typeOf(c.b) != ps.paramTypes[1]) return false;
+            stats[1]++;
+            return isPureSelfRecursiveBody(c.a, ownerVar, selfSlot, arity, analysis, ps, stats)
+                    && isPureSelfRecursiveBody(c.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        }
+        if (n instanceof Call3Node c && arity == 3 && selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot) {
+            if (analysis.typeOf(c.a) != ps.paramTypes[0] || analysis.typeOf(c.b) != ps.paramTypes[1]
+                    || analysis.typeOf(c.c) != ps.paramTypes[2]) return false;
+            stats[1]++;
+            return isPureSelfRecursiveBody(c.a, ownerVar, selfSlot, arity, analysis, ps, stats)
+                    && isPureSelfRecursiveBody(c.b, ownerVar, selfSlot, arity, analysis, ps, stats)
+                    && isPureSelfRecursiveBody(c.c, ownerVar, selfSlot, arity, analysis, ps, stats);
+        }
+        if (n instanceof Add2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Sub2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Mul2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Div2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Rem2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Quot2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof UncheckedAdd2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof UncheckedSub2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof UncheckedMul2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof BitOp2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Lt2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Lte2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Gt2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Gte2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Equiv2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof NumEq2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof NegateNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof IncNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof DecNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof UncheckedIncNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof UncheckedDecNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof UncheckedNegateNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof BitNotNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof LongCastNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof DoubleCastNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof ZeroPNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof PosPNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof NegPNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof EvenPNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof OddPNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof NotNode a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats);
+        return false;
+    }
+
+    private static boolean canEmitStaticFastWorker(ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, int[] stats) {
+        if (m.capturedLocalSlots.length != 0) return false;
+        if (!ps.analysis.returnType.isPrimitive()) return false;
+        for (int i = 0; i < arity; i++) {
+            if (!ps.paramTypes[i].isPrimitive()) return false;
+        }
+        for (int i = 0; i < m.maxSlots; i++) {
+            if (i == m.selfSlot) continue;
+            ValType st = ps.analysis.slotTypes[i];
+            if (!st.isPrimitive()) return false;
+        }
+        return isPureSelfRecursiveBody(m.body, ce.ownerVar, m.selfSlot, arity, ps.analysis, ps, stats) && stats[1] >= 1;
+    }
+
     private static void emitPrimInvoke(
             ClassEmitter ce, FnMethod m, int arity, int methodCaptureIdx, PrimSpec ps, AnalysisResult genericAnalysis) {
+        int[] stats = new int[2];
+        String staticFastName = null;
+        if (canEmitStaticFastWorker(ce, m, arity, ps, stats)) {
+            staticFastName = "fast_" + ps.methodName;
+            emitStaticFastPrimWorker(ce, m, arity, ps, staticFastName, stats[0] <= 24);
+        }
+
         int[] argJvmSlots = new int[arity];
         int nextArgSlot = 1;
         for (int i = 0; i < arity; i++) {
@@ -531,6 +697,35 @@ public final class BytecodeJIT {
         CodeGen cg = ce.beginMethod(ps.methodName, ps.descriptor, layout.totalLocals);
         cg.setContext(m, ps.analysis, layout);
         cg.genericAnalysis = genericAnalysis;
+
+        ValType retT = ps.analysis.returnType;
+        if (staticFastName != null) {
+            Label slowEntry = null;
+            if (ce.ownerVar != null) {
+                slowEntry = new Label();
+                cg.loadConstObj(ce.ownerVar);
+                cg.checkcast("cljl/Var");
+                cg.invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
+                cg.aload(0);
+                cg.getfield(ce.className, "outerFn", "Lcljl/Compiler$CompiledFn;", 1);
+                cg.ifAcmpNe(slowEntry);
+            }
+            int argWords = 0;
+            for (int i = 0; i < arity; i++) {
+                ValType pt = ps.paramTypes[i];
+                cg.loadJvmLocal(argJvmSlots[i], pt);
+                argWords += (pt == ValType.LONG || pt == ValType.DOUBLE) ? 2 : 1;
+            }
+            int retWords = (retT == ValType.LONG || retT == ValType.DOUBLE) ? 2 : 1;
+            cg.invokestatic(ce.className, staticFastName, ps.descriptor, argWords, retWords);
+            cg.emitReturnInstruction(retT);
+            if (slowEntry == null) {
+                cg.finish();
+                return;
+            }
+            cg.markLabel(slowEntry);
+            cg.curStack = 0;
+        }
 
         // Initialize selfSlot
         if (m.selfSlot != -1) {
@@ -552,9 +747,53 @@ public final class BytecodeJIT {
         Label fnLoopStart = new Label();
         cg.markLabel(fnLoopStart);
         cg.pushLoopTarget(m.paramSlots, fnLoopStart);
-        ValType retT = ps.analysis.returnType;
         boolean terminated = cg.emitReturnTyped(m.body, retT);
         cg.popLoopTarget();
+        if (!terminated) {
+            cg.emitReturnInstruction(retT);
+        }
+        cg.finish();
+    }
+
+    private static void emitStaticFastPrimWorker(
+            ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName, boolean canSelfInline) {
+        int[] argJvmSlots = new int[arity];
+        int nextArgSlot = 0;
+        for (int i = 0; i < arity; i++) {
+            argJvmSlots[i] = nextArgSlot;
+            ValType pt = ps.paramTypes[i];
+            nextArgSlot += (pt == ValType.LONG || pt == ValType.DOUBLE) ? 2 : 1;
+        }
+
+        SlotLayout layout = new SlotLayout(m, ps.analysis.slotTypes, nextArgSlot);
+        // Reuse incoming JVM argument slots directly for paramSlots when types match
+        for (int i = 0; i < arity; i++) {
+            int logicalSlot = m.paramSlots[i];
+            if (ps.paramTypes[i] == layout.slotTypes[logicalSlot]) {
+                layout.jvmSlot[logicalSlot] = argJvmSlots[i];
+            }
+        }
+
+        CodeGen cg = ce.beginStaticMethod(fastName, ps.descriptor, layout.totalLocals);
+        cg.setContext(m, ps.analysis, layout);
+        cg.staticFastSelfSpec = ps;
+        cg.staticFastSelfMethodName = fastName;
+        cg.staticFastSelfCanInline = canSelfInline;
+        cg.staticFastSelfInlineDepth = 0;
+
+        for (int i = 0; i < arity; i++) {
+            ValType entryT = ps.paramTypes[i];
+            int logicalSlot = m.paramSlots[i];
+            ValType targetT = layout.slotTypes[logicalSlot];
+            if (entryT != targetT) {
+                cg.loadJvmLocal(argJvmSlots[i], entryT);
+                cg.convertValue(entryT, targetT);
+                cg.storeLogicalSlot(logicalSlot);
+            }
+        }
+
+        ValType retT = ps.analysis.returnType;
+        boolean terminated = cg.emitReturnTyped(m.body, retT);
         if (!terminated) {
             cg.emitReturnInstruction(retT);
         }
@@ -889,7 +1128,11 @@ public final class BytecodeJIT {
         }
 
         CodeGen beginMethod(String name, String desc, int maxLocals) {
-            return new CodeGen(this, name, desc, maxLocals);
+            return new CodeGen(this, 0x0001, name, desc, maxLocals);
+        }
+
+        CodeGen beginStaticMethod(String name, String desc, int maxLocals) {
+            return new CodeGen(this, 0x000A, name, desc, maxLocals);
         }
 
         private void emitConstructor() {
@@ -1094,6 +1337,7 @@ public final class BytecodeJIT {
 
     private static final class CodeGen {
         final ClassEmitter ce;
+        final int accessFlags;
         final int nameIdx;
         final int descIdx;
         final int maxLocals;
@@ -1103,6 +1347,7 @@ public final class BytecodeJIT {
         final List<Label> allLabels = new ArrayList<>();
         final Set<Integer> boundedBelowMaxLong = new HashSet<>();
         final Set<Integer> boundedAboveMinLong = new HashSet<>();
+        final Set<Integer> nonNegativeLong = new HashSet<>();
         final Set<Integer> boundedBelowMaxVolatiles = new HashSet<>();
         final Set<Integer> boundedAboveMinVolatiles = new HashSet<>();
 
@@ -1111,13 +1356,18 @@ public final class BytecodeJIT {
         AnalysisResult genericAnalysis;
         SlotLayout layout;
         int selfSlot = -1;
+        PrimSpec staticFastSelfSpec = null;
+        String staticFastSelfMethodName = null;
+        boolean staticFastSelfCanInline = false;
+        int staticFastSelfInlineDepth = 0;
         int curTempLocals = 0;
         int maxTempLocals = 0;
         int curStack = 0;
         int maxStack = 0;
 
-        CodeGen(ClassEmitter ce, String name, String desc, int maxLocals) {
+        CodeGen(ClassEmitter ce, int accessFlags, String name, String desc, int maxLocals) {
             this.ce = ce;
+            this.accessFlags = accessFlags;
             this.nameIdx = ce.cp.addUtf8(name);
             this.descIdx = ce.cp.addUtf8(desc);
             this.maxLocals = maxLocals;
@@ -2005,6 +2255,13 @@ public final class BytecodeJIT {
                 return false;
             }
             if (node instanceof Sub2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
+                if (a.a instanceof LocalNode ln && nonNegativeLong.contains(ln.slot)
+                        && a.b instanceof ConstNode cn && cn.isLong && cn.longVal >= 0L) {
+                    loadLogicalSlot(ln.slot);
+                    ldcLong(cn.longVal);
+                    lsub();
+                    return false;
+                }
                 if (emitLong(a.a)) return true;
                 if (emitLong(a.b)) return true;
                 invokestatic("java/lang/Math", "subtractExact", "(JJ)J", 4, 2);
@@ -3019,28 +3276,47 @@ public final class BytecodeJIT {
 
             int thenBelowMax = -1, thenAboveMin = -1;
             int elseBelowMax = -1, elseAboveMin = -1;
+            int thenNonNeg = -1, elseNonNeg = -1;
             int thenBelowMaxVol = -1, thenAboveMinVol = -1;
             int elseBelowMaxVol = -1, elseAboveMinVol = -1;
             if (iff.test instanceof Lt2Node lt && typeOf(lt.a) == ValType.LONG && typeOf(lt.b) == ValType.LONG) {
-                if (lt.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) thenBelowMax = ln.slot;
-                else thenBelowMaxVol = scalarLongVolatileSlot(lt.a);
-                if (lt.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) thenAboveMin = ln.slot;
-                else thenAboveMinVol = scalarLongVolatileSlot(lt.b);
+                if (lt.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) {
+                    thenBelowMax = ln.slot;
+                    if (lt.b instanceof ConstNode cn && cn.isLong && cn.longVal >= 0L) elseNonNeg = ln.slot;
+                } else thenBelowMaxVol = scalarLongVolatileSlot(lt.a);
+                if (lt.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) {
+                    thenAboveMin = ln.slot;
+                    if (lt.a instanceof ConstNode cn && cn.isLong && cn.longVal >= -1L) thenNonNeg = ln.slot;
+                } else thenAboveMinVol = scalarLongVolatileSlot(lt.b);
             } else if (iff.test instanceof Gt2Node gt && typeOf(gt.a) == ValType.LONG && typeOf(gt.b) == ValType.LONG) {
-                if (gt.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) thenAboveMin = ln.slot;
-                else thenAboveMinVol = scalarLongVolatileSlot(gt.a);
-                if (gt.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) thenBelowMax = ln.slot;
-                else thenBelowMaxVol = scalarLongVolatileSlot(gt.b);
+                if (gt.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) {
+                    thenAboveMin = ln.slot;
+                    if (gt.b instanceof ConstNode cn && cn.isLong && cn.longVal >= -1L) thenNonNeg = ln.slot;
+                } else thenAboveMinVol = scalarLongVolatileSlot(gt.a);
+                if (gt.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) {
+                    thenBelowMax = ln.slot;
+                    if (gt.a instanceof ConstNode cn && cn.isLong && cn.longVal >= 0L) elseNonNeg = ln.slot;
+                } else thenBelowMaxVol = scalarLongVolatileSlot(gt.b);
             } else if (iff.test instanceof Gte2Node ge && typeOf(ge.a) == ValType.LONG && typeOf(ge.b) == ValType.LONG) {
-                if (ge.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) elseBelowMax = ln.slot;
-                else elseBelowMaxVol = scalarLongVolatileSlot(ge.a);
-                if (ge.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) elseAboveMin = ln.slot;
-                else elseAboveMinVol = scalarLongVolatileSlot(ge.b);
+                if (ge.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) {
+                    elseBelowMax = ln.slot;
+                    if (ge.b instanceof ConstNode cn && cn.isLong && cn.longVal >= 0L) thenNonNeg = ln.slot;
+                } else elseBelowMaxVol = scalarLongVolatileSlot(ge.a);
+                if (ge.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) {
+                    elseAboveMin = ln.slot;
+                    if (ge.a instanceof ConstNode cn && cn.isLong && cn.longVal >= -1L) elseNonNeg = ln.slot;
+                } else elseAboveMinVol = scalarLongVolatileSlot(ge.b);
             } else if (iff.test instanceof Lte2Node le && typeOf(le.a) == ValType.LONG && typeOf(le.b) == ValType.LONG) {
-                if (le.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) elseAboveMin = ln.slot;
-                else elseAboveMinVol = scalarLongVolatileSlot(le.a);
-                if (le.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) elseBelowMax = ln.slot;
-                else elseBelowMaxVol = scalarLongVolatileSlot(le.b);
+                if (le.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) {
+                    elseAboveMin = ln.slot;
+                    if (le.b instanceof ConstNode cn && cn.isLong && cn.longVal >= -1L) elseNonNeg = ln.slot;
+                } else elseAboveMinVol = scalarLongVolatileSlot(le.a);
+                if (le.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) {
+                    elseBelowMax = ln.slot;
+                    if (le.a instanceof ConstNode cn && cn.isLong && cn.longVal >= 0L) thenNonNeg = ln.slot;
+                } else elseBelowMaxVol = scalarLongVolatileSlot(le.b);
+            } else if (iff.test instanceof PosPNode p && p.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) {
+                thenNonNeg = ln.slot;
             }
 
             Set<Integer> outerVolBelow = new HashSet<>(boundedBelowMaxVolatiles);
@@ -3048,11 +3324,13 @@ public final class BytecodeJIT {
 
             boolean addedThenBelow = thenBelowMax != -1 && boundedBelowMaxLong.add(thenBelowMax);
             boolean addedThenAbove = thenAboveMin != -1 && boundedAboveMinLong.add(thenAboveMin);
+            boolean addedThenNonNeg = thenNonNeg != -1 && nonNegativeLong.add(thenNonNeg);
             if (thenBelowMaxVol != -1) boundedBelowMaxVolatiles.add(thenBelowMaxVol);
             if (thenAboveMinVol != -1) boundedAboveMinVolatiles.add(thenAboveMinVol);
             boolean thenTerm = emitTyped(iff.thenNode, targetT);
             if (addedThenBelow) boundedBelowMaxLong.remove(thenBelowMax);
             if (addedThenAbove) boundedAboveMinLong.remove(thenAboveMin);
+            if (addedThenNonNeg) nonNegativeLong.remove(thenNonNeg);
             Set<Integer> afterThenVolBelow = new HashSet<>(boundedBelowMaxVolatiles);
             Set<Integer> afterThenVolAbove = new HashSet<>(boundedAboveMinVolatiles);
             if (!thenTerm) {
@@ -3066,11 +3344,13 @@ public final class BytecodeJIT {
             boundedAboveMinVolatiles.addAll(outerVolAbove);
             boolean addedElseBelow = elseBelowMax != -1 && boundedBelowMaxLong.add(elseBelowMax);
             boolean addedElseAbove = elseAboveMin != -1 && boundedAboveMinLong.add(elseAboveMin);
+            boolean addedElseNonNeg = elseNonNeg != -1 && nonNegativeLong.add(elseNonNeg);
             if (elseBelowMaxVol != -1) boundedBelowMaxVolatiles.add(elseBelowMaxVol);
             if (elseAboveMinVol != -1) boundedAboveMinVolatiles.add(elseAboveMinVol);
             boolean elseTerm = emitTyped(iff.elseNode, targetT);
             if (addedElseBelow) boundedBelowMaxLong.remove(elseBelowMax);
             if (addedElseAbove) boundedAboveMinLong.remove(elseAboveMin);
+            if (addedElseNonNeg) nonNegativeLong.remove(elseNonNeg);
             Set<Integer> afterElseVolBelow = new HashSet<>(boundedBelowMaxVolatiles);
             Set<Integer> afterElseVolAbove = new HashSet<>(boundedAboveMinVolatiles);
             boundedBelowMaxVolatiles.clear();
@@ -3523,6 +3803,14 @@ public final class BytecodeJIT {
             int arity = args.length;
             PrimSpec ps = findMatchingPrimSpec(arity, args);
 
+            if (staticFastSelfSpec != null && ps == staticFastSelfSpec
+                    && ((fnNode != null && isDirectSelf(fnNode, arity)) || (var != null && isOwnerVarCall(var, arity)))
+                    && (desiredT == ValType.ANY || ps.analysis.returnType == desiredT)) {
+                emitStaticFastSelfCall(ps, args);
+                if (desiredT == ValType.ANY) boxValue(ps.analysis.returnType);
+                return true;
+            }
+
             if (fnNode != null && isDirectSelf(fnNode, arity)) {
                 if (ps != null && (desiredT == ValType.ANY || ps.analysis.returnType == desiredT)) {
                     emitDirectPrimSelfCall(ps, args);
@@ -3549,6 +3837,114 @@ public final class BytecodeJIT {
                 }
             }
             return false;
+        }
+
+        private void emitStaticFastCallWithCurrentParams(PrimSpec ps) {
+            int argWords = 0;
+            for (int i = 0; i < ps.paramTypes.length; i++) {
+                ValType pt = ps.paramTypes[i];
+                loadLogicalSlot(currentMethod.paramSlots[i]);
+                argWords += (pt == ValType.LONG || pt == ValType.DOUBLE) ? 2 : 1;
+            }
+            ValType retT = ps.analysis.returnType;
+            int retWords = (retT == ValType.LONG || retT == ValType.DOUBLE) ? 2 : 1;
+            invokestatic(ce.className, staticFastSelfMethodName, ps.descriptor, argWords, retWords);
+        }
+
+        private void emitStaticFastSelfCall(PrimSpec ps, Node[] args) {
+            int arity = args.length;
+            ValType retT = ps.analysis.returnType;
+            int retWords = (retT == ValType.LONG || retT == ValType.DOUBLE) ? 2 : 1;
+
+            // Depth 0: inline full small body once; Depth 1: inline base-case short-circuit check
+            boolean doFullInline = staticFastSelfCanInline && staticFastSelfInlineDepth == 0;
+            boolean doLeafInline = false;
+            boolean thenIsBase = false;
+            if (!doFullInline && staticFastSelfCanInline && staticFastSelfInlineDepth == 1
+                    && currentMethod.body instanceof IfNode iff) {
+                boolean thenHasSelf = containsSelfCall(iff.thenNode, ce.ownerVar, selfSlot, arity);
+                boolean elseHasSelf = containsSelfCall(iff.elseNode, ce.ownerVar, selfSlot, arity);
+                if (!thenHasSelf && elseHasSelf) {
+                    doLeafInline = true;
+                    thenIsBase = true;
+                } else if (thenHasSelf && !elseHasSelf) {
+                    doLeafInline = true;
+                    thenIsBase = false;
+                }
+            }
+
+            if (!doFullInline && !doLeafInline) {
+                int argWords = 0;
+                for (int i = 0; i < arity; i++) {
+                    ValType pt = ps.paramTypes[i];
+                    emitTyped(args[i], pt);
+                    argWords += (pt == ValType.LONG || pt == ValType.DOUBLE) ? 2 : 1;
+                }
+                invokestatic(ce.className, staticFastSelfMethodName, ps.descriptor, argWords, retWords);
+                return;
+            }
+
+            // Evaluate call arguments under caller's slot layout first
+            for (int i = 0; i < arity; i++) {
+                emitTyped(args[i], ps.paramTypes[i]);
+            }
+
+            // Remap all logical slots to fresh temporary JVM locals for the inlined activation
+            int savedTemp = curTempLocals;
+            int[] savedJvmSlot = layout.jvmSlot.clone();
+            Set<Integer> savedBelow = new HashSet<>(boundedBelowMaxLong);
+            Set<Integer> savedAbove = new HashSet<>(boundedAboveMinLong);
+            Set<Integer> savedNonNeg = new HashSet<>(nonNegativeLong);
+            boundedBelowMaxLong.clear();
+            boundedAboveMinLong.clear();
+            nonNegativeLong.clear();
+
+            for (int i = 0; i < currentMethod.maxSlots; i++) {
+                if (i == selfSlot) continue;
+                ValType st = layout.slotTypes[i];
+                int w = (st == ValType.LONG || st == ValType.DOUBLE) ? 2 : 1;
+                layout.jvmSlot[i] = allocTempLocal(w);
+            }
+            for (int i = arity - 1; i >= 0; i--) {
+                storeLogicalSlot(currentMethod.paramSlots[i]);
+            }
+
+            staticFastSelfInlineDepth++;
+            if (doFullInline) {
+                emitTyped(currentMethod.body, retT);
+            } else {
+                IfNode iff = (IfNode) currentMethod.body;
+                Label secondLabel = new Label();
+                Label doneLabel = new Label();
+                emitBranchIfFalse(iff.test, secondLabel);
+                int stackAtIf = curStack;
+                if (thenIsBase) {
+                    emitTyped(iff.thenNode, retT);
+                    gotoLabel(doneLabel);
+                    curStack = stackAtIf;
+                    markLabel(secondLabel);
+                    emitStaticFastCallWithCurrentParams(ps);
+                    markLabel(doneLabel);
+                } else {
+                    emitStaticFastCallWithCurrentParams(ps);
+                    gotoLabel(doneLabel);
+                    curStack = stackAtIf;
+                    markLabel(secondLabel);
+                    emitTyped(iff.elseNode, retT);
+                    markLabel(doneLabel);
+                }
+                curStack = stackAtIf + retWords;
+            }
+            staticFastSelfInlineDepth--;
+
+            System.arraycopy(savedJvmSlot, 0, layout.jvmSlot, 0, savedJvmSlot.length);
+            boundedBelowMaxLong.clear();
+            boundedBelowMaxLong.addAll(savedBelow);
+            boundedAboveMinLong.clear();
+            boundedAboveMinLong.addAll(savedAbove);
+            nonNegativeLong.clear();
+            nonNegativeLong.addAll(savedNonNeg);
+            curTempLocals = savedTemp;
         }
 
         private void emitDirectPrimSelfCall(PrimSpec ps, Node[] args) {
@@ -4829,7 +5225,7 @@ public final class BytecodeJIT {
             try {
                 ByteArrayOutputStream baos = new ByteArrayOutputStream(codeBytes.length + 32 + exceptionTable.size() * 8);
                 DataOutputStream out = new DataOutputStream(baos);
-                out.writeShort(0x0001); // ACC_PUBLIC
+                out.writeShort(accessFlags);
                 out.writeShort(nameIdx);
                 out.writeShort(descIdx);
                 out.writeShort(1);

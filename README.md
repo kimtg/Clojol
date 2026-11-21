@@ -12,42 +12,44 @@ Clojol is an independent, clean-room implementation of the Clojure language and 
 
 ## Performance (`fib(40)` vs. Official Clojure)
 
-Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measured on OpenJDK 21.0.13 (Temurin, Linux x86_64) comparing **Clojol** (`./cljl.sh test/fib_bench.clj`, AppCDS + type-inferred Tier-1 `BytecodeJIT`) against **Clojure 1.12.0** (`clojure.main test/fib_bench.clj`):
+Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measured on OpenJDK 25.0.4.1 LTS (Temurin, Windows) comparing **Clojol** (`-XX:AOTCache=build/cljl.aot -jar build/cljl.jar test/fib_bench.clj`) against **Clojure 1.12.6** (`clojure.main test/fib_bench.clj`):
 
-| Metric | Clojol (`cljl`) | Clojure 1.12.0 | Speedup |
+| Metric | Clojol (`cljl`) | Clojure 1.12.6 | Speedup |
 | :--- | :---: | :---: | :---: |
-| `fib(40)` Run 1 (first call) | **358.2 ms** | 738.5 ms | 2.06x faster |
-| `fib(40)` Run 2 (warm) | **328.3 ms** | 618.2 ms | 1.88x faster |
-| `fib(40)` Run 3 (warm) | **326.8 ms** | 634.0 ms | 1.94x faster |
-| Total wall time (3 runs + JVM startup) | **1.15 s** | 3.03 s | 2.63x faster |
-| Cold startup + eval (`-e "(+ 1 2)"`) | **0.11 s** | 0.54 s | 4.9x faster |
+| `fib(40)` Run 1 (first call) | **184.0 ms** | 631.2 ms | **3.43x faster** |
+| `fib(40)` Run 2 (warm) | **186.6 ms** | 621.7 ms | **3.33x faster** |
+| `fib(40)` Run 3 (warm) | **179.2 ms** | 621.6 ms | **3.47x faster** |
+| Total wall time (3 runs + JVM startup) | **0.67 s** | 2.49 s | **3.72x faster** |
+| Cold startup + eval (`-e "(+ 1 2)"`) | **70.2 ms** | 445.0 ms | **6.34x faster** |
 
-With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns and dispatches guarded self-recursive calls directly to `invokePrim_J_J` with no user type hints required—running `fib(40)` ~1.9–2.1x faster than official Clojure (matching raw Java `Math.addExact`/`subtractExact` speed) while reducing total wall-clock execution time by ~62%. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) also drop from ~8.74 ms to ~0.56–0.76 ms.
+With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), eliminates provably underflow-free subtraction overflow checks via non-negative lower-bound tracking, and applies bounded depth-2 self-inlining with base-case short-circuiting while preserving exact `Math.addExact` overflow semantics—running `fib(40)` **~3.4x faster** than official Clojure and reducing total wall-clock execution time by **~73%**. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.43 ms**.
 
 ### `loop/recur`, `volatile!`, and `atom` (vs. Clojure 1.12.6)
 
-`1,000,000` iterations incrementing a counter (median of 7 runs after 5 warmups, OpenJDK 25.0.4.1 on Windows):
+`1,000,000` iterations incrementing a counter (median of 7 runs after warmup, OpenJDK 25.0.4.1 on Windows):
 
 | Benchmark (`N = 1,000,000`) | Clojol (`cljl`) | Clojure 1.12.6 | Speedup |
 | :--- | :---: | :---: | :---: |
-| `loop/recur` | **0.14 ms** | 0.20 ms | **1.47x faster** |
-| `volatile!` (local `vswap!`) | **0.18 ms** | 9.56 ms | **54.0x faster** |
-| `volatile!` (escaping `vswap!`) | **6.72 ms** | 8.07 ms | **1.20x faster** |
-| `atom` (`swap!`) | **8.89 ms** | 11.97 ms | **1.35x faster** |
+| `loop/recur` | **0.13 ms** | 0.18 ms | **1.35x faster** |
+| `volatile!` (local `vswap!`) | **0.13 ms** | 8.22 ms | **61.8x faster** |
+| `volatile!` (returned/tail-escaping `vswap!`) | **0.14 ms** | 6.39 ms | **46.6x faster** |
+| `volatile!` (escaping param `vswap!`) | **0.75 ms** | 6.50 ms | **8.6x faster** |
+| `atom` (`swap!`) | **10.44 ms** | 13.06 ms | **1.25x faster** |
 
-`BytecodeJIT.java` eliminates redundant overflow checks on range-bounded `long` loop counters (`(< i n)` -> `(inc i)`), scalar-replaces non-escaping local `volatile!` bindings into unboxed JVM locals, uses tagged-primitive storage in `Atom.Volatile` for escaping volatiles, and uses a lock-free 63-bit fast-long `VarHandle` CAS path in `Atom` to eliminate `Long` allocation and GC write barriers on numeric `swap!`/`reset!`.
+`BytecodeJIT.java` eliminates redundant overflow checks on range-bounded `long` loop counters (`(< i n)` -> `(inc i)`), scalar-replaces local and tail-escaping `volatile!` bindings into unboxed JVM locals (deferring allocation until return when needed), compiles escaping `vswap!`/`vreset!` into fused unboxed RMW ops backed by a single-field 63-bit fast-long `VarHandle` acquire/release path in `Atom.Volatile` (pass `-Dcljl.volatile.strict=true` for full `volatile` fence semantics), and uses a lock-free 63-bit fast-long `VarHandle` CAS path in `Atom` to eliminate `Long` allocation and GC write barriers on numeric `swap!`/`reset!`.
 
-### AppCDS Cold Startup Impact
+### Cold Startup & AOT Cache Impact
 
 Cold startup + eval (`java ... -jar build/cljl.jar -Srepro -Sdeps "{}" -e "(+ 1 2)"`) measured across 8 runs on OpenJDK 25.0.4.1 (Windows):
 
 | Mode | Min | Median | Average |
 | :--- | :---: | :---: | :---: |
-| **With AppCDS (`-XX:SharedArchiveFile=build/cljl.jsa`)** | 143.0 ms | **148.6 ms** | 149.5 ms |
-| **Without AppCDS (default JDK CDS only)** | 259.5 ms | **275.9 ms** | 274.4 ms |
-| **No CDS (`-Xshare:off`)** | 275.2 ms | **287.5 ms** | 301.8 ms |
+| **Clojol — AOT Cache (`-XX:AOTCache=build/cljl.aot`, JDK 24+)** | 68.9 ms | **70.2 ms** | 70.8 ms |
+| **Clojol — Default JDK CDS (`java -jar build/cljl.jar`)** | 108.2 ms | **109.8 ms** | 110.2 ms |
+| **Clojol — No CDS (`-Xshare:off`)** | 143.9 ms | **150.1 ms** | 150.4 ms |
+| **Clojure 1.12.6 (`clojure.main -e "(+ 1 2)"`)** | 438.6 ms | **445.0 ms** | 449.4 ms |
 
-AppCDS cuts cold startup + eval time by **~127 ms (~46% / ~1.85x faster)** by memory-mapping all **1,828** startup classes (`Main`, `RT`, `Core`, `CoreExtras`, `Compiler`, `Reader`, `Deps`, `cljl.lang.*`, and JDK classes) directly from `build/cljl.jsa` with **0** classes loaded from `cljl.jar`. Note that `-J` / `:jvm-opts` relaunches and lazily loaded `StdLib` namespaces fall back to loading from `cljl.jar`.
+Through lazy on-demand `Core`/`CoreExtras` subsystem initialization, `tableswitch` dispatchers, zero-JCA inline SHA-256, and JDK 24+ AOT Cache (`build/cljl.aot`, with automatic `build/cljl.jsa` AppCDS fallback on JDK 21–23), Clojol achieves **~70 ms** cold startup (**6.3x faster** than Clojure 1.12.6 and **~36% faster** than default JDK CDS). Startup loads only **1,125** classes (**1,123** memory-mapped directly from `build/cljl.aot` and **0** loaded from `cljl.jar`). Note that `-J` / `:jvm-opts` relaunches and lazily loaded `StdLib` namespaces fall back to loading from `cljl.jar`.
 
 ## Requirements
 
@@ -55,12 +57,12 @@ AppCDS cuts cold startup + eval time by **~127 ms (~46% / ~1.85x faster)** by me
 
 ## Quick Start
 
-Both `cljl.bat` (Windows) and `cljl.sh` (Linux/macOS) automatically compile `src/` into `build/cljl.jar` and generate `build/cljl.jsa` on first run.
+Both `cljl.bat` (Windows) and `cljl.sh` (Linux/macOS) automatically compile `src/` into `build/cljl.jar` and generate `build/cljl.aot` (JDK 24+ AOT cache) or `build/cljl.jsa` (JDK 21–23 AppCDS archive) on first run.
 
 ### Interactive REPL
 
 ```bash
-# Run the jar file without AppCDS
+# Run the jar file without AOT cache / AppCDS
 java -jar build/cljl.jar
 
 # Windows
@@ -167,7 +169,7 @@ Environment variables `$CLJ_CONFIG`, `$CLJ_CACHE`, `$M2_REPO`, `$GITLIBS`, and `
 
 ```bash
 # Windows
-.\make.bat            # Compile, package build\cljl.jar, generate AppCDS archive
+.\make.bat            # Compile, package build\cljl.jar, generate AOT cache / AppCDS archive
 .\make.bat rebuild    # Clean and build from scratch
 .\make.bat test       # Build and run core_test.clj, cheatsheet_test.clj & cli_test.clj
 .\make.bat bench      # Build and run test\bench.clj
@@ -176,7 +178,7 @@ Environment variables `$CLJ_CONFIG`, `$CLJ_CACHE`, `$M2_REPO`, `$GITLIBS`, and `
 
 # Linux / macOS
 chmod +x make.sh cljl.sh
-./make.sh             # Compile, package build/cljl.jar, generate AppCDS archive
+./make.sh             # Compile, package build/cljl.jar, generate AOT cache / AppCDS archive
 ./make.sh rebuild     # Clean and build from scratch
 ./make.sh test        # Build and run core_test.clj, cheatsheet_test.clj & cli_test.clj
 ./make.sh bench       # Build and run test/bench.clj

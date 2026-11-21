@@ -1508,6 +1508,48 @@
       (is (true? @done))
       (is (= 10000 @v)))))
 
+(defn ^:private rec-fib-test [n]
+  (if (< n 2)
+    n
+    (+ (rec-fib-test (- n 1)) (rec-fib-test (- n 2)))))
+
+(defn ^:private rec-tak-test [x y z]
+  (if (<= x y)
+    z
+    (rec-tak-test (rec-tak-test (- x 1) y z)
+                  (rec-tak-test (- y 1) z x)
+                  (rec-tak-test (- z 1) x y))))
+
+(declare rec-var-fib-test)
+(def ^:private rec-var-fib-test
+  (fn [n]
+    (if (< n 2)
+      n
+      (+ (rec-var-fib-test (- n 1)) (rec-var-fib-test (- n 2))))))
+
+(deftest pure-self-recursion-optimization-test
+  (testing "pure self-recursive static worker & depth-2 inlining preserve exact semantics"
+    (is (= 0 (rec-fib-test 0)))
+    (is (= 1 (rec-fib-test 1)))
+    (is (= 1 (rec-fib-test 2)))
+    (is (= 2 (rec-fib-test 3)))
+    (is (= 55 (rec-fib-test 10)))
+    (is (= 6765 (rec-fib-test 20)))
+    (is (= -5 (rec-fib-test -5)))
+    (is (= 7 (rec-tak-test 18 12 6)))
+    (is (= 55 (rec-var-fib-test 10)))
+    ;; Overflow is still detected accurately in pure recursive functions
+    (let [f (fn ovf [n]
+              (if (< n 1)
+                Long/MAX_VALUE
+                (+ 1 (ovf (- n 1)))))]
+      (is (thrown? ArithmeticException (f 1)))))
+  (testing "with-redefs still intercepts Var-recursive defns"
+    (let [orig rec-var-fib-test]
+      (with-redefs [rec-var-fib-test (fn [n] (if (= n 2) 100 (orig n)))]
+        ;; Calling orig directly while #'rec-var-fib-test is redefined must take the guarded slow path
+        (is (= 101 (orig 3)))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))
