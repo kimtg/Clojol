@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * and TransientVector support for O(1) amortized batch construction.
  */
 public final class PersistentVector extends Fn
-        implements Associative, IObj, Reversible, List<Object>, RandomAccess, Comparable<Object> {
+        implements Associative, IObj, Reversible, IReduceInit, List<Object>, RandomAccess, Comparable<Object> {
 
     private static final AtomicReference<Thread> NO_EDIT = new AtomicReference<>(null);
     public static final Node EMPTY_NODE = new Node(NO_EDIT, new Object[32]);
@@ -59,11 +59,62 @@ public final class PersistentVector extends Fn
         return tv.persistent();
     }
 
+    public static PersistentVector createFromLongRange(LongRange lr) {
+        int n = lr.count();
+        if (n == 0) return EMPTY;
+        long v = lr.start;
+        long step = lr.step;
+        if (n <= 32) {
+            Object[] arr = new Object[n];
+            for (int i = 0; i < n; i++) { arr[i] = Long.valueOf(v); v += step; }
+            return new PersistentVector(null, n, 5, EMPTY_NODE, arr);
+        }
+        TransientVector tv = EMPTY.asTransient();
+        for (int i = 0; i < n; i++) {
+            tv = tv.conj(Long.valueOf(v));
+            v += step;
+        }
+        return tv.persistent();
+    }
+
+    public static PersistentVector createFromLongArraySeq(LongArraySeq las) {
+        long[] arr = las.array;
+        int start = las.index;
+        int n = arr.length - start;
+        if (n <= 0) return EMPTY;
+        if (n <= 32) {
+            Object[] out = new Object[n];
+            for (int i = 0; i < n; i++) out[i] = Long.valueOf(arr[start + i]);
+            return new PersistentVector(null, n, 5, EMPTY_NODE, out);
+        }
+        TransientVector tv = EMPTY.asTransient();
+        for (int i = start; i < arr.length; i++) {
+            tv = tv.conj(Long.valueOf(arr[i]));
+        }
+        return tv.persistent();
+    }
+
     public static PersistentVector createFromISeq(ISeq seq) {
         if (seq == null) return EMPTY;
+        if (seq instanceof LongRange lr) return createFromLongRange(lr);
+        if (seq instanceof LongArraySeq las) return createFromLongArraySeq(las);
         TransientVector tv = EMPTY.asTransient();
-        for (ISeq s = seq; s != null; s = s.next()) {
-            tv = tv.conj(s.first());
+        ISeq s = seq;
+        while (s != null) {
+            if (s instanceof IChunkedSeq cs) {
+                IChunk c = cs.chunkedFirst();
+                int len = c.count();
+                if (c instanceof ArrayChunk ac && ac.array instanceof Object[] src) {
+                    int off = ac.off;
+                    for (int i = 0; i < len; i++) tv = tv.conj(src[off + i]);
+                } else {
+                    for (int i = 0; i < len; i++) tv = tv.conj(c.nth(i));
+                }
+                s = cs.chunkedNext();
+            } else {
+                tv = tv.conj(s.first());
+                s = s.next();
+            }
         }
         return tv.persistent();
     }
@@ -441,7 +492,23 @@ public final class PersistentVector extends Fn
         return new SubVec(null, this, fromIndex, toIndex);
     }
 
-    public static final class VecSeq extends ASeq implements Counted {
+    @Override
+    public Object reduce(Fn f, Object init) {
+        Object acc = init;
+        int i = 0;
+        while (i < cnt) {
+            Object[] arr = arrayFor(i);
+            int limit = Math.min(arr.length, cnt - i);
+            for (int j = 0; j < limit; j++) {
+                acc = f.invoke(acc, arr[j]);
+                if (acc instanceof Reduced r) return r.deref();
+            }
+            i += limit;
+        }
+        return acc;
+    }
+
+    public static final class VecSeq extends ASeq implements IChunkedSeq, Counted, IReduceInit {
         private final PersistentVector v;
         private final int i;
         private final int end;
@@ -467,16 +534,47 @@ public final class PersistentVector extends Fn
             return null;
         }
         @Override public int count() { return end - i; }
+        @Override public IChunk chunkedFirst() {
+            Object[] arr = v.arrayFor(i);
+            int off = i & 0x1f;
+            int chunkEnd = Math.min(arr.length, off + (end - i));
+            return new ArrayChunk(arr, off, chunkEnd);
+        }
+        @Override public ISeq chunkedNext() {
+            int off = i & 0x1f;
+            int step = Math.min(32 - off, end - i);
+            int nextI = i + step;
+            return nextI < end ? new VecSeq(null, v, nextI, end) : null;
+        }
+        @Override public ISeq chunkedMore() {
+            ISeq n = chunkedNext();
+            return n == null ? PersistentList.EMPTY : n;
+        }
+        @Override public Object reduce(Fn f, Object init) {
+            Object acc = init;
+            int pos = i;
+            while (pos < end) {
+                Object[] arr = v.arrayFor(pos);
+                int off = pos & 0x1f;
+                int limit = Math.min(arr.length, off + (end - pos));
+                for (int j = off; j < limit; j++) {
+                    acc = f.invoke(acc, arr[j]);
+                    if (acc instanceof Reduced r) return r.deref();
+                }
+                pos += (limit - off);
+            }
+            return acc;
+        }
         @Override public VecSeq withMeta(PersistentHashMap meta) {
             if (this.meta == meta) return this;
             return new VecSeq(meta, v, i, end);
         }
     }
 
-    public static final class RVecSeq extends ASeq implements Counted {
-        private final PersistentVector v;
-        private final int i;
-        private final int start;
+    public static final class RVecSeq extends ASeq implements Counted, IReduceInit {
+        public final PersistentVector v;
+        public final int i;
+        public final int start;
 
         public RVecSeq(PersistentVector v, int i) {
             this(null, v, i, 0);
@@ -499,6 +597,35 @@ public final class PersistentVector extends Fn
             return null;
         }
         @Override public int count() { return i - start + 1; }
+        @Override public Object reduce(Fn f, Object init) {
+            Object acc = init;
+            int pos = i;
+            while (pos >= start) {
+                Object[] arr = v.arrayFor(pos);
+                int off = pos & 0x1f;
+                int lo = Math.max(0, off - (pos - start));
+                for (int j = off; j >= lo; j--) {
+                    acc = f.invoke(acc, arr[j]);
+                    if (acc instanceof Reduced r) return r.deref();
+                }
+                pos -= (off - lo + 1);
+            }
+            return acc;
+        }
+        public Object[] toReverseArray() {
+            int n = i - start + 1;
+            Object[] out = new Object[n];
+            int pos = i;
+            int dst = 0;
+            while (pos >= start) {
+                Object[] arr = v.arrayFor(pos);
+                int off = pos & 0x1f;
+                int lo = Math.max(0, off - (pos - start));
+                for (int j = off; j >= lo; j--) out[dst++] = arr[j];
+                pos -= (off - lo + 1);
+            }
+            return out;
+        }
         @Override public RVecSeq withMeta(PersistentHashMap meta) {
             if (this.meta == meta) return this;
             return new RVecSeq(meta, v, i, start);
@@ -506,7 +633,7 @@ public final class PersistentVector extends Fn
     }
 
     public static final class SubVec extends Fn
-            implements Associative, IObj, Reversible, PersistentColl, List<Object>, RandomAccess, Comparable<Object> {
+            implements Associative, IObj, Reversible, IReduceInit, PersistentColl, List<Object>, RandomAccess, Comparable<Object> {
         public final PersistentVector v;
         public final int start;
         public final int end;
@@ -626,6 +753,10 @@ public final class PersistentVector extends Fn
         }
 
         @Override public ISeq seq() { return start < end ? new VecSeq(null, v, start, end) : null; }
+        @Override public Object reduce(Fn f, Object init) {
+            if (start >= end) return init;
+            return new VecSeq(null, v, start, end).reduce(f, init);
+        }
         @Override public ISeq rseq() { return start < end ? new RVecSeq(null, v, end - 1, start) : null; }
 
         @Override public int compareTo(Object o) {

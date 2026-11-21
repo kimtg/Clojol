@@ -889,8 +889,9 @@ public final class CoreExtras {
         def(ns, "extend", new ExtraFnV(51, "extend"));
 
         // (defprotocol Name doc? (method [this ...] doc?)*)
-        def(ns, "register-protocol*", new ExtraFn2(51, "register-protocol*"));
+        def(ns, "register-protocol*", new ExtraFnV(70, "register-protocol*"));
         def(ns, "protocol-dispatch*", new ExtraFn3(16, "protocol-dispatch*"));
+        def(ns, "make-protocol-fn*", new ExtraFn3(20, "make-protocol-fn*"));
         defMacro(ns, "defprotocol", new ExtraFnV(52, "defprotocol"));
 
         defMacro(ns, "extend-type", new ExtraFnV(53, "extend-type"));
@@ -898,6 +899,8 @@ public final class CoreExtras {
 
         // (defrecord Name [fields...] specs...)
         def(ns, "register-record*", new ExtraFnV(55, "register-record*"));
+        def(ns, "register-record-class*", new ExtraFnV(68, "register-record-class*"));
+        def(ns, "register-record-impls*", new ExtraFnV(69, "register-record-impls*"));
         defMacro(ns, "defrecord", new ExtraFnV(56, "defrecord"));
 
         def(ns, "register-type*", new ExtraFnV(57, "register-type*"));
@@ -981,14 +984,26 @@ public final class CoreExtras {
         Symbol nameSym = (Symbol) args[0];
         PersistentVector fieldsVec = (PersistentVector) args[1];
         List<Object> fieldNames = new ArrayList<>();
+        List<Object> fieldTypeTags = new ArrayList<>();
         List<Object> mutFlags = new ArrayList<>();
         Set<String> mutableSet = new HashSet<>();
         Keyword volKw = Keyword.intern("volatile-mutable");
         Keyword unsyncKw = Keyword.intern("unsynchronized-mutable");
+        Keyword tagKw = Keyword.intern("tag");
         for (int i = 0; i < fieldsVec.count(); i++) {
             Symbol fs = (Symbol) fieldsVec.nth(i);
             fieldNames.add(fs.name);
             PersistentHashMap fm = fs.meta();
+            String ftype = "O";
+            if (isRecord && fm != null) {
+                Object tag = fm.valAt(tagKw);
+                if (tag != null) {
+                    String ts = tag.toString();
+                    if ("long".equals(ts)) ftype = "J";
+                    else if ("double".equals(ts)) ftype = "D";
+                }
+            }
+            fieldTypeTags.add(ftype);
             boolean isMut = !isRecord && fm != null
                     && (RT.truthy(fm.valAt(volKw)) || RT.truthy(fm.valAt(unsyncKw)));
             mutFlags.add(isMut);
@@ -998,6 +1013,7 @@ public final class CoreExtras {
         List<Object> specs = new ArrayList<>();
         List<Object> javaMapKVs = new ArrayList<>();
         List<Object> protoMapKVs = new ArrayList<>();
+        List<Object> javaMethodNames = new ArrayList<>();
 
         int i = 2;
         while (i < args.length) {
@@ -1006,8 +1022,9 @@ public final class CoreExtras {
             Map<String, ISeq> methods = new LinkedHashMap<>();
             while (i < args.length && args[i] instanceof ISeq ms) {
                 Symbol mname = (Symbol) ms.first();
-                ISeq mbody = wrapMethodWithFields(fieldsVec, ms.next(), isRecord, mutableSet);
+                ISeq mbody = wrapMethodWithFields(fieldsVec, ms.next(), isRecord, mutableSet, isRecord ? nameSym : null);
                 String mn = mname.name;
+                javaMethodNames.add(mn);
                 javaMapKVs.add(mn);
                 javaMapKVs.add(RT.cons(Symbol.intern("fn"), mbody));
                 methods.put(mn, RT.cons(Symbol.intern("fn"), mbody));
@@ -1022,18 +1039,23 @@ public final class CoreExtras {
             protoMapKVs.add(RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(protoM)));
         }
 
-        String regFn = isRecord ? "register-record*" : "register-type*";
         if (isRecord) {
-            return PersistentList.createFromArray(
-                    Symbol.intern("clojure.core", regFn),
+            Object defineClsForm = PersistentList.createFromArray(
+                    Symbol.intern("clojure.core", "register-record-class*"),
                     PersistentList.createFromArray(Symbol.intern("quote"), nameSym),
                     PersistentVector.create(fieldNames),
                     PersistentVector.create(specs),
+                    PersistentVector.create(javaMethodNames),
+                    PersistentVector.create(fieldTypeTags));
+            Object attachImplsForm = PersistentList.createFromArray(
+                    Symbol.intern("clojure.core", "register-record-impls*"),
+                    PersistentList.createFromArray(Symbol.intern("quote"), nameSym),
                     RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(javaMapKVs)),
                     RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(protoMapKVs)));
+            return PersistentList.createFromArray(Symbol.intern("do"), defineClsForm, attachImplsForm);
         }
         return PersistentList.createFromArray(
-                Symbol.intern("clojure.core", regFn),
+                Symbol.intern("clojure.core", "register-type*"),
                 PersistentList.createFromArray(Symbol.intern("quote"), nameSym),
                 PersistentVector.create(fieldNames),
                 PersistentVector.create(specs),
@@ -1043,35 +1065,75 @@ public final class CoreExtras {
     }
 
     private static ISeq wrapMethodWithFields(
-            PersistentVector fields, ISeq methodRest, boolean isRecord, Set<String> mutableSet) {
+            PersistentVector fields, ISeq methodRest, boolean isRecord, Set<String> mutableSet, Symbol recordClassSym) {
         if (methodRest.first() instanceof PersistentVector params) {
-            return wrapSingleArity(fields, params, methodRest.next(), isRecord, mutableSet);
+            return wrapSingleArity(fields, params, methodRest.next(), isRecord, mutableSet, recordClassSym);
         }
         List<Object> clauses = new ArrayList<>();
         for (ISeq s = methodRest; s != null; s = s.next()) {
             ISeq arity = (ISeq) s.first();
-            clauses.add(wrapSingleArity(fields, (PersistentVector) arity.first(), arity.next(), isRecord, mutableSet));
+            clauses.add(wrapSingleArity(fields, (PersistentVector) arity.first(), arity.next(), isRecord, mutableSet, recordClassSym));
         }
         return PersistentList.create(clauses);
     }
 
+    private static boolean formReferencesSym(Object form, String name) {
+        if (form instanceof Symbol s) {
+            return s.ns == null && name.equals(s.name);
+        }
+        if (form instanceof ISeq seq) {
+            for (ISeq s = seq.seq(); s != null; s = s.next()) {
+                if (formReferencesSym(s.first(), name)) return true;
+            }
+            return false;
+        }
+        if (form instanceof PersistentVector pv) {
+            for (int i = 0; i < pv.count(); i++) {
+                if (formReferencesSym(pv.nth(i), name)) return true;
+            }
+            return false;
+        }
+        if (form instanceof PersistentHashMap pm) {
+            for (ISeq s = pm.seq(); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                if (formReferencesSym(e.getKey(), name) || formReferencesSym(e.getValue(), name)) return true;
+            }
+            return false;
+        }
+        if (form instanceof PersistentHashSet ps) {
+            for (ISeq s = ps.seq(); s != null; s = s.next()) {
+                if (formReferencesSym(s.first(), name)) return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
     private static ISeq wrapSingleArity(
-            PersistentVector fields, PersistentVector params, ISeq bodyForms, boolean isRecord, Set<String> mutableSet) {
+            PersistentVector fields, PersistentVector params, ISeq bodyForms,
+            boolean isRecord, Set<String> mutableSet, Symbol recordClassSym) {
         Object thisSym = params.nth(0);
+        PersistentVector effectiveParams = params;
+        if (isRecord && recordClassSym != null && thisSym instanceof Symbol ts) {
+            PersistentHashMap curMeta = ts.meta();
+            if (curMeta == null || !curMeta.containsKey(Keyword.intern("tag"))) {
+                PersistentHashMap newMeta = (curMeta != null ? curMeta : PersistentHashMap.EMPTY)
+                        .assoc(Keyword.intern("tag"), recordClassSym);
+                Symbol hintedThis = ts.withMeta(newMeta);
+                thisSym = hintedThis;
+                effectiveParams = (PersistentVector) params.assoc(0, hintedThis);
+            }
+        }
         List<Object> lets = new ArrayList<>();
         for (int i = 0; i < fields.count(); i++) {
             Symbol f = (Symbol) fields.nth(i);
             if (!isRecord && mutableSet.contains(f.name)) continue;
+            if (isRecord && !formReferencesSym(bodyForms, f.name)) continue;
             lets.add(f);
-            if (isRecord) {
-                lets.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "get"),
-                        thisSym, Keyword.intern(f.name)));
-            } else {
-                lets.add(PersistentList.createFromArray(Symbol.intern("."), thisSym, Symbol.intern(f.name)));
-            }
+            lets.add(PersistentList.createFromArray(Symbol.intern("."), thisSym, Symbol.intern("-" + f.name)));
         }
         Set<String> shadowed = new HashSet<>();
-        collectBindingSyms(params, shadowed);
+        collectBindingSyms(effectiveParams, shadowed);
         List<Object> body = new ArrayList<>();
         body.add(Symbol.intern("do"));
         for (ISeq s = bodyForms; s != null; s = s.next()) {
@@ -1080,11 +1142,11 @@ public final class CoreExtras {
         }
         Object bodyExpr = PersistentList.create(body);
         if (lets.isEmpty()) {
-            return PersistentList.createFromArray(params, bodyExpr);
+            return PersistentList.createFromArray(effectiveParams, bodyExpr);
         }
         Object letForm = PersistentList.createFromArray(
                 Symbol.intern("let"), PersistentVector.create(lets), bodyExpr);
-        return PersistentList.createFromArray(params, letForm);
+        return PersistentList.createFromArray(effectiveParams, letForm);
     }
 
     private static void collectBindingSyms(Object pat, Set<String> out) {
@@ -2290,7 +2352,14 @@ public final class CoreExtras {
             case 48: { Object p = _a; Object x = _b; return (((Protocol) p).satisfies(x)); }
             case 49: { Object p = _a; Object c = _b; return (((Protocol) p).extendsType((Class<?>) c)); }
             case 50: { Object p = _a; Object x = _b; return (((Protocol) p).findImplFor(x)); }
-            case 51: { Object nameSym = _a; Object doc = _b; return (new Protocol((Symbol) nameSym, (String) doc, null)); }
+            case 51: {
+                Symbol nameSym = (Symbol) _a;
+                Var existing = RT.currentNS().findInternedVar(nameSym);
+                if (existing != null && existing.getRawRoot() instanceof Protocol oldP) {
+                    oldP.resetCaches();
+                }
+                return new Protocol(nameSym, (String) _b, null);
+            }
             case 52: {
                 Object nameSym = _a; Object sigs = _b;
             Namespace cur = RT.currentNS();
@@ -2446,6 +2515,17 @@ public final class CoreExtras {
         
             }
             case 19: { Object flushFn = _a; Object closeFn = _b; Object autoFlush = _c; return (makePrintWriter((Fn) flushFn, (Fn) closeFn, RT.truthy(autoFlush))); }
+            case 20: {
+                Var protoVar = (Var) _a;
+                Keyword methodKw = (Keyword) _b;
+                String mname = _c.toString();
+                Protocol.MethodFn mf = TypeFactory.defineProtocolMethodFn(protoVar, methodKw, mname, false);
+                Var mvar = RT.currentNS().intern(Symbol.intern(mname));
+                if (protoVar.getRawRoot() instanceof Protocol p) {
+                    p.registerMethodVar(mvar, methodKw, mname);
+                }
+                return mf;
+            }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
         }
     }
@@ -2689,21 +2769,13 @@ public final class CoreExtras {
             }
             case 28: {
                 Object[] args = _args;
-            Fn xform = (Fn) args[0];
-            Fn f = (Fn) args[1];
-            Object init = (args.length == 4) ? args[2] : f.invoke();
-            Object coll = args[args.length - 1];
-            Fn rf = (Fn) xform.invoke(f);
-            Object acc = init;
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                acc = rf.invoke(acc, s.first());
-                if (acc instanceof Reduced r) {
-                    acc = r.deref();
-                    break;
-                }
-            }
-            return rf.invoke(acc);
-        
+                Fn xform = (Fn) args[0];
+                Fn f = (Fn) args[1];
+                Object init = (args.length == 4) ? args[2] : f.invoke();
+                Object coll = args[args.length - 1];
+                Fn rf = (Fn) xform.invoke(f);
+                Object acc = Core.reduce3(rf, init, coll);
+                return rf.invoke(acc);
             }
             case 29: {
                 Object[] args = _args;
@@ -2978,6 +3050,50 @@ public final class CoreExtras {
             Symbol pname = (Symbol) args[0];
             int idx = 1;
             String doc = (idx < args.length && args[idx] instanceof String s) ? (String) args[idx++] : null;
+            List<Object> sigSpecs = new ArrayList<>();
+            List<Object> methodDefForms = new ArrayList<>();
+            while (idx < args.length) {
+                if (args[idx] instanceof ISeq sigSeq) {
+                    Symbol mname = (Symbol) sigSeq.first();
+                    List<PersistentVector> arglists = new ArrayList<>();
+                    List<Object> fixedArities = new ArrayList<>();
+                    String mdoc = null;
+                    for (ISeq s = sigSeq.next(); s != null; s = s.next()) {
+                        if (s.first() instanceof PersistentVector v) {
+                            arglists.add(v);
+                            boolean variadic = false;
+                            for (int ai = 0; ai < v.count(); ai++) {
+                                if (v.nth(ai) instanceof Symbol as && as.ns == null && "&".equals(as.name)) {
+                                    variadic = true;
+                                    break;
+                                }
+                            }
+                            if (!variadic && v.count() >= 1 && v.count() <= 4) {
+                                fixedArities.add(Long.valueOf(v.count()));
+                            }
+                        } else if (s.first() instanceof String ms) {
+                            mdoc = ms;
+                        }
+                    }
+                    if (!fixedArities.isEmpty()) {
+                        sigSpecs.add(PersistentVector.createOwning(mname.name, PersistentVector.create(fixedArities)));
+                    }
+                    Keyword mk = Keyword.intern(mname.name);
+                    PersistentHashMap meta = PersistentHashMap.EMPTY
+                            .assoc(Keyword.intern("arglists"), PersistentList.create(arglists));
+                    if (mdoc != null) meta = meta.assoc(Keyword.intern("doc"), mdoc);
+                    Symbol mnameWithMeta = mname.withMeta(meta);
+                    methodDefForms.add(PersistentList.createFromArray(
+                            Symbol.intern("def"),
+                            mnameWithMeta,
+                            PersistentList.createFromArray(
+                                    Symbol.intern("clojure.core", "make-protocol-fn*"),
+                                    PersistentList.createFromArray(Symbol.intern("var"), pname),
+                                    mk,
+                                    mname.name)));
+                }
+                idx++;
+            }
             List<Object> forms = new ArrayList<>();
             forms.add(Symbol.intern("do"));
             forms.add(PersistentList.createFromArray(
@@ -2986,36 +3102,9 @@ public final class CoreExtras {
                     PersistentList.createFromArray(
                             Symbol.intern("clojure.core", "register-protocol*"),
                             PersistentList.createFromArray(Symbol.intern("quote"), pname),
-                            doc)));
-            while (idx < args.length) {
-                if (args[idx] instanceof ISeq sigSeq) {
-                    Symbol mname = (Symbol) sigSeq.first();
-                    List<PersistentVector> arglists = new ArrayList<>();
-                    String mdoc = null;
-                    for (ISeq s = sigSeq.next(); s != null; s = s.next()) {
-                        if (s.first() instanceof PersistentVector v) arglists.add(v);
-                        else if (s.first() instanceof String ms) mdoc = ms;
-                    }
-                    Keyword mk = Keyword.intern(mname.name);
-                    List<Object> bodies = new ArrayList<>();
-                    for (PersistentVector al : arglists) {
-                        bodies.add(PersistentList.createFromArray(al,
-                                PersistentList.createFromArray(
-                                        Symbol.intern("clojure.core", "protocol-dispatch*"),
-                                        PersistentList.createFromArray(Symbol.intern("var"), pname),
-                                        mk,
-                                        PersistentList.createFromArray(Symbol.intern("clojure.core", "into-array"),
-                                                Symbol.intern("Object"), al))));
-                    }
-                    List<Object> defnForm = new ArrayList<>();
-                    defnForm.add(Symbol.intern("clojure.core", "defn"));
-                    defnForm.add(mname);
-                    if (mdoc != null) defnForm.add(mdoc);
-                    defnForm.addAll(bodies);
-                    forms.add(PersistentList.create(defnForm));
-                }
-                idx++;
-            }
+                            doc,
+                            PersistentVector.create(sigSpecs))));
+            forms.addAll(methodDefForms);
             forms.add(pname);
             return PersistentList.create(forms);
         
@@ -3224,6 +3313,101 @@ public final class CoreExtras {
             return PersistentList.create(dot);
         
             }
+            case 68: {
+                // register-record-class*: defines JVM record class & constructors before method fns compile
+                Object[] args = _args;
+                Symbol nameSym = (Symbol) args[0];
+                String[] fields = toStringArray(args[1]);
+                Class<?>[] ifaces = resolveInterfaces(args[2]);
+                Set<String> implMethodNames = new HashSet<>();
+                Map<String, Fn> placeholderMethods = new LinkedHashMap<>();
+                for (String mn : toStringArray(args[3])) {
+                    placeholderMethods.put(mn, null);
+                    implMethodNames.add(mn);
+                }
+                List<Protocol> directProtos = new ArrayList<>();
+                for (ISeq s = RT.seq(args[2]); s != null; s = s.next()) {
+                    if (s.first() instanceof Protocol p && p.onInterface != null && p.interfaceMethodArities != null) {
+                        if (implMethodNames.containsAll(p.interfaceMethodArities.keySet())) {
+                            directProtos.add(p);
+                        }
+                    }
+                }
+                char[] fieldTypes = new char[fields.length];
+                Arrays.fill(fieldTypes, 'O');
+                if (args.length > 4 && args[4] != null) {
+                    String[] fts = toStringArray(args[4]);
+                    for (int fi = 0; fi < Math.min(fields.length, fts.length); fi++) {
+                        fieldTypes[fi] = fts[fi].isEmpty() ? 'O' : fts[fi].charAt(0);
+                    }
+                }
+                Namespace cur = RT.currentNS();
+                String binaryName = cur.name.name + "." + nameSym.name;
+                Class<?> recCls = TypeFactory.defineRecord(binaryName, fields, fieldTypes, ifaces, placeholderMethods, directProtos);
+                cur.importClass(nameSym, recCls);
+                cur.intern("->" + nameSym.name, Fn.ofVarargs("->" + nameSym.name,
+                        ctorArgs -> Interop.invokeConstructor(recCls, ctorArgs)));
+                cur.intern("map->" + nameSym.name, Fn.of1("map->" + nameSym.name, mObj -> {
+                    Map<?, ?> m = (Map<?, ?>) mObj;
+                    Object[] ctorArgs = new Object[fields.length + 2];
+                    PersistentHashMap ext = PersistentHashMap.EMPTY;
+                    Set<Object> baseSet = new HashSet<>();
+                    for (int i = 0; i < fields.length; i++) {
+                        Keyword fk = Keyword.intern(fields[i]);
+                        baseSet.add(fk);
+                        ctorArgs[i] = m != null ? m.get(fk) : null;
+                    }
+                    if (m != null) {
+                        for (Map.Entry<?, ?> e : m.entrySet()) {
+                            if (!baseSet.contains(e.getKey())) ext = ext.assoc(e.getKey(), e.getValue());
+                        }
+                    }
+                    ctorArgs[fields.length] = null;
+                    ctorArgs[fields.length + 1] = ext;
+                    return Interop.invokeConstructor(recCls, ctorArgs);
+                }));
+                return recCls;
+            }
+            case 69: {
+                // register-record-impls*: attaches compiled Java & protocol method fns to already-defined record class
+                Object[] args = _args;
+                Symbol nameSym = (Symbol) args[0];
+                Map<String, Fn> javaMethods = toMethodMap(args[1]);
+                Map<Protocol, Map<Keyword, Fn>> protoImpls = toProtoMap(args[2]);
+                Namespace cur = RT.currentNS();
+                String binaryName = cur.name.name + "." + nameSym.name;
+                Class<?> recCls = Interop.resolveClass(cur, nameSym.name);
+                TypeFactory.setClassMethods(binaryName, javaMethods);
+                TypeFactory.bindRecordProtocolMethods(recCls, protoImpls);
+                return recCls;
+            }
+            case 70: {
+                // register-protocol*: creates Protocol + optional direct dispatch JVM interface
+                Object[] args = _args;
+                Symbol nameSym = (Symbol) args[0];
+                String doc = args.length > 1 ? (String) args[1] : null;
+                Var existing = RT.currentNS().findInternedVar(nameSym);
+                if (existing != null && existing.getRawRoot() instanceof Protocol oldP) {
+                    oldP.markRedefined();
+                }
+                Map<String, int[]> aritiesMap = null;
+                Class<?> onIface = null;
+                if (args.length > 2 && args[2] != null) {
+                    aritiesMap = new LinkedHashMap<>();
+                    for (ISeq s = RT.seq(args[2]); s != null; s = s.next()) {
+                        PersistentVector entry = (PersistentVector) s.first();
+                        String mn = entry.nth(0).toString();
+                        PersistentVector avec = (PersistentVector) entry.nth(1);
+                        int[] arr = new int[avec.count()];
+                        for (int i = 0; i < arr.length; i++) arr[i] = (int) Numbers.toLong(avec.nth(i));
+                        aritiesMap.put(mn, arr);
+                    }
+                    if (!aritiesMap.isEmpty()) {
+                        onIface = TypeFactory.defineProtocolInterface(nameSym.name, aritiesMap);
+                    }
+                }
+                return new Protocol(nameSym, doc, onIface, aritiesMap);
+            }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
         }
     }
@@ -3275,48 +3459,75 @@ public final class CoreExtras {
         }
     }
 
+    private static final class MapRF extends Fn.NamedFn {
+        private final Fn fn;
+        private final Fn r;
+        MapRF(Fn fn, Fn r) { super("map-xf"); this.fn = fn; this.r = r; }
+        @Override public Object invoke() { return r.invoke(); }
+        @Override public Object invoke(Object acc) { return r.invoke(acc); }
+        @Override public Object invoke(Object acc, Object x) { return r.invoke(acc, fn.invoke(x)); }
+        @Override public boolean isUnboxedLong2() { return fn.isUnboxedLong1() && r.isUnboxedLong2(); }
+        @Override public long invokePrim_JJ_J(long acc, long x) { return r.invokePrim_JJ_J(acc, fn.invokePrim_J_J(x)); }
+        @Override public Object invokePrim_OJ_O(Object acc, long x) {
+            return fn.isUnboxedLong1()
+                    ? r.invokePrim_OJ_O(acc, fn.invokePrim_J_J(x))
+                    : r.invoke(acc, fn.invoke(Long.valueOf(x)));
+        }
+        @Override public Object invokeVarargs(Object[] args) {
+            if (args.length < 2) return super.invokeVarargs(args);
+            Object[] vals = new Object[args.length - 1];
+            System.arraycopy(args, 1, vals, 0, vals.length);
+            return r.invoke(args[0], fn.applyTo(vals));
+        }
+    }
+
+    private static final class FilterRF extends Fn.NamedFn {
+        private final Fn p;
+        private final Fn r;
+        FilterRF(Fn p, Fn r) { super("filter-xf"); this.p = p; this.r = r; }
+        @Override public Object invoke() { return r.invoke(); }
+        @Override public Object invoke(Object acc) { return r.invoke(acc); }
+        @Override public Object invoke(Object acc, Object x) {
+            return RT.truthy(p.invoke(x)) ? r.invoke(acc, x) : acc;
+        }
+        @Override public boolean isUnboxedLong2() { return r.isUnboxedLong2(); }
+        @Override public long invokePrim_JJ_J(long acc, long x) {
+            return p.invokePrim_J_Z(x) ? r.invokePrim_JJ_J(acc, x) : acc;
+        }
+        @Override public Object invokePrim_OJ_O(Object acc, long x) {
+            return p.invokePrim_J_Z(x) ? r.invokePrim_OJ_O(acc, x) : acc;
+        }
+    }
+
+    private static final class RemoveRF extends Fn.NamedFn {
+        private final Fn p;
+        private final Fn r;
+        RemoveRF(Fn p, Fn r) { super("remove-xf"); this.p = p; this.r = r; }
+        @Override public Object invoke() { return r.invoke(); }
+        @Override public Object invoke(Object acc) { return r.invoke(acc); }
+        @Override public Object invoke(Object acc, Object x) {
+            return !RT.truthy(p.invoke(x)) ? r.invoke(acc, x) : acc;
+        }
+        @Override public boolean isUnboxedLong2() { return r.isUnboxedLong2(); }
+        @Override public long invokePrim_JJ_J(long acc, long x) {
+            return !p.invokePrim_J_Z(x) ? r.invokePrim_JJ_J(acc, x) : acc;
+        }
+        @Override public Object invokePrim_OJ_O(Object acc, long x) {
+            return !p.invokePrim_J_Z(x) ? r.invokePrim_OJ_O(acc, x) : acc;
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static Object makeTransducer1(int _id, Object _a, Object _rf) {
         switch (_id) {
             case 0: {
-                Object f = _a; Object rf = _rf;
-            Fn fn = (Fn) f; Fn r = (Fn) rf;
-            return new Fn.NamedFn("map-xf") {
-                @Override public Object invoke() { return r.invoke(); }
-                @Override public Object invoke(Object acc) { return r.invoke(acc); }
-                @Override public Object invoke(Object acc, Object x) { return r.invoke(acc, fn.invoke(x)); }
-                @Override public Object invokeVarargs(Object[] args) {
-                    if (args.length < 2) return super.invokeVarargs(args);
-                    Object[] vals = new Object[args.length - 1];
-                    System.arraycopy(args, 1, vals, 0, vals.length);
-                    return r.invoke(args[0], fn.applyTo(vals));
-                }
-            };
-        
+                return new MapRF((Fn) _a, (Fn) _rf);
             }
             case 1: {
-                Object pred = _a; Object rf = _rf;
-            Fn p = (Fn) pred; Fn r = (Fn) rf;
-            return new Fn.NamedFn("filter-xf") {
-                @Override public Object invoke() { return r.invoke(); }
-                @Override public Object invoke(Object acc) { return r.invoke(acc); }
-                @Override public Object invoke(Object acc, Object x) {
-                    return RT.truthy(p.invoke(x)) ? r.invoke(acc, x) : acc;
-                }
-            };
-        
+                return new FilterRF((Fn) _a, (Fn) _rf);
             }
             case 2: {
-                Object pred = _a; Object rf = _rf;
-            Fn p = (Fn) pred; Fn r = (Fn) rf;
-            return new Fn.NamedFn("remove-xf") {
-                @Override public Object invoke() { return r.invoke(); }
-                @Override public Object invoke(Object acc) { return r.invoke(acc); }
-                @Override public Object invoke(Object acc, Object x) {
-                    return !RT.truthy(p.invoke(x)) ? r.invoke(acc, x) : acc;
-                }
-            };
-        
+                return new RemoveRF((Fn) _a, (Fn) _rf);
             }
             case 3: {
                 Object nObj = _a; Object rf = _rf;

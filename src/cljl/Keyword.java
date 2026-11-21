@@ -64,7 +64,7 @@ public final class Keyword extends Fn implements Comparable<Keyword> {
     @Override
     public Object invoke(Object coll) {
         if (coll instanceof PersistentHashMap phm) {
-            return phm.valAt(this, null);
+            return phm.valAtKeyword(this, null);
         }
         if (coll instanceof ILookup lu) {
             return lu.valAt(this, null);
@@ -75,7 +75,7 @@ public final class Keyword extends Fn implements Comparable<Keyword> {
     @Override
     public Object invoke(Object coll, Object notFound) {
         if (coll instanceof PersistentHashMap phm) {
-            return phm.valAt(this, notFound);
+            return phm.valAtKeyword(this, notFound);
         }
         if (coll instanceof ILookup lu) {
             return lu.valAt(this, notFound);

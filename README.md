@@ -59,6 +59,28 @@ Note that `gcc -O3` and `clang -O3` do not perform recursive pure-call CSE (conv
 
 `BytecodeJIT.java` eliminates redundant overflow checks on range-bounded `long` loop counters (`(< i n)` -> `(inc i)`), scalar-replaces non-escaping and tail-escaping local `volatile!` and `atom` bindings into unboxed JVM locals (deferring allocation until return when needed), compiles escaping `vswap!`/`vreset!` into fused unboxed RMW ops backed by a single-field 63-bit fast-long `VarHandle` acquire/release path in `Atom.Volatile` (pass `-Dcljl.volatile.strict=true` for full `volatile` fence semantics), and uses **single-thread biasing** in `Atom` (`SINGLE_THREAD == Thread.currentThread()` with `VarHandle.setRelease`, automatically and permanently revoked via JMM happens-before before any second thread starts in `future`, `pmap`, `agent`, `tap>`, `clojure.core.async`, or Java `Thread`/`Executor`/`ForkJoin`/`CompletableFuture`/`Timer`/`BaseStream` interop; pass `-Dcljl.atom.strict=true` to disable). Once multi-threaded, `Atom` switches seamlessly to a wait-free 63-bit `VarHandle.getAndAdd` (`lock xadd`) and CAS path that eliminates `Long` allocation and GC write barriers on numeric `swap!`/`reset!`.
 
+### Collections, Transducers, Protocols, Strings & `Math` (vs. Clojure 1.12.6)
+
+Median of 5 runs after warmup on OpenJDK 25.0.4.1 (Windows):
+
+| Benchmark | Clojol (`cljl`) | Clojure 1.12.6 | Relative |
+| :--- | :---: | :---: | :---: |
+| `(Math/sin 0)` (`1M` iterations) | **0.004 ms** | 2.03 ms | **~500x faster** |
+| `sort-by :k` (`50k` maps) | **1.86 ms** | 14.11 ms | **7.6x faster** |
+| `into [] (comp (map inc) (filter even?)) (range 100k)` | **0.45 ms** | 1.19 ms | **2.6x faster** |
+| `defprotocol` dispatch (`500k`, `defrecord` var) | **0.72 ms** | 1.78 ms | **2.5x faster** |
+| `str/join "," (range 20k)` | **0.30 ms** | 0.73 ms | **2.4x faster** |
+| `sort` (`50k` reversed vec) | **0.79 ms** | 1.77 ms | **2.2x faster** |
+| `frequencies` (`50k`) | **1.21 ms** | 2.63 ms | **2.2x faster** |
+| `str/split` (`20k` CSV) | **0.89 ms** | 1.38 ms | **1.6x faster** |
+| `vec` transient `conj!` (`100k`) | **0.78 ms** | 1.15 ms | **1.5x faster** |
+| `map` `get` (`50k` keywords) | **1.28 ms** | 1.81 ms | **1.4x faster** |
+| `(->> (range 100k) (map inc) (filter even?) (reduce + 0))` | **1.25 ms** | 1.64 ms | **1.3x faster** |
+| `defprotocol` bimorphic dispatch (`500k`, 2 records) | **0.87 ms** | 1.09 ms | **1.25x faster** |
+| `transduce (comp (map inc) (filter even?)) + 0 (range 100k)` | **0.35 ms** | 0.42 ms | **1.2x faster** |
+
+Driven by compile-time pure `Math`/`StrictMath` constant folding, `LongRange` + `IReduceInit` + chunked lazy pipelines, unboxed `Fn` primitive dispatch hooks (`invokePrim_*`), adaptive radix/Schwartzian `FastSort` with `LongArraySeq`/`ArraySeq`, `private static final` JIT constant fields + single-load `Var.fastRoot`, direct `Keyword` HAMT/record lookup, primitive `defrecord` fields, and generated JVM protocol interfaces with out-of-line 2-entry PIC fallbacks.
+
 ### Cold Startup & AOT Cache Impact
 
 Cold startup + eval (`java ... -jar build/cljl.jar -Srepro -Sdeps "{}" -e "(+ 1 2)"`) measured across 8 runs on OpenJDK 25.0.4.1 (Windows):

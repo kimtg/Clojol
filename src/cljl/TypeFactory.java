@@ -2,6 +2,7 @@ package cljl;
 
 import cljl.lang.*;
 import java.io.*;
+import java.lang.invoke.VarHandle;
 import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -15,12 +16,25 @@ public final class TypeFactory {
 
     private static final DynamicClassLoader LOADER = new DynamicClassLoader();
     private static final AtomicInteger PROXY_ID = new AtomicInteger(0);
+    private static final AtomicInteger PROTO_FN_ID = new AtomicInteger(0);
+    private static final AtomicInteger PROTO_IFACE_ID = new AtomicInteger(0);
+    private static final AtomicInteger PROTO_HOLDER_ID = new AtomicInteger(0);
+    private static final ConcurrentHashMap<Class<?>, String> RECORD_PM_HOLDER = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Fn> PENDING_PM_FNS = new ConcurrentHashMap<>();
+
+    public static Fn takePendingProtoFn(String key) {
+        return PENDING_PM_FNS.remove(key);
+    }
     private static final ConcurrentHashMap<String, ConcurrentHashMap<String, Fn>> CLASS_METHODS =
             new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<List<Class<?>>, Class<?>> PROXY_CLASS_CACHE =
             new ConcurrentHashMap<>();
 
     private TypeFactory() {}
+
+    static Class<?> findDynamicClass(String binaryName) {
+        return LOADER.findAlreadyLoaded(binaryName);
+    }
 
     public static final class DynamicClassLoader extends ClassLoader {
         DynamicClassLoader() {
@@ -29,6 +43,10 @@ public final class TypeFactory {
 
         Class<?> define(String binaryName, byte[] bytes) {
             return defineClass(binaryName, bytes, 0, bytes.length);
+        }
+
+        Class<?> findAlreadyLoaded(String name) {
+            return findLoadedClass(name);
         }
 
         @Override
@@ -47,6 +65,14 @@ public final class TypeFactory {
     }
 
     public record MethodSig(String name, Class<?> returnType, Class<?>[] paramTypes) {}
+
+    public static void setClassMethods(String binaryName, Map<String, Fn> methodImpls) {
+        ConcurrentHashMap<String, Fn> cm = new ConcurrentHashMap<>();
+        for (Map.Entry<String, Fn> e : methodImpls.entrySet()) {
+            if (e.getValue() != null) cm.put(e.getKey(), e.getValue());
+        }
+        CLASS_METHODS.put(binaryName, cm);
+    }
 
     public static Object dispatchMethod(String className, String methodKey, Object target, Object[] args) {
         ConcurrentHashMap<String, Fn> table = CLASS_METHODS.get(className);
@@ -82,6 +108,108 @@ public final class TypeFactory {
         return fn.applyTo(callArgs);
     }
 
+    public static String mangleProtoMethod(String name) {
+        StringBuilder sb = new StringBuilder(name.length() + 4);
+        sb.append("__p_");
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+                sb.append(c);
+            } else {
+                sb.append('_').append(Integer.toHexString(c)).append('_');
+            }
+        }
+        return sb.toString();
+    }
+
+    public static synchronized Class<?> defineProtocolInterface(String protoName, Map<String, int[]> methodArities) {
+        if (methodArities == null || methodArities.isEmpty()) return null;
+        int id = PROTO_IFACE_ID.incrementAndGet();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < protoName.length() && sb.length() < 32; i++) {
+            char c = protoName.charAt(i);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') sb.append(c);
+            else sb.append('_');
+        }
+        String safe = sb.length() > 0 ? sb.toString() : "Proto";
+        String binaryName = "cljl.proto.I$" + safe + "$" + id;
+        String internalName = binaryName.replace('.', '/');
+
+        ClassWriter cw = new ClassWriter(internalName, "java/lang/Object", new String[0], 0x0601); // PUBLIC | INTERFACE | ABSTRACT
+        for (Map.Entry<String, int[]> e : methodArities.entrySet()) {
+            String jm = mangleProtoMethod(e.getKey());
+            for (int arity : e.getValue()) {
+                if (arity < 1 || arity > 4) continue;
+                StringBuilder desc = new StringBuilder("(");
+                for (int i = 1; i < arity; i++) desc.append("Ljava/lang/Object;");
+                desc.append(")Ljava/lang/Object;");
+                cw.addAbstractMethod(jm, desc.toString());
+                if (arity == 2) {
+                    cw.addAbstractMethod(jm + "_J", "(J)J");
+                    cw.addAbstractMethod(jm + "_JO", "(J)Ljava/lang/Object;");
+                }
+            }
+        }
+        return LOADER.define(binaryName, cw.toByteArray());
+    }
+
+    private static boolean containsArity(int[] arities, int a) {
+        if (arities == null) return false;
+        for (int v : arities) if (v == a) return true;
+        return false;
+    }
+
+    public static Protocol.MethodFn defineProtocolMethodFn(Var protoVar, Keyword methodKey, String name) {
+        return defineProtocolMethodFn(protoVar, methodKey, name, false);
+    }
+
+    public static Protocol.MethodFn defineProtocolMethodFn(Var protoVar, Keyword methodKey, String name, boolean picOnly) {
+        int id = PROTO_FN_ID.incrementAndGet();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < name.length() && sb.length() < 32; i++) {
+            char c = name.charAt(i);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+                sb.append(c);
+            } else {
+                sb.append('_');
+            }
+        }
+        String safeName = sb.length() > 0 ? sb.toString() : "method";
+        String binaryName = "cljl.proto." + safeName + "$" + id;
+        String internalName = binaryName.replace('.', '/');
+        String superInternal = "cljl/Protocol$MethodFn";
+
+        Protocol proto = (!picOnly && protoVar != null && protoVar.getRawRoot() instanceof Protocol p && !p.hasInterfaceOverrides) ? p : null;
+        String ifaceInternal = (proto != null && proto.onInterface != null)
+                ? proto.onInterface.getName().replace('.', '/') : null;
+        int[] ifArities = (proto != null && proto.interfaceMethodArities != null)
+                ? proto.interfaceMethodArities.get(name) : null;
+        String jm = mangleProtoMethod(name);
+
+        ClassWriter cw = new ClassWriter(internalName, superInternal, new String[0], 0x0011); // PUBLIC | FINAL
+        cw.emitProtocolMethodCtor(superInternal);
+        cw.emitProtocolMethodDispatch("invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 1, false, false,
+                containsArity(ifArities, 1) ? ifaceInternal : null, jm, "()Ljava/lang/Object;");
+        cw.emitProtocolMethodDispatch("invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 2, false, false,
+                containsArity(ifArities, 2) ? ifaceInternal : null, jm, "(Ljava/lang/Object;)Ljava/lang/Object;");
+        cw.emitProtocolMethodDispatch("invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, false, false,
+                containsArity(ifArities, 3) ? ifaceInternal : null, jm, "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+        cw.emitProtocolMethodDispatch("invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, false, false,
+                containsArity(ifArities, 4) ? ifaceInternal : null, jm, "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+        cw.emitProtocolMethodDispatch("invokePrim_OJ_J", "(Ljava/lang/Object;J)J", 2, true, true,
+                containsArity(ifArities, 2) ? ifaceInternal : null, jm + "_J", "(J)J");
+        cw.emitProtocolMethodDispatch("invokePrim_OJ_O", "(Ljava/lang/Object;J)Ljava/lang/Object;", 2, true, false,
+                containsArity(ifArities, 2) ? ifaceInternal : null, jm + "_JO", "(J)Ljava/lang/Object;");
+
+        try {
+            Class<?> cls = LOADER.define(binaryName, cw.toByteArray());
+            Constructor<?> ctor = cls.getConstructor(Var.class, Keyword.class, String.class);
+            return (Protocol.MethodFn) ctor.newInstance(protoVar, methodKey, name);
+        } catch (Throwable t) {
+            return new Protocol.MethodFn(protoVar, methodKey, name);
+        }
+    }
+
     public static synchronized Class<?> defineInterface(String binaryName, List<MethodSig> methods) {
         String internalName = binaryName.replace('.', '/');
         ClassWriter cw = new ClassWriter(internalName, "java/lang/Object", new String[0], 0x0601); // PUBLIC | INTERFACE | ABSTRACT
@@ -99,18 +227,57 @@ public final class TypeFactory {
             String[] fieldNames,
             Class<?>[] interfaces,
             Map<String, Fn> methodImpls) {
+        return defineRecord(binaryName, fieldNames, null, interfaces, methodImpls, Collections.emptyList());
+    }
+
+    public static synchronized Class<?> defineRecord(
+            String binaryName,
+            String[] fieldNames,
+            char[] fieldTypes,
+            Class<?>[] interfaces,
+            Map<String, Fn> methodImpls,
+            List<Protocol> directProtos) {
+        char[] ftypes = new char[fieldNames.length];
+        for (int i = 0; i < fieldNames.length; i++) {
+            ftypes[i] = (fieldTypes != null && i < fieldTypes.length) ? fieldTypes[i] : 'O';
+        }
         String internalName = binaryName.replace('.', '/');
         String superInternal = "cljl/lang/PersistentRecord";
-        String[] ifaceInternals = new String[interfaces.length];
-        for (int i = 0; i < interfaces.length; i++) ifaceInternals[i] = interfaces[i].getName().replace('.', '/');
+        List<String> ifaceList = new ArrayList<>(interfaces.length + directProtos.size());
+        Set<String> ifaceSeen = new HashSet<>();
+        for (Class<?> iface : interfaces) {
+            String iname = iface.getName().replace('.', '/');
+            if (ifaceSeen.add(iname)) ifaceList.add(iname);
+        }
+        List<Protocol> activeDirectProtos = new ArrayList<>();
+        Set<String> protoMethodNames = new HashSet<>();
+        for (Protocol p : directProtos) {
+            if (p.onInterface == null || p.interfaceMethodArities == null) continue;
+            boolean conflict = false;
+            for (String mn : p.interfaceMethodArities.keySet()) {
+                if (protoMethodNames.contains(mn)) { conflict = true; break; }
+            }
+            if (conflict) continue;
+            String iname = p.onInterface.getName().replace('.', '/');
+            if (ifaceSeen.add(iname)) {
+                ifaceList.add(iname);
+                activeDirectProtos.add(p);
+                protoMethodNames.addAll(p.interfaceMethodArities.keySet());
+            }
+        }
+        String[] ifaceInternals = ifaceList.toArray(new String[0]);
 
-        CLASS_METHODS.put(binaryName, new ConcurrentHashMap<>(methodImpls));
+        ConcurrentHashMap<String, Fn> cm = new ConcurrentHashMap<>();
+        for (Map.Entry<String, Fn> e : methodImpls.entrySet()) {
+            if (e.getValue() != null) cm.put(e.getKey(), e.getValue());
+        }
+        CLASS_METHODS.put(binaryName, cm);
 
         ClassWriter cw = new ClassWriter(internalName, superInternal, ifaceInternals, 0x0011); // PUBLIC | FINAL
 
-        // Fields: public final Object <field>;
-        for (String f : fieldNames) {
-            cw.addField(0x0011, f, "Ljava/lang/Object;");
+        // Fields: public final long/double/Object <field>;
+        for (int i = 0; i < fieldNames.length; i++) {
+            cw.addField(0x0011, fieldNames[i], ClassWriter.fieldDescFor(ftypes[i]));
         }
         // Static fields: KEYS ([Ljava/lang/Object;) initialized lazily via <clinit>
         cw.addField(0x001a, "__KEYS", "[Ljava/lang/Object;"); // PRIVATE | STATIC | FINAL
@@ -119,25 +286,102 @@ public final class TypeFactory {
         // Short ctor: (Object f0, ...) -> this(f0, ..., null, null)
         cw.emitRecordShortCtor(fieldNames);
         // Full ctor: (Object f0, ..., PersistentHashMap meta, PersistentHashMap ext)
-        cw.emitRecordFullCtor(fieldNames);
+        cw.emitRecordFullCtor(fieldNames, ftypes);
         // __baseKeys() -> __KEYS
         cw.emitBaseKeysMethod();
         // __fieldIndex(Object key)
         cw.emitFieldIndexMethod(fieldNames);
         // __fieldValue(int idx)
-        cw.emitFieldValueMethod(fieldNames);
+        cw.emitFieldValueMethod(fieldNames, ftypes);
         // __withField(int idx, Object val)
-        cw.emitWithFieldMethod(fieldNames);
+        cw.emitWithFieldMethod(fieldNames, ftypes);
         // __withExt(PersistentHashMap meta, PersistentHashMap ext)
-        cw.emitWithExtMethod(fieldNames);
+        cw.emitWithExtMethod(fieldNames, ftypes);
+        // Fast direct valAt(key) and valAt(key, notFound) bypassing __fieldIndex/__fieldValue virtual calls
+        cw.emitRecordValAtMethods(fieldNames, ftypes);
 
-        // Implement interface methods delegating to TypeFactory.dispatchMethod
+        // Implement direct protocol interface methods backed by static final Fn fields in a companion holder class
+        // so HotSpot C2 constant-folds the Fn instance and inlines the JIT body directly into callers.
+        String pmHolderBinary = null;
+        if (!activeDirectProtos.isEmpty()) {
+            pmHolderBinary = binaryName + "$__pm$" + PROTO_HOLDER_ID.incrementAndGet();
+            String pmHolderInternal = pmHolderBinary.replace('.', '/');
+            for (Protocol p : activeDirectProtos) {
+                for (Map.Entry<String, int[]> e : p.interfaceMethodArities.entrySet()) {
+                    String jm = mangleProtoMethod(e.getKey());
+                    String fnField = "__pm_" + jm;
+                    for (int arity : e.getValue()) {
+                        if (arity < 1 || arity > 4) continue;
+                        cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm, arity, false, false);
+                        if (arity == 2) {
+                            cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm + "_J", 2, true, true);
+                            cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm + "_JO", 2, true, false);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Implement Java interface methods delegating to TypeFactory.dispatchMethod
         emitInterfaceBridges(cw, binaryName, interfaces, methodImpls);
 
         byte[] bytes = cw.toByteArray();
         Class<?> cls = LOADER.define(binaryName, bytes);
+        if (pmHolderBinary != null) {
+            RECORD_PM_HOLDER.put(cls, pmHolderBinary);
+        }
         Interop.registerClass(binaryName, cls);
         return cls;
+    }
+
+    public static void bindRecordProtocolMethods(Class<?> recCls, Map<Protocol, Map<Keyword, Fn>> protoImpls) {
+        String pmHolderBinary = RECORD_PM_HOLDER.remove(recCls);
+        if (pmHolderBinary != null) {
+            Map<String, Fn> fieldsToInit = new LinkedHashMap<>();
+            for (Map.Entry<Protocol, Map<Keyword, Fn>> pe : protoImpls.entrySet()) {
+                Protocol p = pe.getKey();
+                if (p.onInterface != null && p.onInterface.isAssignableFrom(recCls)) {
+                    for (Map.Entry<Keyword, Fn> me : pe.getValue().entrySet()) {
+                        Fn impl = me.getValue();
+                        if (impl instanceof Compiler.CompiledFn cf) {
+                            impl = cf.ensureJit();
+                        }
+                        String fnField = "__pm_" + mangleProtoMethod(me.getKey().getName());
+                        fieldsToInit.putIfAbsent(fnField, impl);
+                    }
+                }
+            }
+            String holderInternal = pmHolderBinary.replace('.', '/');
+            ClassWriter hcw = new ClassWriter(holderInternal, "java/lang/Object", new String[0], 0x0011);
+            MethodAssembler clinit = new MethodAssembler(hcw);
+            for (Map.Entry<String, Fn> e : fieldsToInit.entrySet()) {
+                String fnField = e.getKey();
+                hcw.addField(0x0019, fnField, "Lcljl/Fn;"); // PUBLIC | STATIC | FINAL
+                String key = pmHolderBinary + "." + fnField;
+                PENDING_PM_FNS.put(key, e.getValue());
+                clinit.ldcString(key);
+                clinit.invokestatic("cljl/TypeFactory", "takePendingProtoFn", "(Ljava/lang/String;)Lcljl/Fn;");
+                clinit.putstatic(holderInternal, fnField, "Lcljl/Fn;");
+            }
+            clinit.vreturn();
+            hcw.addCodeMethod(0x0008, "<clinit>", "()V", 2, 0, clinit.toBytes());
+            Class<?> holderCls = LOADER.define(pmHolderBinary, hcw.toByteArray());
+            // Force <clinit> eagerly so PENDING_PM_FNS entries are consumed and static final fields are published
+            try {
+                Class.forName(pmHolderBinary, true, LOADER);
+            } catch (ClassNotFoundException e) {
+                throw RT.sneakyThrow(e);
+            }
+            if (holderCls == null) throw new IllegalStateException("Failed to define holder " + pmHolderBinary);
+        }
+        for (Map.Entry<Protocol, Map<Keyword, Fn>> pe : protoImpls.entrySet()) {
+            Protocol p = pe.getKey();
+            if (p.onInterface != null && p.onInterface.isAssignableFrom(recCls)) {
+                p.addDirectImpl(recCls, pe.getValue());
+            } else {
+                p.addImpl(recCls, pe.getValue());
+            }
+        }
     }
 
     public static synchronized Class<?> defineType(
@@ -150,7 +394,11 @@ public final class TypeFactory {
         String[] ifaceInternals = new String[interfaces.length];
         for (int i = 0; i < interfaces.length; i++) ifaceInternals[i] = interfaces[i].getName().replace('.', '/');
 
-        CLASS_METHODS.put(binaryName, new ConcurrentHashMap<>(methodImpls));
+        ConcurrentHashMap<String, Fn> cm = new ConcurrentHashMap<>();
+        for (Map.Entry<String, Fn> e : methodImpls.entrySet()) {
+            if (e.getValue() != null) cm.put(e.getKey(), e.getValue());
+        }
+        CLASS_METHODS.put(binaryName, cm);
 
         ClassWriter cw = new ClassWriter(internalName, "java/lang/Object", ifaceInternals, 0x0011);
         for (int i = 0; i < fieldNames.length; i++) {
@@ -612,7 +860,26 @@ public final class TypeFactory {
             addCodeMethod(0x0001, "<init>", desc.toString(), Math.max(4, fieldNames.length + 4), fieldNames.length + 1, ma.toBytes());
         }
 
-        void emitRecordFullCtor(String[] fieldNames) {
+        private static String fieldDescFor(char ft) {
+            if (ft == 'J') return "J";
+            if (ft == 'D') return "D";
+            return "Ljava/lang/Object;";
+        }
+
+        private void emitLoadBoxedField(MethodAssembler ma, String fname, char ft) {
+            ma.aload(0);
+            if (ft == 'J') {
+                ma.getfield(className, fname, "J");
+                ma.invokestatic("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;");
+            } else if (ft == 'D') {
+                ma.getfield(className, fname, "D");
+                ma.invokestatic("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;");
+            } else {
+                ma.getfield(className, fname, "Ljava/lang/Object;");
+            }
+        }
+
+        void emitRecordFullCtor(String[] fieldNames, char[] ftypes) {
             StringBuilder desc = new StringBuilder("(");
             for (String ignored : fieldNames) desc.append("Ljava/lang/Object;");
             desc.append("Lcljl/lang/PersistentHashMap;Lcljl/lang/PersistentHashMap;)V");
@@ -625,7 +892,15 @@ public final class TypeFactory {
             for (int i = 0; i < fieldNames.length; i++) {
                 ma.aload(0);
                 ma.aload(1 + i);
-                ma.putfield(className, fieldNames[i], "Ljava/lang/Object;");
+                if (ftypes[i] == 'J') {
+                    ma.invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J");
+                    ma.putfield(className, fieldNames[i], "J");
+                } else if (ftypes[i] == 'D') {
+                    ma.invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D");
+                    ma.putfield(className, fieldNames[i], "D");
+                } else {
+                    ma.putfield(className, fieldNames[i], "Ljava/lang/Object;");
+                }
             }
             ma.vreturn();
             addCodeMethod(0x0001, "<init>", desc.toString(), 4, fieldNames.length + 3, ma.toBytes());
@@ -655,14 +930,13 @@ public final class TypeFactory {
             addCodeMethod(0x0004, "__fieldIndex", "(Ljava/lang/Object;)I", 4, 2, ma.toBytes());
         }
 
-        void emitFieldValueMethod(String[] fieldNames) {
+        void emitFieldValueMethod(String[] fieldNames, char[] ftypes) {
             MethodAssembler ma = new MethodAssembler(this);
             for (int i = 0; i < fieldNames.length; i++) {
                 ma.iload(1);
                 ma.iconst(i);
                 int nextJump = ma.ifIcmpNePlaceholder();
-                ma.aload(0);
-                ma.getfield(className, fieldNames[i], "Ljava/lang/Object;");
+                emitLoadBoxedField(ma, fieldNames[i], ftypes[i]);
                 ma.areturn();
                 ma.patchBranchHere(nextJump);
             }
@@ -671,7 +945,7 @@ public final class TypeFactory {
             addCodeMethod(0x0004, "__fieldValue", "(I)Ljava/lang/Object;", 4, 2, ma.toBytes());
         }
 
-        void emitWithFieldMethod(String[] fieldNames) {
+        void emitWithFieldMethod(String[] fieldNames, char[] ftypes) {
             StringBuilder fullDesc = new StringBuilder("(");
             for (String ignored : fieldNames) fullDesc.append("Ljava/lang/Object;");
             fullDesc.append("Lcljl/lang/PersistentHashMap;Lcljl/lang/PersistentHashMap;)V");
@@ -685,10 +959,7 @@ public final class TypeFactory {
                 ma.dup();
                 for (int j = 0; j < fieldNames.length; j++) {
                     if (j == idx) ma.aload(2);
-                    else {
-                        ma.aload(0);
-                        ma.getfield(className, fieldNames[j], "Ljava/lang/Object;");
-                    }
+                    else emitLoadBoxedField(ma, fieldNames[j], ftypes[j]);
                 }
                 ma.aload(0);
                 ma.getfield(superName, "__meta", "Lcljl/lang/PersistentHashMap;");
@@ -701,10 +972,10 @@ public final class TypeFactory {
             ma.aload(0);
             ma.areturn();
             addCodeMethod(0x0004, "__withField", "(ILjava/lang/Object;)Lcljl/lang/PersistentRecord;",
-                    Math.max(6, fieldNames.length + 6), 3, ma.toBytes());
+                    Math.max(6, fieldNames.length + 8), 3, ma.toBytes());
         }
 
-        void emitWithExtMethod(String[] fieldNames) {
+        void emitWithExtMethod(String[] fieldNames, char[] ftypes) {
             StringBuilder fullDesc = new StringBuilder("(");
             for (String ignored : fieldNames) fullDesc.append("Ljava/lang/Object;");
             fullDesc.append("Lcljl/lang/PersistentHashMap;Lcljl/lang/PersistentHashMap;)V");
@@ -712,9 +983,8 @@ public final class TypeFactory {
             MethodAssembler ma = new MethodAssembler(this);
             ma.newObj(className);
             ma.dup();
-            for (String f : fieldNames) {
-                ma.aload(0);
-                ma.getfield(className, f, "Ljava/lang/Object;");
+            for (int i = 0; i < fieldNames.length; i++) {
+                emitLoadBoxedField(ma, fieldNames[i], ftypes[i]);
             }
             ma.aload(1);
             ma.aload(2);
@@ -722,7 +992,232 @@ public final class TypeFactory {
             ma.areturn();
             addCodeMethod(0x0004, "__withExt",
                     "(Lcljl/lang/PersistentHashMap;Lcljl/lang/PersistentHashMap;)Lcljl/lang/PersistentRecord;",
-                    Math.max(6, fieldNames.length + 5), 3, ma.toBytes());
+                    Math.max(6, fieldNames.length + 7), 3, ma.toBytes());
+        }
+
+        void emitRecordValAtMethods(String[] fieldNames, char[] ftypes) {
+            // public Object valAt(Object key)
+            MethodAssembler ma1 = new MethodAssembler(this);
+            if (fieldNames.length > 0) {
+                ma1.getstatic(className, "__KEYS", "[Ljava/lang/Object;");
+                ma1.astore(2);
+                for (int i = 0; i < fieldNames.length; i++) {
+                    ma1.aload(2);
+                    ma1.iconst(i);
+                    ma1.aaload();
+                    ma1.aload(1);
+                    int nextJump = ma1.ifAcmpNePlaceholder();
+                    emitLoadBoxedField(ma1, fieldNames[i], ftypes[i]);
+                    ma1.areturn();
+                    ma1.patchBranchHere(nextJump);
+                }
+            }
+            ma1.aload(0);
+            ma1.getfield(superName, "__extmap", "Lcljl/lang/PersistentHashMap;");
+            ma1.aload(1);
+            ma1.invokevirtual("cljl/lang/PersistentHashMap", "valAt", "(Ljava/lang/Object;)Ljava/lang/Object;");
+            ma1.areturn();
+            addCodeMethod(0x0001, "valAt", "(Ljava/lang/Object;)Ljava/lang/Object;", 4, 3, ma1.toBytes());
+
+            // public Object valAt(Object key, Object notFound)
+            MethodAssembler ma2 = new MethodAssembler(this);
+            if (fieldNames.length > 0) {
+                ma2.getstatic(className, "__KEYS", "[Ljava/lang/Object;");
+                ma2.astore(3);
+                for (int i = 0; i < fieldNames.length; i++) {
+                    ma2.aload(3);
+                    ma2.iconst(i);
+                    ma2.aaload();
+                    ma2.aload(1);
+                    int nextJump = ma2.ifAcmpNePlaceholder();
+                    emitLoadBoxedField(ma2, fieldNames[i], ftypes[i]);
+                    ma2.areturn();
+                    ma2.patchBranchHere(nextJump);
+                }
+            }
+            ma2.aload(0);
+            ma2.getfield(superName, "__extmap", "Lcljl/lang/PersistentHashMap;");
+            ma2.aload(1);
+            ma2.aload(2);
+            ma2.invokevirtual("cljl/lang/PersistentHashMap", "valAt",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+            ma2.areturn();
+            addCodeMethod(0x0001, "valAt", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 4, ma2.toBytes());
+        }
+
+        void emitProtocolMethodCtor(String superInternal) {
+            MethodAssembler ma = new MethodAssembler(this);
+            ma.aload(0);
+            ma.aload(1);
+            ma.aload(2);
+            ma.aload(3);
+            ma.invokespecial(superInternal, "<init>", "(Lcljl/Var;Lcljl/Keyword;Ljava/lang/String;)V");
+            ma.vreturn();
+            addCodeMethod(0x0001, "<init>", "(Lcljl/Var;Lcljl/Keyword;Ljava/lang/String;)V", 4, 4, ma.toBytes());
+        }
+
+        void emitProtocolMethodCtorWithProto(String superInternal, String selfInternal) {
+            MethodAssembler ma = new MethodAssembler(this);
+            ma.aload(0);
+            ma.aload(1);
+            ma.aload(2);
+            ma.aload(3);
+            ma.invokespecial(superInternal, "<init>", "(Lcljl/Var;Lcljl/Keyword;Ljava/lang/String;)V");
+            ma.aload(0);
+            ma.aload(4);
+            ma.putfield(selfInternal, "fastProto", "Lcljl/Protocol;");
+            ma.vreturn();
+            addCodeMethod(0x0001, "<init>", "(Lcljl/Var;Lcljl/Keyword;Ljava/lang/String;Lcljl/Protocol;)V", 4, 5, ma.toBytes());
+        }
+
+        void emitRecordDirectProtoBridge(String holderInternal, String fnField, String ifaceMethodName, int arity, boolean secondIsLong, boolean returnsLong) {
+            String ifaceDesc;
+            String fnName;
+            String fnDesc;
+            int maxLocals;
+            if (secondIsLong) {
+                ifaceDesc = returnsLong ? "(J)J" : "(J)Ljava/lang/Object;";
+                fnName = returnsLong ? "invokePrim_OJ_J" : "invokePrim_OJ_O";
+                fnDesc = returnsLong ? "(Ljava/lang/Object;J)J" : "(Ljava/lang/Object;J)Ljava/lang/Object;";
+                maxLocals = 3;
+            } else {
+                StringBuilder id = new StringBuilder("(");
+                for (int i = 1; i < arity; i++) id.append("Ljava/lang/Object;");
+                id.append(")Ljava/lang/Object;");
+                ifaceDesc = id.toString();
+                fnName = "invoke";
+                StringBuilder fd = new StringBuilder("(");
+                for (int i = 0; i < arity; i++) fd.append("Ljava/lang/Object;");
+                fd.append(")Ljava/lang/Object;");
+                fnDesc = fd.toString();
+                maxLocals = arity;
+            }
+            MethodAssembler ma = new MethodAssembler(this);
+            ma.getstatic(holderInternal, fnField, "Lcljl/Fn;");
+            ma.aload(0);
+            if (secondIsLong) {
+                ma.lload(1);
+            } else {
+                for (int i = 1; i < arity; i++) ma.aload(i);
+            }
+            ma.invokevirtual("cljl/Fn", fnName, fnDesc);
+            if (returnsLong) ma.lreturn(); else ma.areturn();
+            addCodeMethod(0x0001, ifaceMethodName, ifaceDesc, Math.max(4, arity + 2), maxLocals, ma.toBytes());
+        }
+
+        void emitProtocolMethodDispatch(
+                String mname, String desc, int arity, boolean secondIsLong, boolean returnsLong,
+                String ifaceInternal, String ifaceMethodName, String ifaceDesc) {
+            int paramEndSlot = secondIsLong ? 4 : (1 + arity);
+            if (ifaceInternal != null) {
+                // Ultra-tiny (~18 bytes) hot method for direct interface dispatch; PIC lives out-of-line
+                String picName = "pic_" + mname + "_" + arity;
+                MethodAssembler fast = new MethodAssembler(this);
+                fast.aload(1);
+                fast.instanceofOp(ifaceInternal);
+                int notInst = fast.ifEqPlaceholder();
+                fast.aload(1);
+                fast.checkcast(ifaceInternal);
+                int ifaceArgWords;
+                if (secondIsLong) {
+                    fast.lload(2);
+                    ifaceArgWords = 3;
+                } else {
+                    for (int i = 2; i <= arity; i++) fast.aload(i);
+                    ifaceArgWords = arity;
+                }
+                fast.invokeinterface(ifaceInternal, ifaceMethodName, ifaceDesc, ifaceArgWords);
+                if (returnsLong) fast.lreturn(); else fast.areturn();
+                fast.patchBranchHere(notInst);
+                fast.aload(0);
+                emitProtoArgs(fast, arity, secondIsLong);
+                fast.invokevirtual(className, picName, desc);
+                if (returnsLong) fast.lreturn(); else fast.areturn();
+                addCodeMethod(0x0001, mname, desc, Math.max(5, paramEndSlot + 1), paramEndSlot, fast.toBytes());
+
+                emitProtocolPicBody(picName, mname, desc, arity, secondIsLong, returnsLong, 0x0002);
+            } else {
+                emitProtocolPicBody(mname, mname, desc, arity, secondIsLong, returnsLong, 0x0001);
+            }
+        }
+
+        private void emitProtocolPicBody(
+                String emitName, String callName, String desc, int arity, boolean secondIsLong, boolean returnsLong, int accessFlags) {
+            int paramEndSlot = secondIsLong ? 4 : (1 + arity);
+            int clsSlot = paramEndSlot;
+            int entrySlot = paramEndSlot + 1;
+            String owner = "cljl/Protocol$MethodFn";
+            String entryType = "cljl/Protocol$MethodFn$CacheEntry";
+            String entryDesc = "Lcljl/Protocol$MethodFn$CacheEntry;";
+
+            MethodAssembler ma = new MethodAssembler(this);
+
+            // Class<?> cls = (a != null) ? a.getClass() : Protocol.NIL_CLASS;
+            ma.aload(1);
+            int isNull = ma.ifNullPlaceholder();
+            ma.aload(1);
+            ma.invokevirtual("java/lang/Object", "getClass", "()Ljava/lang/Class;");
+            int haveCls = ma.gotoPlaceholder();
+            ma.patchBranchHere(isNull);
+            ma.getstatic("cljl/Protocol", "NIL_CLASS", "Ljava/lang/Class;");
+            ma.patchBranchHere(haveCls);
+            ma.astore(clsSlot);
+
+            // Fast slot 1 (dedicated monomorphic call site #1)
+            ma.aload(0);
+            ma.getfield(owner, "slot1", entryDesc);
+            ma.astore(entrySlot);
+            ma.aload(entrySlot);
+            int s1Null = ma.ifNullPlaceholder();
+            ma.aload(entrySlot);
+            ma.getfield(entryType, "cls", "Ljava/lang/Class;");
+            ma.aload(clsSlot);
+            int s1Miss = ma.ifAcmpNePlaceholder();
+            ma.aload(entrySlot);
+            ma.getfield(entryType, "fn", "Lcljl/Fn;");
+            emitProtoArgs(ma, arity, secondIsLong);
+            ma.invokevirtual("cljl/Fn", callName, desc);
+            if (returnsLong) ma.lreturn(); else ma.areturn();
+
+            // Fast slot 2 (dedicated monomorphic call site #2 for bimorphic dispatch)
+            ma.patchBranchHere(s1Null);
+            ma.patchBranchHere(s1Miss);
+            ma.aload(0);
+            ma.getfield(owner, "slot2", entryDesc);
+            ma.astore(entrySlot);
+            ma.aload(entrySlot);
+            int s2Null = ma.ifNullPlaceholder();
+            ma.aload(entrySlot);
+            ma.getfield(entryType, "cls", "Ljava/lang/Class;");
+            ma.aload(clsSlot);
+            int s2Miss = ma.ifAcmpNePlaceholder();
+            ma.aload(entrySlot);
+            ma.getfield(entryType, "fn", "Lcljl/Fn;");
+            emitProtoArgs(ma, arity, secondIsLong);
+            ma.invokevirtual("cljl/Fn", callName, desc);
+            if (returnsLong) ma.lreturn(); else ma.areturn();
+
+            // Slow path: resolveAndCache(a, cls)
+            ma.patchBranchHere(s2Null);
+            ma.patchBranchHere(s2Miss);
+            ma.aload(0);
+            ma.aload(1);
+            ma.aload(clsSlot);
+            ma.invokevirtual(owner, "resolveAndCache", "(Ljava/lang/Object;Ljava/lang/Class;)Lcljl/Fn;");
+            emitProtoArgs(ma, arity, secondIsLong);
+            ma.invokevirtual("cljl/Fn", callName, desc);
+            if (returnsLong) ma.lreturn(); else ma.areturn();
+
+            addCodeMethod(accessFlags, emitName, desc, Math.max(6, paramEndSlot + 2), entrySlot + 1, ma.toBytes());
+        }
+
+        private static void emitProtoArgs(MethodAssembler ma, int arity, boolean secondIsLong) {
+            ma.aload(1);
+            if (secondIsLong) {
+                ma.lload(2);
+            } else {
+                for (int i = 2; i <= arity; i++) ma.aload(i);
+            }
         }
 
         void emitSimpleCtor(String[] fieldNames) {
@@ -933,6 +1428,7 @@ public final class TypeFactory {
         }
         void aload(int slot) { emitVarOp(0x2a, 0x19, slot); }
         void iload(int slot) { emitVarOp(0x1a, 0x15, slot); }
+        void lload(int slot) { emitVarOp(0x1e, 0x16, slot); }
         void astore(int slot) { emitVarOp(0x4b, 0x3a, slot); }
         void aaload() { code.write(0x32); }
         void aastore() { code.write(0x53); }
@@ -956,6 +1452,11 @@ public final class TypeFactory {
             code.write(0xc0);
             code.write((ci >>> 8) & 0xff); code.write(ci & 0xff);
         }
+        void instanceofOp(String internalName) {
+            int ci = cw.addClass(internalName);
+            code.write(0xc1);
+            code.write((ci >>> 8) & 0xff); code.write(ci & 0xff);
+        }
         void getfield(String owner, String name, String desc) { emitRef(0xb4, 9, owner, name, desc); }
         void putfield(String owner, String name, String desc) { emitRef(0xb5, 9, owner, name, desc); }
         void getstatic(String owner, String name, String desc) { emitRef(0xb2, 9, owner, name, desc); }
@@ -963,14 +1464,24 @@ public final class TypeFactory {
         void invokevirtual(String owner, String name, String desc) { emitRef(0xb6, 10, owner, name, desc); }
         void invokespecial(String owner, String name, String desc) { emitRef(0xb7, 10, owner, name, desc); }
         void invokestatic(String owner, String name, String desc) { emitRef(0xb8, 10, owner, name, desc); }
+        void invokeinterface(String owner, String name, String desc, int count) {
+            int ri = cw.addRef(11, owner, name, desc);
+            code.write(0xb9);
+            code.write((ri >>> 8) & 0xff); code.write(ri & 0xff);
+            code.write(count & 0xff);
+            code.write(0);
+        }
         void emitRef(int op, int tag, String owner, String name, String desc) {
             int ri = cw.addRef(tag, owner, name, desc);
             code.write(op);
             code.write((ri >>> 8) & 0xff); code.write(ri & 0xff);
         }
+        int ifEqPlaceholder() { return branchPlaceholder(0x99); }
+        int ifNePlaceholder() { return branchPlaceholder(0x9a); }
         int ifAcmpNePlaceholder() { return branchPlaceholder(0xa6); }
         int ifIcmpNePlaceholder() { return branchPlaceholder(0xa0); }
         int ifNullPlaceholder() { return branchPlaceholder(0xc6); }
+        int gotoPlaceholder() { return branchPlaceholder(0xa7); }
         private int branchPlaceholder(int op) {
             int pos = code.size();
             code.write(op);
@@ -983,6 +1494,7 @@ public final class TypeFactory {
         }
         void vreturn() { code.write(0xb1); }
         void ireturn() { code.write(0xac); }
+        void lreturn() { code.write(0xad); }
         void areturn() { code.write(0xb0); }
         void athrow() { code.write(0xbf); }
 

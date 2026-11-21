@@ -40,7 +40,11 @@ public final class Numbers {
     }
 
     public static long longCast(Object o) {
-        if (o instanceof Long l) return l;
+        if (o instanceof Long l) return l.longValue();
+        return longCastSlow(o);
+    }
+
+    private static long longCastSlow(Object o) {
         if (o instanceof Integer || o instanceof Short || o instanceof Byte) return ((Number) o).longValue();
         if (o instanceof Character c) return (long) c;
         if (o instanceof Double d) return longCast(d.doubleValue());

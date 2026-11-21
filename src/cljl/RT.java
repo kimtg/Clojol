@@ -195,6 +195,8 @@ public final class RT {
 
     public static int hash(Object o) {
         if (o == null) return 0;
+        if (o instanceof Keyword kw) return kw.hash;
+        if (o instanceof String s) return s.hashCode();
         if (o instanceof Long l) return Long.hashCode(l);
         if (o instanceof Integer || o instanceof Short || o instanceof Byte) {
             return Long.hashCode(((Number) o).longValue());
@@ -307,6 +309,9 @@ public final class RT {
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static int compare(Object k1, Object k2) {
         if (k1 == k2) return 0;
+        if (k1 instanceof Long l1 && k2 instanceof Long l2) {
+            return Long.compare(l1.longValue(), l2.longValue());
+        }
         if (k1 != null) {
             if (k2 == null) return 1;
             if (k1 instanceof Number n1 && k2 instanceof Number n2) {
@@ -822,6 +827,16 @@ public final class RT {
     public static Object[] toArray(Object coll) {
         if (coll == null) return Fn.EMPTY_ARGS;
         if (coll instanceof Object[] arr) return arr;
+        if (coll instanceof PersistentVector.RVecSeq rvs) return rvs.toReverseArray();
+        if (coll instanceof LongArraySeq las) return las.toBoxedArray();
+        if (coll instanceof LongRange lr) {
+            int n = lr.count();
+            Object[] ret = new Object[n];
+            long v = lr.start;
+            long step = lr.step;
+            for (int i = 0; i < n; i++) { ret[i] = Long.valueOf(v); v += step; }
+            return ret;
+        }
         if (coll instanceof Collection<?> c) return c.toArray();
         if (coll.getClass().isArray()) {
             int n = Array.getLength(coll);

@@ -1,6 +1,7 @@
 package cljl.lang;
 
 import cljl.Fn;
+import cljl.Keyword;
 import cljl.RT;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -101,7 +102,37 @@ public final class PersistentHashMap extends Fn
     public Object valAt(Object key, Object notFound) {
         if (key == null) return hasNull ? nullValue : notFound;
         if (root == null) return notFound;
+        if (key instanceof Keyword kw) return valAtKeyword(kw, notFound);
         return root.find(0, RT.hash(key), key, notFound);
+    }
+
+    public Object valAtKeyword(Keyword key, Object notFound) {
+        INode r = root;
+        if (r == null) return notFound;
+        int hash = key.hash;
+        if (r instanceof BitmapIndexedNode node) {
+            int shift = 0;
+            while (true) {
+                int bit = 1 << ((hash >>> shift) & 0x1f);
+                int bitmap = node.bitmap;
+                if ((bitmap & bit) == 0) return notFound;
+                int idx = Integer.bitCount(bitmap & (bit - 1));
+                Object[] arr = node.array;
+                Object keyOrNull = arr[2 * idx];
+                Object valOrNode = arr[2 * idx + 1];
+                if (keyOrNull == key) return valOrNode;
+                if (keyOrNull == null) {
+                    if (valOrNode instanceof BitmapIndexedNode nextNode) {
+                        node = nextNode;
+                        shift += 5;
+                        continue;
+                    }
+                    return ((INode) valOrNode).find(shift + 5, hash, key, notFound);
+                }
+                return notFound;
+            }
+        }
+        return r.find(0, hash, key, notFound);
     }
 
     @Override
@@ -316,7 +347,7 @@ public final class PersistentHashMap extends Fn
                     newArray[2 * idx + 1] = n;
                     return new BitmapIndexedNode(bitmap, newArray);
                 }
-                if (RT.equiv(key, keyOrNull)) {
+                if (key == keyOrNull || RT.equiv(key, keyOrNull)) {
                     if (val == valOrNode) return this;
                     Object[] newArray = array.clone();
                     newArray[2 * idx + 1] = val;
@@ -353,7 +384,7 @@ public final class PersistentHashMap extends Fn
                     editable.array[2 * idx + 1] = n;
                     return editable;
                 }
-                if (RT.equiv(key, keyOrNull)) {
+                if (key == keyOrNull || RT.equiv(key, keyOrNull)) {
                     if (val == valOrNode) return this;
                     BitmapIndexedNode editable = ensureEditable(edit);
                     editable.array[2 * idx + 1] = val;
@@ -466,7 +497,7 @@ public final class PersistentHashMap extends Fn
                     }
                     return ((INode) valOrNode).find(shift + 5, hash, key, notFound);
                 }
-                if (RT.equiv(key, keyOrNull)) {
+                if (key == keyOrNull || RT.equiv(key, keyOrNull)) {
                     return valOrNode;
                 }
                 return notFound;

@@ -58,6 +58,17 @@ public final class Compiler {
 
     public static Object eval(Object form) {
         RT.ensureInit();
+        form = macroexpand(form, null);
+        if (form instanceof ISeq seq) {
+            ISeq s = seq.seq();
+            if (s != null && s.first() instanceof Symbol sym && sym.ns == null && "do".equals(sym.name)) {
+                Object ret = null;
+                for (ISeq rest = s.next(); rest != null; rest = rest.next()) {
+                    ret = eval(rest.first());
+                }
+                return ret;
+            }
+        }
         Node node = compile(form, null);
         if (node instanceof TopFrameNode tf && CompiledFn.containsLoop(tf.body)) {
             FnMethod[] fixed = new FnMethod[21];
@@ -733,7 +744,7 @@ public final class Compiler {
                     Class<?> cls = Interop.resolveClass(cur, sym.ns);
                     if (cls != null) {
                         Node[] argNodes = compileArgs(args, scope);
-                        return new StaticMethodNode(cls, sym.name, argNodes);
+                        return createStaticMethodNode(cls, sym.name, argNodes);
                     }
                 }
             }
@@ -1298,7 +1309,7 @@ public final class Compiler {
                     if (isField && argNodes.length == 0) {
                         return new StaticFieldNode(cls, memberName);
                     }
-                    return new StaticMethodNode(cls, memberName, argNodes);
+                    return createStaticMethodNode(cls, memberName, argNodes);
                 }
             }
         }
@@ -1308,6 +1319,95 @@ public final class Compiler {
             return new InstanceFieldNode(targetNode, memberName);
         }
         return new InstanceMethodNode(targetNode, memberName, argNodes);
+    }
+
+    private static Node createStaticMethodNode(Class<?> cls, String name, Node[] argNodes) {
+        if (cls == Math.class || cls == StrictMath.class) {
+            Object folded = tryFoldMathStatic(cls == StrictMath.class, name, argNodes);
+            if (folded != null) {
+                return new ConstNode(folded);
+            }
+        }
+        return new StaticMethodNode(cls, name, argNodes);
+    }
+
+    private static Object tryFoldMathStatic(boolean strict, String name, Node[] args) {
+        int n = args.length;
+        if (n == 1 && args[0] instanceof ConstNode c0 && c0.val instanceof Number num0) {
+            if ("abs".equals(name)) {
+                if (num0 instanceof Long l) {
+                    long v = l.longValue();
+                    return v == Long.MIN_VALUE ? null : Long.valueOf(Math.abs(v));
+                }
+                if (num0 instanceof Double d) return Double.valueOf(Math.abs(d.doubleValue()));
+                return null;
+            }
+            if ("round".equals(name)) {
+                if (num0 instanceof Double d) return Long.valueOf(strict ? StrictMath.round(d.doubleValue()) : Math.round(d.doubleValue()));
+                return null;
+            }
+            double d = num0.doubleValue();
+            return switch (name) {
+                case "sin" -> Double.valueOf(strict ? StrictMath.sin(d) : Math.sin(d));
+                case "cos" -> Double.valueOf(strict ? StrictMath.cos(d) : Math.cos(d));
+                case "tan" -> Double.valueOf(strict ? StrictMath.tan(d) : Math.tan(d));
+                case "asin" -> Double.valueOf(strict ? StrictMath.asin(d) : Math.asin(d));
+                case "acos" -> Double.valueOf(strict ? StrictMath.acos(d) : Math.acos(d));
+                case "atan" -> Double.valueOf(strict ? StrictMath.atan(d) : Math.atan(d));
+                case "sinh" -> Double.valueOf(strict ? StrictMath.sinh(d) : Math.sinh(d));
+                case "cosh" -> Double.valueOf(strict ? StrictMath.cosh(d) : Math.cosh(d));
+                case "tanh" -> Double.valueOf(strict ? StrictMath.tanh(d) : Math.tanh(d));
+                case "exp" -> Double.valueOf(strict ? StrictMath.exp(d) : Math.exp(d));
+                case "expm1" -> Double.valueOf(strict ? StrictMath.expm1(d) : Math.expm1(d));
+                case "log" -> Double.valueOf(strict ? StrictMath.log(d) : Math.log(d));
+                case "log10" -> Double.valueOf(strict ? StrictMath.log10(d) : Math.log10(d));
+                case "log1p" -> Double.valueOf(strict ? StrictMath.log1p(d) : Math.log1p(d));
+                case "sqrt" -> Double.valueOf(strict ? StrictMath.sqrt(d) : Math.sqrt(d));
+                case "cbrt" -> Double.valueOf(strict ? StrictMath.cbrt(d) : Math.cbrt(d));
+                case "ceil" -> Double.valueOf(strict ? StrictMath.ceil(d) : Math.ceil(d));
+                case "floor" -> Double.valueOf(strict ? StrictMath.floor(d) : Math.floor(d));
+                case "rint" -> Double.valueOf(strict ? StrictMath.rint(d) : Math.rint(d));
+                case "toRadians" -> Double.valueOf(strict ? StrictMath.toRadians(d) : Math.toRadians(d));
+                case "toDegrees" -> Double.valueOf(strict ? StrictMath.toDegrees(d) : Math.toDegrees(d));
+                case "ulp" -> Double.valueOf(strict ? StrictMath.ulp(d) : Math.ulp(d));
+                case "signum" -> Double.valueOf(strict ? StrictMath.signum(d) : Math.signum(d));
+                case "nextUp" -> Double.valueOf(strict ? StrictMath.nextUp(d) : Math.nextUp(d));
+                case "nextDown" -> Double.valueOf(strict ? StrictMath.nextDown(d) : Math.nextDown(d));
+                default -> null;
+            };
+        }
+        if (n == 2 && args[0] instanceof ConstNode c0 && c0.val instanceof Number num0
+                && args[1] instanceof ConstNode c1 && c1.val instanceof Number num1) {
+            if ("min".equals(name)) {
+                if (num0 instanceof Long a && num1 instanceof Long b) return Long.valueOf(Math.min(a, b));
+                if (num0 instanceof Double || num1 instanceof Double) return Double.valueOf(Math.min(num0.doubleValue(), num1.doubleValue()));
+                return null;
+            }
+            if ("max".equals(name)) {
+                if (num0 instanceof Long a && num1 instanceof Long b) return Long.valueOf(Math.max(a, b));
+                if (num0 instanceof Double || num1 instanceof Double) return Double.valueOf(Math.max(num0.doubleValue(), num1.doubleValue()));
+                return null;
+            }
+            double a = num0.doubleValue();
+            double b = num1.doubleValue();
+            return switch (name) {
+                case "atan2" -> Double.valueOf(strict ? StrictMath.atan2(a, b) : Math.atan2(a, b));
+                case "pow" -> Double.valueOf(strict ? StrictMath.pow(a, b) : Math.pow(a, b));
+                case "hypot" -> Double.valueOf(strict ? StrictMath.hypot(a, b) : Math.hypot(a, b));
+                case "IEEEremainder" -> Double.valueOf(strict ? StrictMath.IEEEremainder(a, b) : Math.IEEEremainder(a, b));
+                case "copySign" -> Double.valueOf(strict ? StrictMath.copySign(a, b) : Math.copySign(a, b));
+                case "nextAfter" -> Double.valueOf(strict ? StrictMath.nextAfter(a, b) : Math.nextAfter(a, b));
+                default -> null;
+            };
+        }
+        if (n == 3 && "fma".equals(name)
+                && args[0] instanceof ConstNode c0 && c0.val instanceof Number n0
+                && args[1] instanceof ConstNode c1 && c1.val instanceof Number n1
+                && args[2] instanceof ConstNode c2 && c2.val instanceof Number n2) {
+            double a = n0.doubleValue(), b = n1.doubleValue(), c = n2.doubleValue();
+            return Double.valueOf(strict ? StrictMath.fma(a, b, c) : Math.fma(a, b, c));
+        }
+        return null;
     }
 
     private static Node compileSetBang(ISeq args, Scope scope) {
@@ -1873,6 +1973,24 @@ public final class Compiler {
         public Var getOwnerVar() { return ownerVar; }
         public void setOwnerVar(Var ownerVar) { this.ownerVar = ownerVar; }
 
+        /** Eagerly compiles and returns the raw JIT Fn (or this if not JIT-eligible). */
+        public Fn ensureJit() {
+            Fn j = jitFn;
+            if (j != null) return j;
+            synchronized (this) {
+                if (jitFn != null) return jitFn;
+                if (!jitAttempted) {
+                    jitAttempted = true;
+                    Fn compiled = BytecodeJIT.compile(this);
+                    if (compiled != null) {
+                        jitFn = compiled;
+                        return compiled;
+                    }
+                }
+            }
+            return this;
+        }
+
         private void maybeCompileJit() {
             if (jitAttempted) return;
             int c = calls.incrementAndGet();
@@ -1991,6 +2109,67 @@ public final class Compiler {
             Fn j = jitFn;
             if (j != null) return j.invoke(a, b);
             return invokeSlow2(a, b);
+        }
+
+        @Override
+        public boolean isUnboxedLong1() {
+            Fn j = jitFn;
+            return j != null && j.isUnboxedLong1();
+        }
+
+        @Override
+        public boolean isUnboxedLong2() {
+            Fn j = jitFn;
+            return j != null && j.isUnboxedLong2();
+        }
+
+        @Override
+        public long invokePrim_J_J(long a) {
+            Fn j = jitFn;
+            if (j != null) return j.invokePrim_J_J(a);
+            return Numbers.longCast(invokeSlow1(Long.valueOf(a)));
+        }
+
+        @Override
+        public double invokePrim_D_D(double a) {
+            Fn j = jitFn;
+            if (j != null) return j.invokePrim_D_D(a);
+            return Numbers.toDouble(invokeSlow1(Double.valueOf(a)));
+        }
+
+        @Override
+        public boolean invokePrim_J_Z(long a) {
+            Fn j = jitFn;
+            if (j != null) return j.invokePrim_J_Z(a);
+            return RT.truthy(invokeSlow1(Long.valueOf(a)));
+        }
+
+        @Override
+        public long invokePrim_JJ_J(long a, long b) {
+            Fn j = jitFn;
+            if (j != null) return j.invokePrim_JJ_J(a, b);
+            return Numbers.longCast(invokeSlow2(Long.valueOf(a), Long.valueOf(b)));
+        }
+
+        @Override
+        public double invokePrim_DD_D(double a, double b) {
+            Fn j = jitFn;
+            if (j != null) return j.invokePrim_DD_D(a, b);
+            return Numbers.toDouble(invokeSlow2(Double.valueOf(a), Double.valueOf(b)));
+        }
+
+        @Override
+        public long invokePrim_OJ_J(Object a, long b) {
+            Fn j = jitFn;
+            if (j != null) return j.invokePrim_OJ_J(a, b);
+            return Numbers.longCast(invokeSlow2(a, Long.valueOf(b)));
+        }
+
+        @Override
+        public Object invokePrim_OJ_O(Object a, long b) {
+            Fn j = jitFn;
+            if (j != null) return j.invokePrim_OJ_O(a, b);
+            return invokeSlow2(a, Long.valueOf(b));
         }
 
         private Object invokeSlow2(Object a, Object b) {
@@ -2535,6 +2714,49 @@ public final class Compiler {
         }
         @Override
         public Object eval(Object[] frame) {
+            if (clazz == Math.class) {
+                if (args.length == 1) {
+                    Object a0 = args[0].eval(frame);
+                    if (a0 instanceof Number n0) {
+                        double d = n0.doubleValue();
+                        switch (methodName) {
+                            case "sin" -> { return Double.valueOf(Math.sin(d)); }
+                            case "cos" -> { return Double.valueOf(Math.cos(d)); }
+                            case "tan" -> { return Double.valueOf(Math.tan(d)); }
+                            case "sqrt" -> { return Double.valueOf(Math.sqrt(d)); }
+                            case "exp" -> { return Double.valueOf(Math.exp(d)); }
+                            case "log" -> { return Double.valueOf(Math.log(d)); }
+                            case "floor" -> { return Double.valueOf(Math.floor(d)); }
+                            case "ceil" -> { return Double.valueOf(Math.ceil(d)); }
+                            case "abs" -> {
+                                if (n0 instanceof Long l) return Long.valueOf(Math.abs(l.longValue()));
+                                if (n0 instanceof Double) return Double.valueOf(Math.abs(d));
+                            }
+                        }
+                    }
+                    return Interop.invokeStaticMethod(clazz, methodName, new Object[]{a0});
+                }
+                if (args.length == 2) {
+                    Object a0 = args[0].eval(frame);
+                    Object a1 = args[1].eval(frame);
+                    if (a0 instanceof Number n0 && a1 instanceof Number n1) {
+                        switch (methodName) {
+                            case "pow" -> { return Double.valueOf(Math.pow(n0.doubleValue(), n1.doubleValue())); }
+                            case "atan2" -> { return Double.valueOf(Math.atan2(n0.doubleValue(), n1.doubleValue())); }
+                            case "hypot" -> { return Double.valueOf(Math.hypot(n0.doubleValue(), n1.doubleValue())); }
+                            case "min" -> {
+                                if (n0 instanceof Long l0 && n1 instanceof Long l1) return Long.valueOf(Math.min(l0, l1));
+                                if (n0 instanceof Double || n1 instanceof Double) return Double.valueOf(Math.min(n0.doubleValue(), n1.doubleValue()));
+                            }
+                            case "max" -> {
+                                if (n0 instanceof Long l0 && n1 instanceof Long l1) return Long.valueOf(Math.max(l0, l1));
+                                if (n0 instanceof Double || n1 instanceof Double) return Double.valueOf(Math.max(n0.doubleValue(), n1.doubleValue()));
+                            }
+                        }
+                    }
+                    return Interop.invokeStaticMethod(clazz, methodName, new Object[]{a0, a1});
+                }
+            }
             Object[] evaluated = new Object[args.length];
             for (int i = 0; i < args.length; i++) evaluated[i] = args[i].eval(frame);
             return Interop.invokeStaticMethod(clazz, methodName, evaluated);

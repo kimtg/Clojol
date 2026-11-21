@@ -112,6 +112,7 @@ public final class TypeAnalyzer {
     private final Map<Integer, Integer> scalarVolatileAliases = new HashMap<>();
     private final Set<Integer> scalarAtomSlots = new HashSet<>();
     private final Map<Integer, Integer> scalarAtomAliases = new HashMap<>();
+    private final Map<Integer, FnMethod[]> localKnownFns = new HashMap<>();
 
     private final Deque<RecurFrame> recurStack = new ArrayDeque<>();
     private ValType selfReturnType = ValType.BOTTOM;
@@ -146,6 +147,18 @@ public final class TypeAnalyzer {
         for (int s : method.capturedLocalSlots) {
             ValType hint = hintForSlot(s);
             this.slotTypes[s] = hint != ValType.ANY ? hint : ValType.ANY;
+        }
+        if (ownerFn != null && ownerFn.getCaptured() != null && method.capturedLocalSlots.length > 0) {
+            Object[][] allCap = ownerFn.getCaptured();
+            int capIdx = method.isVariadic ? ownerFn.getFixedMethods().length : method.fixedArity;
+            if (capIdx >= 0 && capIdx < allCap.length && allCap[capIdx] != null) {
+                Object[] caps = allCap[capIdx];
+                for (int i = 0; i < method.capturedLocalSlots.length && i < caps.length; i++) {
+                    if (caps[i] instanceof CompiledFn capCf) {
+                        localKnownFns.put(method.capturedLocalSlots[i], capCf.getFixedMethods());
+                    }
+                }
+            }
         }
         for (int i = 0; i < method.paramSlots.length; i++) {
             int s = method.paramSlots[i];
@@ -1244,6 +1257,11 @@ public final class TypeAnalyzer {
                 if (scalarVolatileAliases.containsKey(slot) || scalarAtomAliases.containsKey(slot)) {
                     continue;
                 }
+                if (init instanceof ConstNode cn && cn.val instanceof CompiledFn cf) {
+                    localKnownFns.put(slot, cf.getFixedMethods());
+                } else if (init instanceof FnNode fnn) {
+                    localKnownFns.put(slot, fnn.fixedMethods);
+                }
                 ValType initT = analyzeNode(init);
                 ValType narrowed = ValType.narrow(initT, hintForSlot(slot));
                 if (!narrowed.equals(slotTypes[slot])) {
@@ -1847,6 +1865,18 @@ public final class TypeAnalyzer {
     private ValType checkSelfLocalCall(Node fnNode, ValType[] argTypes) {
         if (method.selfSlot != -1 && fnNode instanceof LocalNode ln && ln.slot == method.selfSlot) {
             return matchSelfCall(argTypes);
+        }
+        FnMethod[] fm = null;
+        if (fnNode instanceof LocalNode ln) {
+            fm = localKnownFns.get(ln.slot);
+        } else if (fnNode instanceof ConstNode cn && cn.val instanceof CompiledFn cf) {
+            fm = cf.getFixedMethods();
+        }
+        if (fm != null && argTypes.length < fm.length && fm[argTypes.length] != null) {
+            ValType rh = fm[argTypes.length].returnHint;
+            if (rh != null && rh.isPrimitive()) {
+                return rh;
+            }
         }
         return ValType.ANY;
     }

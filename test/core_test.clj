@@ -1737,6 +1737,118 @@
       (is (= 80000 @a))
       (is (pos? @seen)))))
 
+(defprotocol IPicTest (pic-op [this x]))
+(defrecord PicRecA [v]
+  IPicTest
+  (pic-op [_ x] (+ v x)))
+(defrecord PicRecB [v]
+  IPicTest
+  (pic-op [_ x] (* v x)))
+(extend-type nil
+  IPicTest
+  (pic-op [_ x] (- x)))
+
+(deftest phase1-to-5-improvements-test
+  (testing "Phase 1: Protocol PIC dispatch works with defrecord, extend-type, nil, reify, and cache invalidation"
+    (let [a (->PicRecA 10)
+          b (->PicRecB 3)
+          r1 (reify IPicTest (pic-op [_ x] (+ x 100)))
+          r2 (reify IPicTest (pic-op [_ x] (+ x 200)))]
+      (is (= 15 (pic-op a 5)))
+      (is (= 15 (pic-op b 5)))
+      ;; Exercise JIT-compiled defrecord direct getfield + Protocol.MethodFn invokePrim_OJ_J
+      (is (= 1725 (loop [i 0 s 0] (if (< i 50) (recur (inc i) (+ s (long (pic-op a i)))) s))))
+      (is (= -5 (pic-op nil 5)))
+      ;; Two reify instances sharing Proxy class must not poison each other's dispatch
+      (is (= 105 (pic-op r1 5)))
+      (is (= 205 (pic-op r2 5)))
+      ;; Cache invalidation on extend-type override
+      (extend-type PicRecA
+        IPicTest
+        (pic-op [this x] (+ (:v this) x 1000)))
+      (is (= 1015 (pic-op a 5)))))
+  (testing "Phase 2: LongRange, IReduceInit, chunked map/filter/keep/take/drop, transduce, into"
+    (let [r (range 1000)]
+      (is (counted? r))
+      (is (= 1000 (count r)))
+      (is (chunked-seq? r))
+      (is (= 499500 (reduce + 0 r)))
+      (is (= [10 8 6 4 2] (vec (range 10 0 -2))))
+      (is (= () (range 5 5)))
+      (is (= () (range 5 2 1)))
+      (is (= [0 1 2 3 4] (vec (take 5 (range))))))
+    (is (= 25005000 (reduce + 0 (filter even? (map inc (range 10000))))))
+    (is (= 25005000 (transduce (comp (map inc) (filter even?)) + 0 (range 10000))))
+    (is (= 5000 (count (into [] (comp (map inc) (filter even?)) (range 10000)))))
+    (is (= [2 4 6] (vec (take 3 (drop 1 (filter even? (range 20)))))))
+    (is (= [1 3 5] (vec (keep #(when (odd? %) %) (range 6)))))
+    (is (= "0,1,2,3,4" (clojure.string/join "," (range 5)))))
+  (testing "Phase 3: Keyword lookup fast path, HAMT maps, and ArraySeq sort"
+    (let [m {:a 1 :b 2 :c 3}]
+      (is (= 1 (:a m)))
+      (is (= 2 (:b m)))
+      (is (= :nf (:missing m :nf))))
+    (let [s (sort (rseq (vec (range 100))))]
+      (is (seq? s))
+      (is (counted? s))
+      (is (= 100 (count s)))
+      (is (= 0 (first s)))
+      (is (= 99 (last s)))))
+  (testing "Phase 4: Reader rejects nested #() and JIT stack traces include readable fn names"
+    (is (thrown? RuntimeException (read-string "#(#(+ % 1) %)")))
+    (let [boom-fn (fn my-jit-boom [n]
+                    (loop [i 0]
+                      (if (< i n) (recur (inc i)) (throw (IllegalStateException. "boom")))))]
+      (dotimes [_ 3]
+        (try (boom-fn 1000) (catch IllegalStateException _)))
+      (let [trace (try
+                    (boom-fn 1000)
+                    ""
+                    (catch IllegalStateException e
+                      (apply str (map str (.getStackTrace e)))))]
+        (is (.contains trace "my_jit_boom")))))
+  (testing "Math constant folding and unboxed primitive Fn dispatch"
+    (is (= 0.0 (Math/sin 0)))
+    (is (= 1.0 (Math/cos 0)))
+    (is (= 1.0 (StrictMath/cos 0)))
+    (is (= 8.0 (Math/pow 2 3)))
+    (is (= 5 (Math/abs -5)))
+    (is (= 5.5 (Math/abs -5.5)))
+    (let [f (fn ^double [^double x] (Math/sin x))
+          g (fn ^long [^long x] (+ x 10))
+          h (fn ^long [^long a ^long b] (+ a b))]
+      (is (= 0.0 (loop [i 0 s 0.0] (if (< i 50) (recur (inc i) (+ s (f 0.0))) s))))
+      (is (= 1725 (loop [i 0 s 0] (if (< i 50) (recur (inc i) (+ s (long (g i)))) s))))
+      (is (= 2450 (loop [i 0 s 0] (if (< i 50) (recur (inc i) (+ s (long (h i i)))) s)))))
+    ;; Verify non-long map transducer still works safely with LongRange
+    (is (= ["0" "1" "2"] (into [] (map str) (range 3))))
+    (is (= 90 (transduce (comp (map (fn [x] (* x 2))) (filter #(> % 0))) + 0 (range 1 10)))))
+  (testing "FastSort radix/merge/stability & LongArraySeq semantics"
+    ;; Radix sort with negative, MIN_VALUE, MAX_VALUE, duplicates (>256 elements)
+    (let [xs (concat [Long/MAX_VALUE Long/MIN_VALUE -1 0 1 -999999999999 999999999999]
+                     (map #(rem (* % 7919) 1000) (range 400)))
+          s (sort xs)]
+      (is (counted? s))
+      (is (= 407 (count s)))
+      (is (= Long/MIN_VALUE (first s)))
+      (is (= Long/MAX_VALUE (last s)))
+      (is (apply <= s))
+      (is (= (reduce +' 0 xs) (reduce +' 0 s)))
+      (is (= (vec s) (vec (sort s)))))
+    ;; Stability of sort-by on equal keys (both <256 merge and >=256 radix)
+    (let [items (mapv (fn [i] {:k (mod i 5) :id i}) (range 300))
+          sorted (vec (sort-by :k items))]
+      (is (= 300 (count sorted)))
+      (is (every? (fn [k]
+                    (let [ids (map :id (filter #(= k (:k %)) sorted))]
+                      (apply < ids)))
+                  (range 5))))
+    ;; Mixed Long/Double/String/nil sorts still preserve RT.compare semantics
+    (is (= [nil 1 2.0 3] (vec (sort [3 nil 2.0 1]))))
+    (is (= ["a" "b" "c"] (vec (sort ["c" "a" "b"]))))
+    (is (= [{:k "a" :i 1} {:k "a" :i 2} {:k "b" :i 0}]
+           (vec (sort-by :k [{:k "b" :i 0} {:k "a" :i 1} {:k "a" :i 2}]))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

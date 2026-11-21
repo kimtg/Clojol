@@ -225,6 +225,8 @@ public final class Core {
             @Override public Object invoke(Object a, Object b) { return Numbers.add(a, b); }
             @Override public Object invoke(Object a, Object b, Object c) { return Numbers.add(Numbers.add(a, b), c); }
             @Override public Object invoke(Object a, Object b, Object c, Object d) { return Numbers.add(Numbers.add(Numbers.add(a, b), c), d); }
+            @Override public boolean isUnboxedLong2() { return true; }
+            @Override public long invokePrim_JJ_J(long a, long b) { return Math.addExact(a, b); }
             @Override public Object invokeVarargs(Object[] args) {
                 if (args.length == 0) return 0L;
                 Object acc = args[0];
@@ -251,6 +253,8 @@ public final class Core {
             @Override public Object invoke(Object a) { return Numbers.minus(a); }
             @Override public Object invoke(Object a, Object b) { return Numbers.minus(a, b); }
             @Override public Object invoke(Object a, Object b, Object c) { return Numbers.minus(Numbers.minus(a, b), c); }
+            @Override public boolean isUnboxedLong2() { return true; }
+            @Override public long invokePrim_JJ_J(long a, long b) { return Math.subtractExact(a, b); }
             @Override public Object invokeVarargs(Object[] args) {
                 if (args.length == 0) throw arityError(0);
                 if (args.length == 1) return Numbers.minus(args[0]);
@@ -279,6 +283,8 @@ public final class Core {
             @Override public Object invoke(Object a, Object b) { return Numbers.multiply(a, b); }
             @Override public Object invoke(Object a, Object b, Object c) { return Numbers.multiply(Numbers.multiply(a, b), c); }
             @Override public Object invoke(Object a, Object b, Object c, Object d) { return Numbers.multiply(Numbers.multiply(Numbers.multiply(a, b), c), d); }
+            @Override public boolean isUnboxedLong2() { return true; }
+            @Override public long invokePrim_JJ_J(long a, long b) { return Math.multiplyExact(a, b); }
             @Override public Object invokeVarargs(Object[] args) {
                 if (args.length == 0) return 1L;
                 Object acc = args[0];
@@ -307,6 +313,8 @@ public final class Core {
         def(ns, "mod", new CoreFn2(6, "mod"));
         incFn = new Fn.NamedFn("inc") {
             @Override public Object invoke(Object x) { return Numbers.inc(x); }
+            @Override public boolean isUnboxedLong1() { return true; }
+            @Override public long invokePrim_J_J(long x) { return Numbers.incExact(x); }
         };
         def(ns, "inc", incFn);
         def(ns, "inc'", new Fn.NamedFn("inc'") {
@@ -314,6 +322,8 @@ public final class Core {
         });
         decFn = new Fn.NamedFn("dec") {
             @Override public Object invoke(Object x) { return Numbers.dec(x); }
+            @Override public boolean isUnboxedLong1() { return true; }
+            @Override public long invokePrim_J_J(long x) { return Numbers.decExact(x); }
         };
         def(ns, "dec", decFn);
         def(ns, "dec'", new Fn.NamedFn("dec'") {
@@ -501,10 +511,16 @@ public final class Core {
     }
 
     private static ISeq rangeSeq(long start, long end, long step) {
-        if ((step > 0 && start >= end) || (step < 0 && start <= end) || step == 0) {
+        ISeq lr = LongRange.createOrNull(start, end, step);
+        if (lr != null) return lr;
+        return rangeLazySeq(start, end, step);
+    }
+
+    private static ISeq rangeLazySeq(long start, long end, long step) {
+        if ((step > 0 && start >= end) || (step < 0 && start <= end) || (step == 0 && start == end)) {
             return PersistentList.EMPTY;
         }
-        return new LazySeq(Fn.of0("range", () -> new Cons(start, rangeSeq(start + step, end, step))));
+        return new LazySeq(Fn.of0("range", () -> new Cons(start, rangeLazySeq(start + step, end, step))));
     }
 
     private static ISeq repeatInfSeq(Object x) {
@@ -543,6 +559,17 @@ public final class Core {
         return new LazySeq(Fn.of0("take", () -> {
             ISeq sq = s.seq();
             if (sq == null) return null;
+            if (sq instanceof IChunkedSeq cs) {
+                IChunk c = cs.chunkedFirst();
+                int cnt = c.count();
+                if (n >= cnt) {
+                    return new ChunkedCons(c, takeSeq(n - cnt, cs.chunkedNext()));
+                }
+                int takeN = (int) n;
+                Object[] arr = new Object[takeN];
+                for (int i = 0; i < takeN; i++) arr[i] = c.nth(i);
+                return new ChunkedCons(new ArrayChunk(arr, 0, takeN), null);
+            }
             return new Cons(sq.first(), takeSeq(n - 1, sq.next()));
         }));
     }
@@ -577,6 +604,22 @@ public final class Core {
             ISeq s = RT.seq(coll);
             long k = n;
             while (s != null && k > 0) {
+                if (s instanceof IChunkedSeq cs) {
+                    IChunk c = cs.chunkedFirst();
+                    int cnt = c.count();
+                    if (k >= cnt) {
+                        k -= cnt;
+                        s = cs.chunkedNext();
+                        continue;
+                    }
+                    int off = (int) k;
+                    if (c instanceof ArrayChunk ac) {
+                        return new ChunkedCons(new ArrayChunk(ac.array, ac.off + off, ac.end), cs.chunkedNext());
+                    }
+                    Object[] arr = new Object[cnt - off];
+                    for (int i = off; i < cnt; i++) arr[i - off] = c.nth(i);
+                    return new ChunkedCons(new ArrayChunk(arr, 0, arr.length), cs.chunkedNext());
+                }
                 s = s.next();
                 k--;
             }
@@ -602,13 +645,66 @@ public final class Core {
         return PersistentList.create(all.subList(0, all.size() - n));
     }
 
-    private static ISeq map1Seq(Fn f, ISeq s) {
-        if (s == null) return null;
-        return new LazySeq(Fn.of0("map", () -> {
+    private static final class Map1LazySeq extends LazySeq {
+        private final Fn f;
+        private ISeq src;
+        Map1LazySeq(Fn f, ISeq src) {
+            super((PersistentHashMap) null);
+            this.f = f;
+            this.src = src;
+        }
+        @Override
+        protected Object compute() {
+            ISeq s = this.src;
+            this.src = null;
             ISeq sq = s.seq();
             if (sq == null) return null;
+            if (sq instanceof LongRange lr) {
+                int len = Math.min(LongRange.CHUNK_SIZE, lr.count());
+                Object[] arr = new Object[len];
+                long v = lr.start;
+                long step = lr.step;
+                if (f.isUnboxedLong1()) {
+                    for (int i = 0; i < len; i++) {
+                        arr[i] = Long.valueOf(f.invokePrim_J_J(v));
+                        v += step;
+                    }
+                } else {
+                    for (int i = 0; i < len; i++) {
+                        arr[i] = f.invoke(Long.valueOf(v));
+                        v += step;
+                    }
+                }
+                return new ChunkedCons(new ArrayChunk(arr, 0, len), map1Seq(f, lr.chunkedNext()));
+            }
+            if (sq instanceof IChunkedSeq cs) {
+                IChunk c = cs.chunkedFirst();
+                int n = c.count();
+                Object[] arr = new Object[n];
+                if (c instanceof ArrayChunk ac && ac.array instanceof Object[] srcArr) {
+                    int off = ac.off;
+                    if (f.isUnboxedLong1()) {
+                        for (int i = 0; i < n; i++) {
+                            Object elem = srcArr[off + i];
+                            arr[i] = (elem instanceof Long lv)
+                                    ? Long.valueOf(f.invokePrim_J_J(lv.longValue()))
+                                    : f.invoke(elem);
+                        }
+                    } else {
+                        for (int i = 0; i < n; i++) arr[i] = f.invoke(srcArr[off + i]);
+                    }
+                } else {
+                    for (int i = 0; i < n; i++) arr[i] = f.invoke(c.nth(i));
+                }
+                return new ChunkedCons(new ArrayChunk(arr, 0, n), map1Seq(f, cs.chunkedNext()));
+            }
             return new Cons(f.invoke(sq.first()), map1Seq(f, sq.next()));
-        }));
+        }
+    }
+
+    private static ISeq map1Seq(Fn f, ISeq s) {
+        if (s == null) return null;
+        return new Map1LazySeq(f, s);
     }
 
     private static ISeq mapNSeq(Fn f, ISeq[] seqs) {
@@ -640,6 +736,29 @@ public final class Core {
             while (sq != null) {
                 sq = sq.seq();
                 if (sq == null) return null;
+                if (sq instanceof IChunkedSeq cs) {
+                    IChunk c = cs.chunkedFirst();
+                    int n = c.count();
+                    ChunkBuffer cb = new ChunkBuffer(n);
+                    if (c instanceof ArrayChunk ac && ac.array instanceof Object[] src) {
+                        int off = ac.off;
+                        for (int i = 0; i < n; i++) {
+                            Object res = f.invoke(src[off + i]);
+                            if (res != null) cb.add(res);
+                        }
+                    } else {
+                        for (int i = 0; i < n; i++) {
+                            Object res = f.invoke(c.nth(i));
+                            if (res != null) cb.add(res);
+                        }
+                    }
+                    ISeq more = cs.chunkedNext();
+                    if (cb.count() > 0) {
+                        return new ChunkedCons(cb.chunk(), keepSeq(f, more));
+                    }
+                    sq = more;
+                    continue;
+                }
                 Object res = f.invoke(sq.first());
                 if (res != null) {
                     return new Cons(res, keepSeq(f, sq.next()));
@@ -668,12 +787,53 @@ public final class Core {
         }));
     }
 
-    private static ISeq filterSeq(Fn pred, ISeq s, boolean invert) {
-        return new LazySeq(Fn.of0("filter", () -> {
-            ISeq sq = s;
+    private static final class FilterLazySeq extends LazySeq {
+        private final Fn pred;
+        private ISeq src;
+        private final boolean invert;
+        FilterLazySeq(Fn pred, ISeq src, boolean invert) {
+            super((PersistentHashMap) null);
+            this.pred = pred;
+            this.src = src;
+            this.invert = invert;
+        }
+        @Override
+        protected Object compute() {
+            ISeq sq = this.src;
+            this.src = null;
             while (sq != null) {
                 sq = sq.seq();
                 if (sq == null) return null;
+                if (sq instanceof IChunkedSeq cs) {
+                    IChunk c = cs.chunkedFirst();
+                    int n = c.count();
+                    Object[] buf = new Object[n];
+                    int cnt = 0;
+                    if (c instanceof ArrayChunk ac && ac.array instanceof Object[] srcArr) {
+                        int off = ac.off;
+                        for (int i = 0; i < n; i++) {
+                            Object v = srcArr[off + i];
+                            boolean ok = (v instanceof Long lv)
+                                    ? pred.invokePrim_J_Z(lv.longValue())
+                                    : RT.truthy(pred.invoke(v));
+                            if (ok ^ invert) buf[cnt++] = v;
+                        }
+                    } else {
+                        for (int i = 0; i < n; i++) {
+                            Object v = c.nth(i);
+                            boolean ok = (v instanceof Long lv)
+                                    ? pred.invokePrim_J_Z(lv.longValue())
+                                    : RT.truthy(pred.invoke(v));
+                            if (ok ^ invert) buf[cnt++] = v;
+                        }
+                    }
+                    ISeq more = cs.chunkedNext();
+                    if (cnt > 0) {
+                        return new ChunkedCons(new ArrayChunk(buf, 0, cnt), filterSeq(pred, more, invert));
+                    }
+                    sq = more;
+                    continue;
+                }
                 Object v = sq.first();
                 boolean keep = RT.truthy(pred.invoke(v)) ^ invert;
                 if (keep) {
@@ -682,7 +842,12 @@ public final class Core {
                 sq = sq.next();
             }
             return null;
-        }));
+        }
+    }
+
+    private static ISeq filterSeq(Fn pred, ISeq s, boolean invert) {
+        if (s == null) return null;
+        return new FilterLazySeq(pred, s, invert);
     }
 
     private static PersistentVector mapvVectorRange(Fn f, PersistentVector pv, int start, int end) {
@@ -858,12 +1023,15 @@ public final class Core {
         return acc;
     }
 
-    private static Object reduce3(Fn f, Object init, Object coll) {
+    public static Object reduce3(Fn f, Object init, Object coll) {
         if (coll instanceof PersistentVector pv) {
             return reduceVectorRange(f, init, pv, 0, pv.cnt);
         }
         if (coll instanceof PersistentVector.SubVec sv) {
             return reduceVectorRange(f, init, sv.v, sv.start, sv.end);
+        }
+        if (coll instanceof IReduceInit ri) {
+            return ri.reduce(f, init);
         }
         if (coll instanceof PersistentList pl) {
             return reduceList(f, init, pl);
@@ -871,8 +1039,13 @@ public final class Core {
         if (coll instanceof PersistentList.EmptyList || coll == null) {
             return init;
         }
+        ISeq s = RT.seq(coll);
+        if (s == null) return init;
+        if (s instanceof IReduceInit ri) {
+            return ri.reduce(f, init);
+        }
         Object acc = init;
-        for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+        for (; s != null; s = s.next()) {
             acc = f.invoke(acc, s.first());
             if (acc instanceof Reduced r) return r.deref();
         }
@@ -1222,6 +1395,17 @@ public final class Core {
         });
     }
 
+    private static final Fn CONJ_RF = new Fn.NamedFn("conj") {
+        @Override public Object invoke() { return PersistentVector.EMPTY; }
+        @Override public Object invoke(Object x) { return x; }
+        @Override public Object invoke(Object a, Object b) { return RT.conj(a, b); }
+    };
+    private static final Fn CONJ_BANG_RF = new Fn.NamedFn("conj!") {
+        @Override public Object invoke() { return PersistentVector.EMPTY.asTransient(); }
+        @Override public Object invoke(Object x) { return x; }
+        @Override public Object invoke(Object a, Object b) { return RT.conjBang(a, b); }
+    };
+
     private static Object intoImpl(Object to, Fn xform, Object from) {
         if (to == null) to = PersistentList.EMPTY;
         if (xform == null) {
@@ -1237,32 +1421,78 @@ public final class Core {
                     }
                     return tv.persistent();
                 }
-                for (ISeq s = RT.seq(from); s != null; s = s.next()) tv = tv.conj(s.first());
+                if (from instanceof LongRange lr) {
+                    long v = lr.start;
+                    long step = lr.step;
+                    int n = lr.count();
+                    for (int i = 0; i < n; i++) {
+                        tv = tv.conj(Long.valueOf(v));
+                        v += step;
+                    }
+                    return tv.persistent();
+                }
+                if (from instanceof IReduceInit ri) {
+                    tv = (PersistentVector.TransientVector) ri.reduce(CONJ_BANG_RF, tv);
+                    return tv.persistent();
+                }
+                ISeq s = RT.seq(from);
+                if (s instanceof IReduceInit ri) {
+                    tv = (PersistentVector.TransientVector) ri.reduce(CONJ_BANG_RF, tv);
+                    return tv.persistent();
+                }
+                for (; s != null; s = s.next()) tv = tv.conj(s.first());
                 return tv.persistent();
             }
             if (to instanceof PersistentHashMap pm) {
                 PersistentHashMap.TransientHashMap tm = pm.asTransient();
-                for (ISeq s = RT.seq(from); s != null; s = s.next()) tm = (PersistentHashMap.TransientHashMap) RT.conjBang(tm, s.first());
+                if (from instanceof IReduceInit ri) {
+                    tm = (PersistentHashMap.TransientHashMap) ri.reduce(CONJ_BANG_RF, tm);
+                    return tm.persistent();
+                }
+                ISeq s = RT.seq(from);
+                if (s instanceof IReduceInit ri) {
+                    tm = (PersistentHashMap.TransientHashMap) ri.reduce(CONJ_BANG_RF, tm);
+                    return tm.persistent();
+                }
+                for (; s != null; s = s.next()) tm = (PersistentHashMap.TransientHashMap) RT.conjBang(tm, s.first());
                 return tm.persistent();
             }
             if (to instanceof PersistentHashSet ps) {
                 PersistentHashSet.TransientHashSet ts = ps.asTransient();
-                for (ISeq s = RT.seq(from); s != null; s = s.next()) ts = ts.conj(s.first());
+                if (from instanceof IReduceInit ri) {
+                    ts = (PersistentHashSet.TransientHashSet) ri.reduce(CONJ_BANG_RF, ts);
+                    return ts.persistent();
+                }
+                ISeq s = RT.seq(from);
+                if (s instanceof IReduceInit ri) {
+                    ts = (PersistentHashSet.TransientHashSet) ri.reduce(CONJ_BANG_RF, ts);
+                    return ts.persistent();
+                }
+                for (; s != null; s = s.next()) ts = ts.conj(s.first());
                 return ts.persistent();
             }
-            Object acc = to;
-            for (ISeq s = RT.seq(from); s != null; s = s.next()) acc = RT.conj(acc, s.first());
-            return acc;
+            return reduce3(CONJ_RF, to, from);
         }
-        Fn rf = (Fn) xform.invoke(Fn.of12("conj", x -> x, RT::conj));
-        Object acc = to;
-        for (ISeq s = RT.seq(from); s != null; s = s.next()) {
-            acc = rf.invoke(acc, s.first());
-            if (acc instanceof Reduced r) {
-                acc = r.deref();
-                break;
-            }
+        if (to instanceof PersistentVector pv) {
+            Fn rf = (Fn) xform.invoke(CONJ_BANG_RF);
+            Object acc = reduce3(rf, pv.asTransient(), from);
+            acc = rf.invoke(acc);
+            return ((PersistentVector.TransientVector) acc).persistent();
         }
+        if (to instanceof PersistentHashMap pm) {
+            Fn rf = (Fn) xform.invoke(CONJ_BANG_RF);
+            Object acc = reduce3(rf, pm.asTransient(), from);
+            acc = rf.invoke(acc);
+            return ((PersistentHashMap.TransientHashMap) acc).persistent();
+        }
+        if (to instanceof PersistentHashSet ps) {
+            Fn rf = (Fn) xform.invoke(CONJ_BANG_RF);
+            Object acc = reduce3(rf, ps.asTransient(), from);
+            acc = rf.invoke(acc);
+            return ((PersistentHashSet.TransientHashSet) acc).persistent();
+        }
+        Fn rf = (Fn) xform.invoke(CONJ_RF);
+        Object acc = reduce3(rf, to, from);
         return rf.invoke(acc);
     }
 
@@ -2288,6 +2518,16 @@ public final class Core {
         private final int id;
         CoreFn1(int id, String name) { super(name); this.id = id; }
         @Override public Object invoke(Object a) { return call1(id, a); }
+        @Override public boolean invokePrim_J_Z(long a) {
+            return switch (id) {
+                case 19 -> a == 0L;
+                case 20 -> a > 0L;
+                case 21 -> a < 0L;
+                case 22 -> (a & 1L) == 0L;
+                case 23 -> (a & 1L) != 0L;
+                default -> RT.truthy(call1(id, Long.valueOf(a)));
+            };
+        }
     }
 
     private static final class CoreFn2 extends Fn.NamedFn {
@@ -2592,10 +2832,11 @@ public final class Core {
             }
             case 86: {
                 Object coll = _a;
-            if (coll == null) return PersistentVector.EMPTY;
-            if (coll instanceof PersistentVector pv) return pv;
-            return PersistentVector.createFromISeq(RT.seq(coll));
-        
+                if (coll == null) return PersistentVector.EMPTY;
+                if (coll instanceof PersistentVector pv) return pv;
+                if (coll instanceof LongRange lr) return PersistentVector.createFromLongRange(lr);
+                if (coll instanceof LongArraySeq las) return PersistentVector.createFromLongArraySeq(las);
+                return PersistentVector.createFromISeq(RT.seq(coll));
             }
             case 87: {
                 Object coll = _a;
@@ -2677,11 +2918,7 @@ public final class Core {
     private static Object call1_3(int _id, Object _a) {
         switch (_id) {
             case 96: {
-                Object coll = _a;
-                    Object[] arr = RT.toArray(coll);
-                    Arrays.sort(arr, RT::compare);
-                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
-                
+                return FastSort.sort(_a);
             }
             case 97: {
                 Object coll = _a;
@@ -3267,19 +3504,10 @@ public final class Core {
                 
             }
             case 60: {
-                Object cmp = _a; Object coll = _b;
-                    Object[] arr = RT.toArray(coll);
-                    Arrays.sort(arr, toComparator(cmp));
-                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
-                
+                return FastSort.sort(toComparator(_a), _b);
             }
             case 61: {
-                Object keyfn = _a; Object coll = _b;
-                    Fn kf = (Fn) keyfn;
-                    Object[] arr = RT.toArray(coll);
-                    Arrays.sort(arr, (a, b) -> RT.compare(kf.invoke(a), kf.invoke(b)));
-                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
-                
+                return FastSort.sortBy((Fn) _a, _b);
             }
             case 62: { Object s = _a; Object start = _b; return (((String) s).substring((int) Numbers.toLong(start))); }
             case 63: { Object nsName = _a; Object name = _b; return (Symbol.intern((String) nsName, (String) name)); }
@@ -3437,10 +3665,7 @@ public final class Core {
             case 13: {
                 Object keyfn = _a; Object cmp = _b; Object coll = _c;
                     Fn kf = (Fn) keyfn;
-                    Comparator<Object> c = toComparator(cmp);
-                    Object[] arr = RT.toArray(coll);
-                    Arrays.sort(arr, (a, b) -> c.compare(kf.invoke(a), kf.invoke(b)));
-                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
+                    return FastSort.sortBy(kf, toComparator(cmp), coll);
                 
             }
             case 14: { Object s = _a; Object start = _b; Object end = _c; return (((String) s).substring((int) Numbers.toLong(start), (int) Numbers.toLong(end))); }
@@ -3881,6 +4106,25 @@ public final class Core {
                 Object[] fns = _args;
             if (fns.length == 0) return Fn.of1("identity", x -> x);
             if (fns.length == 1) return fns[0];
+            if (fns.length == 2) {
+                Fn f0 = (Fn) fns[0], f1 = (Fn) fns[1];
+                return new Fn.NamedFn("comp") {
+                    @Override public Object invoke() { return f0.invoke(f1.invoke()); }
+                    @Override public Object invoke(Object a) { return f0.invoke(f1.invoke(a)); }
+                    @Override public Object invoke(Object a, Object b) { return f0.invoke(f1.invoke(a, b)); }
+                    @Override public Object invoke(Object a, Object b, Object c) { return f0.invoke(f1.invoke(a, b, c)); }
+                    @Override public Object invokeVarargs(Object[] args) { return f0.invoke(f1.applyTo(args)); }
+                };
+            }
+            if (fns.length == 3) {
+                Fn f0 = (Fn) fns[0], f1 = (Fn) fns[1], f2 = (Fn) fns[2];
+                return new Fn.NamedFn("comp") {
+                    @Override public Object invoke() { return f0.invoke(f1.invoke(f2.invoke())); }
+                    @Override public Object invoke(Object a) { return f0.invoke(f1.invoke(f2.invoke(a))); }
+                    @Override public Object invoke(Object a, Object b) { return f0.invoke(f1.invoke(f2.invoke(a, b))); }
+                    @Override public Object invokeVarargs(Object[] args) { return f0.invoke(f1.invoke(f2.applyTo(args))); }
+                };
+            }
             return Fn.ofVarargs("comp", args -> {
                 Object res = ((Fn) fns[fns.length - 1]).applyTo(args);
                 for (int i = fns.length - 2; i >= 0; i--) {

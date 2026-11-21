@@ -7,10 +7,12 @@ import cljl.RT;
  * Thunk-backed memoized lazy sequence.
  * Unwraps nested LazySeq instances iteratively to prevent stack overflow on deep lazy chains.
  */
-public final class LazySeq extends ASeq {
+public class LazySeq extends ASeq implements IReduceInit {
     private volatile Fn fn;
     private Object sv;
-    private volatile ISeq s;
+    private ISeq s;
+    private boolean computed;
+    private volatile boolean realized;
 
     public LazySeq(Fn fn) {
         super(null);
@@ -21,6 +23,12 @@ public final class LazySeq extends ASeq {
         super(meta);
         this.fn = null;
         this.s = s;
+        this.computed = true;
+        this.realized = true;
+    }
+
+    protected LazySeq(PersistentHashMap meta) {
+        super(meta);
     }
 
     private LazySeq(PersistentHashMap meta, Fn fn) {
@@ -28,10 +36,20 @@ public final class LazySeq extends ASeq {
         this.fn = fn;
     }
 
+    /** Subclasses may override to avoid allocating a separate Fn thunk object per lazy node. */
+    protected Object compute() {
+        return fn.invoke();
+    }
+
     private synchronized Object sval() {
-        if (fn != null) {
-            sv = fn.invoke();
+        if (!computed) {
+            computed = true;
+            sv = compute();
             fn = null;
+            if (sv == null) {
+                s = null;
+                realized = true;
+            }
         }
         if (sv != null) {
             return sv;
@@ -40,8 +58,18 @@ public final class LazySeq extends ASeq {
     }
 
     @Override
-    public synchronized ISeq seq() {
-        sval();
+    public ISeq seq() {
+        if (realized) return s;
+        return seqSlow();
+    }
+
+    private synchronized ISeq seqSlow() {
+        if (realized) return s;
+        if (!computed) {
+            computed = true;
+            sv = compute();
+            fn = null;
+        }
         if (sv != null) {
             Object ls = sv;
             while (ls instanceof LazySeq lseq) {
@@ -52,11 +80,12 @@ public final class LazySeq extends ASeq {
             sv = null;
             s = res;
         }
+        realized = true;
         return s;
     }
 
     public boolean isRealized() {
-        return fn == null;
+        return realized;
     }
 
     @Override
@@ -92,9 +121,22 @@ public final class LazySeq extends ASeq {
     }
 
     @Override
+    public Object reduce(Fn f, Object init) {
+        ISeq sq = seq();
+        if (sq == null) return init;
+        if (sq instanceof IReduceInit ri) return ri.reduce(f, init);
+        Object acc = init;
+        for (; sq != null; sq = sq.next()) {
+            acc = f.invoke(acc, sq.first());
+            if (acc instanceof Reduced r) return r.deref();
+        }
+        return acc;
+    }
+
+    @Override
     public LazySeq withMeta(PersistentHashMap meta) {
         if (this.meta == meta) return this;
-        if (fn == null && sv == null) {
+        if (realized) {
             return new LazySeq(meta, s);
         }
         return new LazySeq(meta, Fn.of0("lazy-meta", this::seq));

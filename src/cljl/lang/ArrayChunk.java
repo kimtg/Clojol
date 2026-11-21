@@ -56,11 +56,23 @@ public final class ArrayChunk implements IChunk {
 
     @Override
     public Object reduce(Fn f, Object start) {
+        Object acc = reduceRaw(f, start);
+        return (acc instanceof Reduced r) ? r.deref() : acc;
+    }
+
+    public Object reduceRaw(Fn f, Object start) {
         Object acc = start;
+        if (isObjArray) {
+            Object[] arr = (Object[]) array;
+            for (int i = off; i < end; i++) {
+                acc = f.invoke(acc, arr[i]);
+                if (acc instanceof Reduced) return acc;
+            }
+            return acc;
+        }
         for (int i = off; i < end; i++) {
-            Object elem = isObjArray ? ((Object[]) array)[i] : Array.get(array, i);
-            acc = f.invoke(acc, elem);
-            if (acc instanceof Reduced r) return r.deref();
+            acc = f.invoke(acc, Array.get(array, i));
+            if (acc instanceof Reduced) return acc;
         }
         return acc;
     }

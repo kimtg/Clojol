@@ -20,12 +20,15 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
     public static final Object UNBOUND = new Object() {
         @Override public String toString() { return "#<Unbound>"; }
     };
+    private static final Object SLOW_SENTINEL = new Object();
 
     private static final ThreadLocal<Deque<Map<Var, Object>>> BINDING_STACK = new ThreadLocal<>();
 
     public final Namespace ns;
     public final Symbol sym;
     private volatile Object root;
+    // Equals root when !dynamic && root != UNBOUND; SLOW_SENTINEL otherwise (single-load fast path).
+    private volatile Object fastRoot;
     private volatile boolean dynamic;
     private volatile boolean macro;
     private volatile PersistentHashMap meta;
@@ -35,6 +38,7 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
         this.ns = ns;
         this.sym = sym;
         this.root = UNBOUND;
+        this.fastRoot = SLOW_SENTINEL;
         this.meta = PersistentHashMap.EMPTY;
     }
 
@@ -50,7 +54,13 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
         this.ns = ns;
         this.sym = sym;
         this.root = root;
+        this.fastRoot = (root == UNBOUND) ? SLOW_SENTINEL : root;
         this.meta = PersistentHashMap.EMPTY;
+    }
+
+    private void refreshFastRoot() {
+        Object r = this.root;
+        this.fastRoot = (this.dynamic || r == UNBOUND) ? SLOW_SENTINEL : r;
     }
 
     public static void pushThreadBindings(Map<Var, Object> bindings) {
@@ -95,6 +105,11 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
     }
 
     public Object get() {
+        Object v = fastRoot;
+        return v != SLOW_SENTINEL ? v : getSlow();
+    }
+
+    private Object getSlow() {
         if (dynamic) {
             Deque<Map<Var, Object>> stack = BINDING_STACK.get();
             if (stack != null && !stack.isEmpty()) {
@@ -113,11 +128,18 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
 
     @Override
     public Object deref() {
-        Object v = get();
-        if (v == UNBOUND) {
-            throw new IllegalStateException("Var " + getName() + " is unbound.");
-        }
+        Object v = fastRoot;
+        return v != SLOW_SENTINEL ? v : derefSlow();
+    }
+
+    private Object derefSlow() {
+        Object v = getSlow();
+        if (v == UNBOUND) throwUnbound();
         return v;
+    }
+
+    private void throwUnbound() {
+        throw new IllegalStateException("Var " + getName() + " is unbound.");
     }
 
     public boolean isBound() {
@@ -145,6 +167,7 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
             Core.coreRedefined = true;
         }
         this.root = val;
+        refreshFastRoot();
         notifyWatches(old, val);
         return this;
     }
@@ -169,12 +192,14 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
         }
         Object newVal = fn.applyTo(allArgs);
         this.root = newVal;
+        refreshFastRoot();
         notifyWatches(old, newVal);
         return newVal;
     }
 
     public Var setDynamic() {
         this.dynamic = true;
+        this.fastRoot = SLOW_SENTINEL;
         return this;
     }
 
@@ -183,6 +208,7 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
             Core.coreRedefined = true;
         }
         this.dynamic = b;
+        refreshFastRoot();
         return this;
     }
 
@@ -220,6 +246,7 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
         this.meta = m != null ? m : PersistentHashMap.EMPTY;
         if (RT.truthy(this.meta.valAt(Keyword.intern("dynamic")))) {
             this.dynamic = true;
+            this.fastRoot = SLOW_SENTINEL;
         }
         if (RT.truthy(this.meta.valAt(Keyword.intern("macro")))) {
             this.macro = true;

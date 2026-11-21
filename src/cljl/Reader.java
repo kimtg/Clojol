@@ -712,6 +712,9 @@ public final class Reader {
     }
 
     private Object readAnonFn() {
+        if (fnEnvStack != null && !fnEnvStack.isEmpty()) {
+            throw readerError("Nested #()s are not allowed");
+        }
         if (fnEnvStack == null) fnEnvStack = new ArrayDeque<>();
         FnEnv env = new FnEnv();
         fnEnvStack.push(env);

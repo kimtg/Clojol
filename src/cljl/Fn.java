@@ -67,6 +67,17 @@ public abstract class Fn implements Callable<Object>, Runnable,
         throw arityError(args.length);
     }
 
+    // Primitive-specialized dispatch hooks overridden by BytecodeJIT, core ops, Protocol.MethodFn, and transducers.
+    public boolean isUnboxedLong1() { return false; }
+    public boolean isUnboxedLong2() { return false; }
+    public long invokePrim_J_J(long a) { return Numbers.longCast(invoke(Long.valueOf(a))); }
+    public double invokePrim_D_D(double a) { return Numbers.toDouble(invoke(Double.valueOf(a))); }
+    public boolean invokePrim_J_Z(long a) { return RT.truthy(invoke(Long.valueOf(a))); }
+    public long invokePrim_JJ_J(long a, long b) { return Numbers.longCast(invoke(Long.valueOf(a), Long.valueOf(b))); }
+    public double invokePrim_DD_D(double a, double b) { return Numbers.toDouble(invoke(Double.valueOf(a), Double.valueOf(b))); }
+    public long invokePrim_OJ_J(Object a, long b) { return Numbers.longCast(invoke(a, Long.valueOf(b))); }
+    public Object invokePrim_OJ_O(Object a, long b) { return invoke(a, Long.valueOf(b)); }
+
     public Object applyTo(Object[] args) {
         if (args == null || args.length == 0) return invoke();
         return switch (args.length) {
@@ -222,6 +233,15 @@ public abstract class Fn implements Callable<Object>, Runnable,
         @Override public Object invoke(Object a, Object b, Object c, Object d) { return fn.invoke(a, b, c, d); }
         @Override public Object invokeVarargs(Object[] args) { return fn.invokeVarargs(args); }
         @Override public Object applyTo(Object[] args) { return fn.applyTo(args); }
+        @Override public boolean isUnboxedLong1() { return fn.isUnboxedLong1(); }
+        @Override public boolean isUnboxedLong2() { return fn.isUnboxedLong2(); }
+        @Override public long invokePrim_J_J(long a) { return fn.invokePrim_J_J(a); }
+        @Override public double invokePrim_D_D(double a) { return fn.invokePrim_D_D(a); }
+        @Override public boolean invokePrim_J_Z(long a) { return fn.invokePrim_J_Z(a); }
+        @Override public long invokePrim_JJ_J(long a, long b) { return fn.invokePrim_JJ_J(a, b); }
+        @Override public double invokePrim_DD_D(double a, double b) { return fn.invokePrim_DD_D(a, b); }
+        @Override public long invokePrim_OJ_J(Object a, long b) { return fn.invokePrim_OJ_J(a, b); }
+        @Override public Object invokePrim_OJ_O(Object a, long b) { return fn.invokePrim_OJ_O(a, b); }
         @Override public String getName() { return fn.getName(); }
         @Override public cljl.lang.PersistentHashMap meta() { return meta; }
         @Override public Object withMeta(cljl.lang.PersistentHashMap m) {

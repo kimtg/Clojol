@@ -10,6 +10,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -25,6 +26,11 @@ public final class BytecodeJIT {
     private static final boolean STRICT_JIT = Boolean.getBoolean("cljl.jit.strict");
     private static final AtomicInteger CLASS_ID = new AtomicInteger(0);
     private static final JitClassLoader LOADER = new JitClassLoader();
+    private static final ConcurrentHashMap<String, Object[]> PENDING_CONSTS = new ConcurrentHashMap<>();
+
+    public static Object[] takePendingConsts(String key) {
+        return PENDING_CONSTS.remove(key);
+    }
 
     // JVM Opcodes
     private static final int ACONST_NULL = 0x01;
@@ -153,6 +159,8 @@ public final class BytecodeJIT {
 
         @Override
         protected Class<?> findClass(String name) throws ClassNotFoundException {
+            Class<?> dyn = TypeFactory.findDynamicClass(name);
+            if (dyn != null) return dyn;
             ClassLoader rt = RT.baseLoader();
             if (rt != null && rt != this && rt != getParent()) {
                 return rt.loadClass(name);
@@ -346,21 +354,48 @@ public final class BytecodeJIT {
         return false;
     }
 
+    private static String sanitizeClassName(String raw) {
+        if (raw == null || raw.isEmpty()) return "Fn";
+        StringBuilder sb = new StringBuilder(Math.min(raw.length(), 40));
+        for (int i = 0; i < raw.length() && sb.length() < 40; i++) {
+            char c = raw.charAt(i);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+                sb.append(c);
+            } else if (c == '-' || c == '/' || c == '.') {
+                sb.append('_');
+            }
+        }
+        if (sb.length() == 0 || (sb.charAt(0) >= '0' && sb.charAt(0) <= '9')) {
+            sb.insert(0, "Fn_");
+        }
+        return sb.toString();
+    }
+
     public static Fn compile(CompiledFn cf) {
         if (!canCompile(cf)) return null;
         try {
             int id = CLASS_ID.incrementAndGet();
-            String internalName = "cljl/jit/Fn$" + id;
-            String binaryName = "cljl.jit.Fn$" + id;
+            String fnBase = sanitizeClassName(cf.getName());
+            String internalName = "cljl/jit/" + fnBase + "$" + id;
+            String binaryName = "cljl.jit." + fnBase + "$" + id;
+            String sourceFile = (cf.getName() != null && !cf.getName().isEmpty()) ? (cf.getName() + ".clj") : "cljl.clj";
 
-            ClassEmitter ce = new ClassEmitter(internalName);
+            ClassEmitter ce = new ClassEmitter(internalName, sourceFile);
             emitMethods(ce, cf);
             byte[] bytecode = ce.toByteArray();
 
-            Class<?> cls = LOADER.define(binaryName, bytecode);
-            Constructor<?> ctor = cls.getConstructor(
-                    Object[].class, Object[][].class, String.class, CompiledFn.class);
-            return (Fn) ctor.newInstance(ce.constObjects.toArray(), cf.getCaptured(), cf.getName(), cf);
+            boolean hasConsts = !ce.constObjects.isEmpty();
+            if (hasConsts) {
+                PENDING_CONSTS.put(internalName, ce.constObjects.toArray());
+            }
+            try {
+                Class<?> cls = LOADER.define(binaryName, bytecode);
+                Constructor<?> ctor = cls.getConstructor(
+                        Object[][].class, String.class, CompiledFn.class);
+                return (Fn) ctor.newInstance(cf.getCaptured(), cf.getName(), cf);
+            } finally {
+                if (hasConsts) PENDING_CONSTS.remove(internalName);
+            }
         } catch (Throwable t) {
             if (STRICT_JIT) {
                 throw new RuntimeException("BytecodeJIT compilation failed for " + cf.getName(), t);
@@ -443,7 +478,7 @@ public final class BytecodeJIT {
     // Method & Specialization Planning
     // ========================================================================
 
-    private static final class SlotLayout {
+    static final class SlotLayout {
         final ValType[] slotTypes;
         final int[] jvmSlot;
         final int totalLocals;
@@ -485,12 +520,31 @@ public final class BytecodeJIT {
         AnalysisResult genericVariadic = variadic != null ? TypeAnalyzer.analyzeGeneric(variadic, cf) : null;
 
         // Pass 2: emit primitive specialized methods
+        boolean hasUnboxedLong1 = false;
+        boolean hasUnboxedLong2 = false;
         for (Map.Entry<Integer, List<PrimSpec>> e : ce.primSpecsByArity.entrySet()) {
             int arity = e.getKey();
             FnMethod m = fixed[arity];
             for (PrimSpec ps : e.getValue()) {
                 emitPrimInvoke(ce, m, arity, arity, ps, genericFixed[arity]);
+                if ("invokePrim_J_J".equals(ps.methodName) && "(J)J".equals(ps.descriptor)) {
+                    hasUnboxedLong1 = true;
+                } else if ("invokePrim_JJ_J".equals(ps.methodName) && "(JJ)J".equals(ps.descriptor)) {
+                    hasUnboxedLong2 = true;
+                }
             }
+        }
+        if (hasUnboxedLong1) {
+            CodeGen cg = ce.beginMethod("isUnboxedLong1", "()Z", 1);
+            cg.iconst(1);
+            cg.ireturn();
+            cg.finish();
+        }
+        if (hasUnboxedLong2) {
+            CodeGen cg = ce.beginMethod("isUnboxedLong2", "()Z", 1);
+            cg.iconst(1);
+            cg.ireturn();
+            cg.finish();
         }
 
         // Pass 3: emit invoke()..invoke(Object,Object,Object,Object) for fixed arities 0..4,
@@ -755,691 +809,11 @@ public final class BytecodeJIT {
         cg.finish();
     }
 
-    private static final class LinearRecSpec {
-        final Node baseBranch;
-        final Node recBranch;
-        final int paramSlot;
-        final Var ownerVar;
-        final int selfSlot;
-        final long baseThreshold; // strict '<' threshold B (>= 0)
-        final long cMin;
-        final long cMax;
-        final long t1;            // B + cMax
-        final long safeMaxInput;  // provably overflow-free upper bound
-        final int[] expOffsets;   // frontier-expanded + CSE'd distinct self-call offsets
-        final long[] expWeights;  // corresponding signed coefficients
-        final long expConst;      // expanded constant addend
-
-        LinearRecSpec(Node baseBranch, Node recBranch, int paramSlot, Var ownerVar, int selfSlot,
-                      long baseThreshold, long cMin, long cMax, long t1, long safeMaxInput,
-                      int[] expOffsets, long[] expWeights, long expConst) {
-            this.baseBranch = baseBranch;
-            this.recBranch = recBranch;
-            this.paramSlot = paramSlot;
-            this.ownerVar = ownerVar;
-            this.selfSlot = selfSlot;
-            this.baseThreshold = baseThreshold;
-            this.cMin = cMin;
-            this.cMax = cMax;
-            this.t1 = t1;
-            this.safeMaxInput = safeMaxInput;
-            this.expOffsets = expOffsets;
-            this.expWeights = expWeights;
-            this.expConst = expConst;
-        }
-    }
-
-    private static Node getLinearSelfCallArg(Node n, Var ownerVar, int selfSlot) {
-        if (n instanceof Call1Node c && c.fn instanceof LocalNode ln && ln.slot == selfSlot) {
-            return c.a;
-        }
-        if (n instanceof VarCall1Node vc && ownerVar != null && vc.v == ownerVar) {
-            return vc.a;
-        }
-        return null;
-    }
-
-    private static long extractLinearDecrement(Node arg, int paramSlot) {
-        if (arg instanceof DecNode d && d.a instanceof LocalNode ln && ln.slot == paramSlot) return 1L;
-        if (arg instanceof UncheckedDecNode d && d.a instanceof LocalNode ln && ln.slot == paramSlot) return 1L;
-        if (arg instanceof Sub2Node s && s.a instanceof LocalNode ln && ln.slot == paramSlot
-                && s.b instanceof ConstNode cn && cn.val instanceof Long l) {
-            long c = l.longValue();
-            return (c >= 1L && c <= 4L) ? c : -1L;
-        }
-        if (arg instanceof UncheckedSub2Node s && s.a instanceof LocalNode ln && ln.slot == paramSlot
-                && s.b instanceof ConstNode cn && cn.val instanceof Long l) {
-            long c = l.longValue();
-            return (c >= 1L && c <= 4L) ? c : -1L;
-        }
-        if (arg instanceof Add2Node a) {
-            if (a.a instanceof LocalNode ln && ln.slot == paramSlot
-                    && a.b instanceof ConstNode cn && cn.val instanceof Long l) {
-                long c = -l.longValue();
-                return (c >= 1L && c <= 4L) ? c : -1L;
-            }
-            if (a.b instanceof LocalNode ln && ln.slot == paramSlot
-                    && a.a instanceof ConstNode cn && cn.val instanceof Long l) {
-                long c = -l.longValue();
-                return (c >= 1L && c <= 4L) ? c : -1L;
-            }
-        }
-        if (arg instanceof UncheckedAdd2Node a) {
-            if (a.a instanceof LocalNode ln && ln.slot == paramSlot
-                    && a.b instanceof ConstNode cn && cn.val instanceof Long l) {
-                long c = -l.longValue();
-                return (c >= 1L && c <= 4L) ? c : -1L;
-            }
-            if (a.b instanceof LocalNode ln && ln.slot == paramSlot
-                    && a.a instanceof ConstNode cn && cn.val instanceof Long l) {
-                long c = -l.longValue();
-                return (c >= 1L && c <= 4L) ? c : -1L;
-            }
-        }
-        return -1L;
-    }
-
-    private static long[] analyzeLinearRecExpr(Node expr, int paramSlot, Var ownerVar, int selfSlot, long[] bounds) {
-        Node selfArg = getLinearSelfCallArg(expr, ownerVar, selfSlot);
-        if (selfArg != null) {
-            long dec = extractLinearDecrement(selfArg, paramSlot);
-            if (dec < 1L) return null;
-            bounds[0]++;
-            if (dec < bounds[1]) bounds[1] = dec;
-            if (dec > bounds[2]) bounds[2] = dec;
-            return new long[]{1L, 0L};
-        }
-        if (expr instanceof ConstNode cn && cn.val instanceof Long l) {
-            long v = l.longValue();
-            if (v < -1000L || v > 1000L) return null;
-            return new long[]{0L, Math.abs(v)};
-        }
-        if (expr instanceof Add2Node a) {
-            long[] la = analyzeLinearRecExpr(a.a, paramSlot, ownerVar, selfSlot, bounds);
-            long[] lb = analyzeLinearRecExpr(a.b, paramSlot, ownerVar, selfSlot, bounds);
-            if (la == null || lb == null) return null;
-            long mult = la[0] + lb[0], add = la[1] + lb[1];
-            return (mult <= 64L && add <= 10000L) ? new long[]{mult, add} : null;
-        }
-        if (expr instanceof UncheckedAdd2Node a) {
-            long[] la = analyzeLinearRecExpr(a.a, paramSlot, ownerVar, selfSlot, bounds);
-            long[] lb = analyzeLinearRecExpr(a.b, paramSlot, ownerVar, selfSlot, bounds);
-            if (la == null || lb == null) return null;
-            long mult = la[0] + lb[0], add = la[1] + lb[1];
-            return (mult <= 64L && add <= 10000L) ? new long[]{mult, add} : null;
-        }
-        if (expr instanceof Sub2Node a) {
-            long[] la = analyzeLinearRecExpr(a.a, paramSlot, ownerVar, selfSlot, bounds);
-            long[] lb = analyzeLinearRecExpr(a.b, paramSlot, ownerVar, selfSlot, bounds);
-            if (la == null || lb == null) return null;
-            long mult = la[0] + lb[0], add = la[1] + lb[1];
-            return (mult <= 64L && add <= 10000L) ? new long[]{mult, add} : null;
-        }
-        if (expr instanceof UncheckedSub2Node a) {
-            long[] la = analyzeLinearRecExpr(a.a, paramSlot, ownerVar, selfSlot, bounds);
-            long[] lb = analyzeLinearRecExpr(a.b, paramSlot, ownerVar, selfSlot, bounds);
-            if (la == null || lb == null) return null;
-            long mult = la[0] + lb[0], add = la[1] + lb[1];
-            return (mult <= 64L && add <= 10000L) ? new long[]{mult, add} : null;
-        }
-        if (expr instanceof Mul2Node m) {
-            if (m.a instanceof ConstNode cn && cn.val instanceof Long l) {
-                long k = Math.abs(l.longValue());
-                if (k < 1L || k > 16L) return null;
-                long[] lb = analyzeLinearRecExpr(m.b, paramSlot, ownerVar, selfSlot, bounds);
-                if (lb == null) return null;
-                long mult = k * lb[0], add = k * lb[1];
-                return (mult <= 64L && add <= 10000L) ? new long[]{mult, add} : null;
-            }
-            if (m.b instanceof ConstNode cn && cn.val instanceof Long l) {
-                long k = Math.abs(l.longValue());
-                if (k < 1L || k > 16L) return null;
-                long[] la = analyzeLinearRecExpr(m.a, paramSlot, ownerVar, selfSlot, bounds);
-                if (la == null) return null;
-                long mult = k * la[0], add = k * la[1];
-                return (mult <= 64L && add <= 10000L) ? new long[]{mult, add} : null;
-            }
-            return null;
-        }
-        if (expr instanceof UncheckedMul2Node m) {
-            if (m.a instanceof ConstNode cn && cn.val instanceof Long l) {
-                long k = Math.abs(l.longValue());
-                if (k < 1L || k > 16L) return null;
-                long[] lb = analyzeLinearRecExpr(m.b, paramSlot, ownerVar, selfSlot, bounds);
-                if (lb == null) return null;
-                long mult = k * lb[0], add = k * lb[1];
-                return (mult <= 64L && add <= 10000L) ? new long[]{mult, add} : null;
-            }
-            if (m.b instanceof ConstNode cn && cn.val instanceof Long l) {
-                long k = Math.abs(l.longValue());
-                if (k < 1L || k > 16L) return null;
-                long[] la = analyzeLinearRecExpr(m.a, paramSlot, ownerVar, selfSlot, bounds);
-                if (la == null) return null;
-                long mult = k * la[0], add = k * la[1];
-                return (mult <= 64L && add <= 10000L) ? new long[]{mult, add} : null;
-            }
-            return null;
-        }
-        if (expr instanceof IncNode u) {
-            long[] la = analyzeLinearRecExpr(u.a, paramSlot, ownerVar, selfSlot, bounds);
-            return (la != null && la[1] + 1L <= 10000L) ? new long[]{la[0], la[1] + 1L} : null;
-        }
-        if (expr instanceof UncheckedIncNode u) {
-            long[] la = analyzeLinearRecExpr(u.a, paramSlot, ownerVar, selfSlot, bounds);
-            return (la != null && la[1] + 1L <= 10000L) ? new long[]{la[0], la[1] + 1L} : null;
-        }
-        if (expr instanceof DecNode u) {
-            long[] la = analyzeLinearRecExpr(u.a, paramSlot, ownerVar, selfSlot, bounds);
-            return (la != null && la[1] + 1L <= 10000L) ? new long[]{la[0], la[1] + 1L} : null;
-        }
-        if (expr instanceof UncheckedDecNode u) {
-            long[] la = analyzeLinearRecExpr(u.a, paramSlot, ownerVar, selfSlot, bounds);
-            return (la != null && la[1] + 1L <= 10000L) ? new long[]{la[0], la[1] + 1L} : null;
-        }
-        if (expr instanceof NegateNode u) {
-            return analyzeLinearRecExpr(u.a, paramSlot, ownerVar, selfSlot, bounds);
-        }
-        if (expr instanceof UncheckedNegateNode u) {
-            return analyzeLinearRecExpr(u.a, paramSlot, ownerVar, selfSlot, bounds);
-        }
-        return null;
-    }
-
-    private static LinearRecSpec matchLinearDecrementRec(ClassEmitter ce, FnMethod m, int arity, PrimSpec ps) {
-        if (arity != 1) return null;
-        if (ps.paramTypes[0] != ValType.LONG || ps.analysis.returnType != ValType.LONG) return null;
-        if (!(m.body instanceof IfNode iff)) return null;
-        int paramSlot = m.paramSlots[0];
-
-        Node baseBranch = null;
-        Node recBranch = null;
-        long baseThreshold = -1L;
-
-        if (iff.test instanceof Lt2Node cmp) {
-            if (cmp.a instanceof LocalNode ln && ln.slot == paramSlot && cmp.b instanceof ConstNode cn && cn.val instanceof Long l) {
-                baseThreshold = l.longValue();
-                baseBranch = iff.thenNode;
-                recBranch = iff.elseNode;
-            } else if (cmp.b instanceof LocalNode ln && ln.slot == paramSlot && cmp.a instanceof ConstNode cn && cn.val instanceof Long l) {
-                long c = l.longValue();
-                if (c < Long.MAX_VALUE) {
-                    baseThreshold = c + 1L;
-                    baseBranch = iff.elseNode;
-                    recBranch = iff.thenNode;
-                }
-            }
-        } else if (iff.test instanceof Lte2Node cmp) {
-            if (cmp.a instanceof LocalNode ln && ln.slot == paramSlot && cmp.b instanceof ConstNode cn && cn.val instanceof Long l) {
-                long c = l.longValue();
-                if (c < Long.MAX_VALUE) {
-                    baseThreshold = c + 1L;
-                    baseBranch = iff.thenNode;
-                    recBranch = iff.elseNode;
-                }
-            } else if (cmp.b instanceof LocalNode ln && ln.slot == paramSlot && cmp.a instanceof ConstNode cn && cn.val instanceof Long l) {
-                baseThreshold = l.longValue();
-                baseBranch = iff.elseNode;
-                recBranch = iff.thenNode;
-            }
-        } else if (iff.test instanceof Gte2Node cmp) {
-            if (cmp.a instanceof LocalNode ln && ln.slot == paramSlot && cmp.b instanceof ConstNode cn && cn.val instanceof Long l) {
-                baseThreshold = l.longValue();
-                baseBranch = iff.elseNode;
-                recBranch = iff.thenNode;
-            } else if (cmp.b instanceof LocalNode ln && ln.slot == paramSlot && cmp.a instanceof ConstNode cn && cn.val instanceof Long l) {
-                long c = l.longValue();
-                if (c < Long.MAX_VALUE) {
-                    baseThreshold = c + 1L;
-                    baseBranch = iff.thenNode;
-                    recBranch = iff.elseNode;
-                }
-            }
-        } else if (iff.test instanceof Gt2Node cmp) {
-            if (cmp.a instanceof LocalNode ln && ln.slot == paramSlot && cmp.b instanceof ConstNode cn && cn.val instanceof Long l) {
-                long c = l.longValue();
-                if (c < Long.MAX_VALUE) {
-                    baseThreshold = c + 1L;
-                    baseBranch = iff.elseNode;
-                    recBranch = iff.thenNode;
-                }
-            } else if (cmp.b instanceof LocalNode ln && ln.slot == paramSlot && cmp.a instanceof ConstNode cn && cn.val instanceof Long l) {
-                baseThreshold = l.longValue();
-                baseBranch = iff.thenNode;
-                recBranch = iff.elseNode;
-            }
-        }
-
-        if (baseBranch == null || baseThreshold < 0L || baseThreshold > 16L) return null;
-
-        long[] bounds = new long[]{0L, Long.MAX_VALUE, 0L};
-        long[] growth = analyzeLinearRecExpr(recBranch, paramSlot, ce.ownerVar, m.selfSlot, bounds);
-        if (growth == null || bounds[0] != 2L) return null;
-        long cMin = bounds[1];
-        long cMax = bounds[2];
-        if (cMin < 1L || cMax > 4L) return null;
-
-        // Base branch must be a simple overflow-free expression with a provable magnitude bound on [B - cMax, B - 1]
-        long baseBound;
-        if (baseBranch instanceof LocalNode ln && ln.slot == paramSlot) {
-            baseBound = Math.max(1L, Math.max(Math.abs(baseThreshold - 1L), Math.abs(baseThreshold - cMax)));
-        } else if (baseBranch instanceof ConstNode cn && cn.val instanceof Long l) {
-            long k = l.longValue();
-            if (k < -1_000_000L || k > 1_000_000L) return null;
-            baseBound = Math.max(1L, Math.abs(k));
-        } else {
-            return null;
-        }
-
-        long t1 = baseThreshold + cMax;
-        long origMult = Math.max(2L, growth[0]);
-        long origConstAdd = growth[1];
-
-        // Extract exact affine linear form: f(n) = sum(origCoeff[c] * f(n - c)) + origConst
-        long[] origCoeff = new long[16];
-        long[] origConstOut = new long[1];
-        extractAffineRec(recBranch, paramSlot, ce.ownerVar, m.selfSlot, origCoeff, origConstOut, 1L);
-        long origConst = origConstOut[0];
-
-        // General 2-step frontier expansion + pure-call CSE (valid for all n >= t1 = B + cMax):
-        // Expand the minimum active offset dMin <= cMax and combine like self-call offsets.
-        long[] expCoeff = origCoeff.clone();
-        long expConst = origConst;
-        for (int step = 0; step < 2; step++) {
-            int dMin = -1;
-            for (int d = 1; d < expCoeff.length; d++) {
-                if (expCoeff[d] != 0L) { dMin = d; break; }
-            }
-            if (dMin < 0 || dMin > cMax) break;
-            long w = expCoeff[dMin];
-            long[] nextCoeff = expCoeff.clone();
-            nextCoeff[dMin] = 0L;
-            boolean ok = true;
-            for (int c = 1; c <= 4; c++) {
-                long oc = origCoeff[c];
-                if (oc == 0L) continue;
-                int nd = dMin + c;
-                if (nd >= nextCoeff.length) { ok = false; break; }
-                nextCoeff[nd] += w * oc;
-            }
-            if (!ok) break;
-            long nextConst = expConst + w * origConst;
-            int distinct = 0;
-            long sumAbsW = 0L;
-            for (int d = 1; d < nextCoeff.length; d++) {
-                if (nextCoeff[d] != 0L) {
-                    distinct++;
-                    sumAbsW += Math.abs(nextCoeff[d]);
-                }
-            }
-            if (distinct > 3 || sumAbsW > 64L || Math.abs(nextConst) > 100_000L) break;
-            expCoeff = nextCoeff;
-            expConst = nextConst;
-        }
-
-        int distinct = 0;
-        long expSumAbsW = 0L;
-        for (int d = 1; d < expCoeff.length; d++) {
-            if (expCoeff[d] != 0L) {
-                distinct++;
-                expSumAbsW += Math.abs(expCoeff[d]);
-            }
-        }
-        int[] expOffsets = new int[distinct];
-        long[] expWeights = new long[distinct];
-        int idx = 0;
-        for (int d = 1; d < expCoeff.length; d++) {
-            if (expCoeff[d] != 0L) {
-                expOffsets[idx] = d;
-                expWeights[idx] = expCoeff[d];
-                idx++;
-            }
-        }
-
-        // Prove overflow-free upper bound for both original & expanded terms:
-        // expSumAbsW * (baseBound + origConstAdd) * origMult^steps + |expConst| <= Long.MAX_VALUE / 4
-        long denom = Math.max(1L, Math.max(1L, expSumAbsW) * (baseBound + origConstAdd) + Math.abs(expConst));
-        long limit = (Long.MAX_VALUE / 4L) / denom;
-        long prod = 1L;
-        int maxSteps = 0;
-        while (prod <= limit / origMult) {
-            prod *= origMult;
-            maxSteps++;
-        }
-        long safeMaxInput = (maxSteps >= 2) ? (baseThreshold + (long) (maxSteps - 1) * cMin) : -1L;
-        if (safeMaxInput < t1) return null;
-
-        return new LinearRecSpec(baseBranch, recBranch, paramSlot, ce.ownerVar, m.selfSlot,
-                baseThreshold, cMin, cMax, t1, safeMaxInput, expOffsets, expWeights, expConst);
-    }
-
-    private static void extractAffineRec(
-            Node expr, int paramSlot, Var ownerVar, int selfSlot,
-            long[] coeff, long[] constOut, long scale) {
-        Node selfArg = getLinearSelfCallArg(expr, ownerVar, selfSlot);
-        if (selfArg != null) {
-            int dec = (int) extractLinearDecrement(selfArg, paramSlot);
-            coeff[dec] += scale;
-            return;
-        }
-        if (expr instanceof ConstNode cn) {
-            constOut[0] += scale * ((Long) cn.val).longValue();
-            return;
-        }
-        if (expr instanceof Add2Node a) {
-            extractAffineRec(a.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
-            extractAffineRec(a.b, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
-            return;
-        }
-        if (expr instanceof UncheckedAdd2Node a) {
-            extractAffineRec(a.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
-            extractAffineRec(a.b, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
-            return;
-        }
-        if (expr instanceof Sub2Node a) {
-            extractAffineRec(a.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
-            extractAffineRec(a.b, paramSlot, ownerVar, selfSlot, coeff, constOut, -scale);
-            return;
-        }
-        if (expr instanceof UncheckedSub2Node a) {
-            extractAffineRec(a.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
-            extractAffineRec(a.b, paramSlot, ownerVar, selfSlot, coeff, constOut, -scale);
-            return;
-        }
-        if (expr instanceof Mul2Node m) {
-            if (m.a instanceof ConstNode cn) {
-                extractAffineRec(m.b, paramSlot, ownerVar, selfSlot, coeff, constOut, scale * ((Long) cn.val).longValue());
-            } else {
-                extractAffineRec(m.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale * ((Long) ((ConstNode) m.b).val).longValue());
-            }
-            return;
-        }
-        if (expr instanceof UncheckedMul2Node m) {
-            if (m.a instanceof ConstNode cn) {
-                extractAffineRec(m.b, paramSlot, ownerVar, selfSlot, coeff, constOut, scale * ((Long) cn.val).longValue());
-            } else {
-                extractAffineRec(m.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale * ((Long) ((ConstNode) m.b).val).longValue());
-            }
-            return;
-        }
-        if (expr instanceof IncNode u) {
-            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
-            constOut[0] += scale;
-            return;
-        }
-        if (expr instanceof UncheckedIncNode u) {
-            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
-            constOut[0] += scale;
-            return;
-        }
-        if (expr instanceof DecNode u) {
-            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
-            constOut[0] -= scale;
-            return;
-        }
-        if (expr instanceof UncheckedDecNode u) {
-            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
-            constOut[0] -= scale;
-            return;
-        }
-        if (expr instanceof NegateNode u) {
-            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, -scale);
-            return;
-        }
-        if (expr instanceof UncheckedNegateNode u) {
-            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, -scale);
-        }
-    }
-
-    private static final int LINEAR_MODE_ALL_BASE = 0;
-    private static final int LINEAR_MODE_SMALL1 = 1;
-
-    private static void emitLinearParamMinus(CodeGen cg, int paramJvmSlot, long offset) {
-        cg.lload(paramJvmSlot);
-        if (offset != 0L) {
-            cg.ldcLong(offset);
-            cg.lsub();
-        }
-    }
-
-    private static void emitLinearBase(CodeGen cg, LinearRecSpec spec, int paramJvmSlot, long paramOffset) {
-        if (spec.baseBranch instanceof LocalNode) {
-            emitLinearParamMinus(cg, paramJvmSlot, paramOffset);
-        } else {
-            cg.ldcLong(((Long) ((ConstNode) spec.baseBranch).val).longValue());
-        }
-    }
-
-    private static void emitLinearExpr(
-            CodeGen cg, Node expr, LinearRecSpec spec, int paramJvmSlot, long paramOffset, int tmpSlot,
-            int mode, String className, String s1Name) {
-        Node selfArg = getLinearSelfCallArg(expr, spec.ownerVar, spec.selfSlot);
-        if (selfArg != null) {
-            long dec = extractLinearDecrement(selfArg, spec.paramSlot);
-            long totalOff = paramOffset + dec;
-            if (mode == LINEAR_MODE_ALL_BASE) {
-                emitLinearBase(cg, spec, paramJvmSlot, totalOff);
-            } else if (spec.t1 - totalOff <= spec.baseThreshold) {
-                // Provably < baseThreshold: emit base directly with zero branches
-                emitLinearBase(cg, spec, paramJvmSlot, totalOff);
-            } else {
-                int stackAtBranch = cg.curStack;
-                emitLinearParamMinus(cg, paramJvmSlot, totalOff);
-                cg.lstore(tmpSlot);
-                Label recLbl = new Label();
-                Label doneLbl = new Label();
-                cg.lload(tmpSlot);
-                cg.ldcLong(spec.baseThreshold);
-                cg.lcmp();
-                cg.ifge(recLbl);
-                emitLinearBase(cg, spec, tmpSlot, 0L);
-                cg.gotoLabel(doneLbl);
-                cg.curStack = stackAtBranch;
-                cg.markLabel(recLbl);
-                if (spec.t1 - totalOff - spec.cMin <= spec.baseThreshold) {
-                    emitLinearExpr(cg, spec.recBranch, spec, tmpSlot, 0L, tmpSlot,
-                            LINEAR_MODE_ALL_BASE, className, s1Name);
-                } else {
-                    cg.lload(tmpSlot);
-                    cg.invokestatic(className, s1Name, "(J)J", 2, 2);
-                }
-                cg.markLabel(doneLbl);
-                cg.curStack = stackAtBranch + 2;
-            }
-            return;
-        }
-        if (expr instanceof ConstNode cn) {
-            cg.ldcLong(((Long) cn.val).longValue());
-            return;
-        }
-        if (expr instanceof Add2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.ladd();
-            return;
-        }
-        if (expr instanceof UncheckedAdd2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.ladd();
-            return;
-        }
-        if (expr instanceof Sub2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.lsub();
-            return;
-        }
-        if (expr instanceof UncheckedSub2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.lsub();
-            return;
-        }
-        if (expr instanceof Mul2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.lmul();
-            return;
-        }
-        if (expr instanceof UncheckedMul2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.lmul();
-            return;
-        }
-        if (expr instanceof IncNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.ldcLong(1L);
-            cg.ladd();
-            return;
-        }
-        if (expr instanceof UncheckedIncNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.ldcLong(1L);
-            cg.ladd();
-            return;
-        }
-        if (expr instanceof DecNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.ldcLong(1L);
-            cg.lsub();
-            return;
-        }
-        if (expr instanceof UncheckedDecNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.ldcLong(1L);
-            cg.lsub();
-            return;
-        }
-        if (expr instanceof NegateNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.lneg();
-            return;
-        }
-        if (expr instanceof UncheckedNegateNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
-            cg.lneg();
-        }
-    }
-
-    private static void emitLinearDecrementWorkers(
-            ClassEmitter ce, FnMethod m, PrimSpec ps, String fastName, LinearRecSpec spec) {
-        String s1Name = fastName + "_s1";
-        String coreName = fastName + "_core";
-
-        // 1. s1(long n): handles n < T1 with dead-branch pruning
-        {
-            CodeGen cg = ce.beginStaticMethod(s1Name, "(J)J", 4);
-            Label recLbl = new Label();
-            cg.lload(0);
-            cg.ldcLong(spec.baseThreshold);
-            cg.lcmp();
-            cg.ifge(recLbl);
-            emitLinearBase(cg, spec, 0, 0L);
-            cg.emitReturnInstruction(ValType.LONG);
-            cg.curStack = 0;
-            cg.markLabel(recLbl);
-            emitLinearExpr(cg, spec.recBranch, spec, 0, 0L, 2, LINEAR_MODE_SMALL1, ce.className, s1Name);
-            cg.emitReturnInstruction(ValType.LONG);
-            cg.finish();
-        }
-
-        // 2. core(long n): precondition T1 <= n <= safeMaxInput; frontier-expanded + CSE'd pure calls
-        {
-            CodeGen cg = ce.beginStaticMethod(coreName, "(J)J", 4);
-            if (spec.expOffsets.length == 0) {
-                cg.ldcLong(spec.expConst);
-            } else {
-                for (int i = 0; i < spec.expOffsets.length; i++) {
-                    int off = spec.expOffsets[i];
-                    long w = spec.expWeights[i];
-                    int stackAtBranch = cg.curStack;
-                    emitLinearParamMinus(cg, 0, off);
-                    cg.lstore(2);
-                    Label recLbl = new Label();
-                    Label doneLbl = new Label();
-                    cg.lload(2);
-                    cg.ldcLong(spec.t1);
-                    cg.lcmp();
-                    cg.ifge(recLbl);
-                    cg.lload(2);
-                    cg.invokestatic(ce.className, s1Name, "(J)J", 2, 2);
-                    cg.gotoLabel(doneLbl);
-                    cg.curStack = stackAtBranch;
-                    cg.markLabel(recLbl);
-                    cg.lload(2);
-                    cg.invokestatic(ce.className, coreName, "(J)J", 2, 2);
-                    cg.markLabel(doneLbl);
-                    cg.curStack = stackAtBranch + 2;
-                    if (w == -1L) {
-                        cg.lneg();
-                    } else if (w == 2L) {
-                        cg.dup2();
-                        cg.ladd();
-                    } else if (w != 1L) {
-                        cg.ldcLong(w);
-                        cg.lmul();
-                    }
-                    if (i > 0) {
-                        cg.ladd();
-                    }
-                }
-                if (spec.expConst != 0L) {
-                    cg.ldcLong(spec.expConst);
-                    cg.ladd();
-                }
-            }
-            cg.emitReturnInstruction(ValType.LONG);
-            cg.finish();
-        }
-
-        // 3. fast(long n): provably overflow-free range dispatch + exact checked fallback for n > safeMaxInput
-        {
-            SlotLayout layout = new SlotLayout(m, ps.analysis.slotTypes, 2);
-            layout.jvmSlot[m.paramSlots[0]] = 0;
-            CodeGen cg = ce.beginStaticMethod(fastName, "(J)J", layout.totalLocals);
-            cg.setContext(m, ps.analysis, layout);
-            cg.staticFastSelfSpec = ps;
-            cg.staticFastSelfMethodName = fastName;
-            cg.staticFastSelfCanInline = false;
-            cg.staticFastSelfInlineDepth = 0;
-
-            Label checkedFallback = new Label();
-            cg.lload(0);
-            cg.ldcLong(spec.safeMaxInput);
-            cg.lcmp();
-            cg.ifgt(checkedFallback);
-
-            Label coreLbl = new Label();
-            cg.lload(0);
-            cg.ldcLong(spec.t1);
-            cg.lcmp();
-            cg.ifge(coreLbl);
-            cg.lload(0);
-            cg.invokestatic(ce.className, s1Name, "(J)J", 2, 2);
-            cg.emitReturnInstruction(ValType.LONG);
-
-            cg.curStack = 0;
-            cg.markLabel(coreLbl);
-            cg.lload(0);
-            cg.invokestatic(ce.className, coreName, "(J)J", 2, 2);
-            cg.emitReturnInstruction(ValType.LONG);
-
-            cg.curStack = 0;
-            cg.markLabel(checkedFallback);
-            boolean terminated = cg.emitReturnTyped(m.body, ValType.LONG);
-            if (!terminated) {
-                cg.emitReturnInstruction(ValType.LONG);
-            }
-            cg.finish();
-        }
-    }
-
     private static void emitStaticFastPrimWorker(
             ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName, boolean canSelfInline) {
-        LinearRecSpec linearSpec = matchLinearDecrementRec(ce, m, arity, ps);
+        LinearRecOptimizer.LinearRecSpec linearSpec = LinearRecOptimizer.matchLinearDecrementRec(ce, m, arity, ps);
         if (linearSpec != null) {
-            emitLinearDecrementWorkers(ce, m, ps, fastName, linearSpec);
+            LinearRecOptimizer.emitLinearDecrementWorkers(ce, m, ps, fastName, linearSpec);
             return;
         }
 
@@ -1765,7 +1139,7 @@ public final class BytecodeJIT {
     // Minimal JVM ClassFile Emitter (Version 49.0 — no StackMapTable required)
     // ========================================================================
 
-    private static final class Label {
+    static final class Label {
         int pos = -1;
         final List<int[]> fixups = new ArrayList<>();
         final List<int[]> wideFixups = new ArrayList<>();
@@ -1775,13 +1149,14 @@ public final class BytecodeJIT {
 
     private record ExceptionEntry(Label start, Label end, Label handler, int catchTypeCpIdx) {}
 
-    private static final class ClassEmitter {
+    static final class ClassEmitter {
         final String className;
+        final String sourceFile;
         FnMethod[] fixedMethods;
         CompiledFn ownerFn;
         Var ownerVar;
         final Map<Integer, List<PrimSpec>> primSpecsByArity = new LinkedHashMap<>();
-        final ConstantPool cp = new ConstantPool();
+        final JitConstantPool cp = new JitConstantPool();
         final List<Object> constObjects = new ArrayList<>();
         final IdentityHashMap<Object, Integer> constIndexMap = new IdentityHashMap<>();
         final List<byte[]> methodInfos = new ArrayList<>();
@@ -1789,13 +1164,17 @@ public final class BytecodeJIT {
         final int thisClassIdx;
         final int superClassIdx;
         final int codeAttrNameIdx;
+        final int sourceFileAttrNameIdx;
+        final int sourceFileUtfIdx;
 
-        ClassEmitter(String className) {
+        ClassEmitter(String className, String sourceFile) {
             this.className = className;
+            this.sourceFile = sourceFile;
             this.thisClassIdx = cp.addClass(className);
             this.superClassIdx = cp.addClass("cljl/Fn");
             this.codeAttrNameIdx = cp.addUtf8("Code");
-            cp.addFieldref(className, "consts", "[Ljava/lang/Object;");
+            this.sourceFileAttrNameIdx = cp.addUtf8("SourceFile");
+            this.sourceFileUtfIdx = cp.addUtf8(sourceFile);
             cp.addFieldref(className, "captured", "[[Ljava/lang/Object;");
             cp.addFieldref(className, "name", "Ljava/lang/String;");
             cp.addFieldref(className, "outerFn", "Lcljl/Compiler$CompiledFn;");
@@ -1824,22 +1203,36 @@ public final class BytecodeJIT {
         private void emitConstructor() {
             CodeGen cg = beginMethod(
                     "<init>",
-                    "([Ljava/lang/Object;[[Ljava/lang/Object;Ljava/lang/String;Lcljl/Compiler$CompiledFn;)V",
-                    5);
+                    "([[Ljava/lang/Object;Ljava/lang/String;Lcljl/Compiler$CompiledFn;)V",
+                    4);
             cg.aload(0);
             cg.invokespecial("cljl/Fn", "<init>", "()V", 1, 0);
             cg.aload(0);
             cg.aload(1);
-            cg.putfield(className, "consts", "[Ljava/lang/Object;");
-            cg.aload(0);
-            cg.aload(2);
             cg.putfield(className, "captured", "[[Ljava/lang/Object;");
             cg.aload(0);
-            cg.aload(3);
+            cg.aload(2);
             cg.putfield(className, "name", "Ljava/lang/String;");
             cg.aload(0);
-            cg.aload(4);
+            cg.aload(3);
             cg.putfield(className, "outerFn", "Lcljl/Compiler$CompiledFn;");
+            cg.vreturn();
+            cg.finish();
+        }
+
+        private void emitClinitForConsts() {
+            int n = constObjects.size();
+            if (n == 0) return;
+            CodeGen cg = new CodeGen(this, 0x0008, "<clinit>", "()V", 1);
+            cg.ldcString(className);
+            cg.invokestatic("cljl/BytecodeJIT", "takePendingConsts", "(Ljava/lang/String;)[Ljava/lang/Object;", 1, 1);
+            cg.astore(0);
+            for (int i = 0; i < n; i++) {
+                cg.aload(0);
+                cg.iconst(i);
+                cg.aaload();
+                cg.putstatic(className, "k" + i, "Ljava/lang/Object;", 1);
+            }
             cg.vreturn();
             cg.finish();
         }
@@ -1853,6 +1246,21 @@ public final class BytecodeJIT {
         }
 
         byte[] toByteArray() throws IOException {
+            emitClinitForConsts();
+            // Pre-intern field name/desc Utf8 entries before writing constant pool
+            int nConsts = constObjects.size();
+            int[] kNameIdxs = new int[nConsts];
+            int objDescIdx = cp.addUtf8("Ljava/lang/Object;");
+            for (int i = 0; i < nConsts; i++) {
+                kNameIdxs[i] = cp.addUtf8("k" + i);
+            }
+            int capNameIdx = cp.addUtf8("captured");
+            int capDescIdx = cp.addUtf8("[[Ljava/lang/Object;");
+            int nameNameIdx = cp.addUtf8("name");
+            int strDescIdx = cp.addUtf8("Ljava/lang/String;");
+            int outerNameIdx = cp.addUtf8("outerFn");
+            int outerDescIdx = cp.addUtf8("Lcljl/Compiler$CompiledFn;");
+
             ByteArrayOutputStream baos = new ByteArrayOutputStream(1024);
             DataOutputStream out = new DataOutputStream(baos);
 
@@ -1867,161 +1275,37 @@ public final class BytecodeJIT {
             out.writeShort(superClassIdx);
             out.writeShort(0); // interfaces count
 
-            // 4 fields: consts, captured, name, outerFn
-            out.writeShort(4);
-            writeField(out, 0x0012, "consts", "[Ljava/lang/Object;");
-            writeField(out, 0x0012, "captured", "[[Ljava/lang/Object;");
-            writeField(out, 0x0012, "name", "Ljava/lang/String;");
-            writeField(out, 0x0012, "outerFn", "Lcljl/Compiler$CompiledFn;");
+            // 3 instance fields + nConsts static final constant fields (trusted as compile-time constants by HotSpot C2)
+            out.writeShort(3 + nConsts);
+            writeFieldIdx(out, 0x0012, capNameIdx, capDescIdx);
+            writeFieldIdx(out, 0x0012, nameNameIdx, strDescIdx);
+            writeFieldIdx(out, 0x0012, outerNameIdx, outerDescIdx);
+            for (int i = 0; i < nConsts; i++) {
+                writeFieldIdx(out, 0x001A, kNameIdxs[i], objDescIdx); // PRIVATE | STATIC | FINAL
+            }
 
             out.writeShort(methodInfos.size());
             for (byte[] m : methodInfos) {
                 out.write(m);
             }
 
-            out.writeShort(0);
+            out.writeShort(1); // SourceFile attribute
+            out.writeShort(sourceFileAttrNameIdx);
+            out.writeInt(2);
+            out.writeShort(sourceFileUtfIdx);
             out.flush();
             return baos.toByteArray();
         }
 
-        private void writeField(DataOutputStream out, int flags, String name, String desc) throws IOException {
+        private void writeFieldIdx(DataOutputStream out, int flags, int nameIdx, int descIdx) throws IOException {
             out.writeShort(flags);
-            out.writeShort(cp.addUtf8(name));
-            out.writeShort(cp.addUtf8(desc));
+            out.writeShort(nameIdx);
+            out.writeShort(descIdx);
             out.writeShort(0);
         }
     }
 
-    private static final class ConstantPool {
-        private final ByteArrayOutputStream buf = new ByteArrayOutputStream(512);
-        private int count = 1;
-        private final Map<String, Integer> utf8Map = new HashMap<>();
-        private final Map<String, Integer> classMap = new HashMap<>();
-        private final Map<String, Integer> strMap = new HashMap<>();
-        private final Map<String, Integer> natMap = new HashMap<>();
-        private final Map<String, Integer> refMap = new HashMap<>();
-        private final Map<Integer, Integer> intMap = new HashMap<>();
-        private final Map<Long, Integer> longMap = new HashMap<>();
-        private final Map<Double, Integer> doubleMap = new HashMap<>();
-
-        int addUtf8(String s) {
-            return utf8Map.computeIfAbsent(s, k -> {
-                try {
-                    ByteArrayOutputStream tmp = new ByteArrayOutputStream();
-                    DataOutputStream d = new DataOutputStream(tmp);
-                    d.writeByte(1);
-                    d.writeUTF(k);
-                    buf.write(tmp.toByteArray());
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-                return count++;
-            });
-        }
-
-        int addClass(String internalName) {
-            return classMap.computeIfAbsent(internalName, k -> {
-                int nameIdx = addUtf8(k);
-                buf.write(7);
-                writeShort(nameIdx);
-                return count++;
-            });
-        }
-
-        int addString(String s) {
-            return strMap.computeIfAbsent(s, k -> {
-                int utfIdx = addUtf8(k);
-                buf.write(8);
-                writeShort(utfIdx);
-                return count++;
-            });
-        }
-
-        int addInteger(int v) {
-            return intMap.computeIfAbsent(v, k -> {
-                buf.write(3);
-                buf.write((k >>> 24) & 0xff);
-                buf.write((k >>> 16) & 0xff);
-                buf.write((k >>> 8) & 0xff);
-                buf.write(k & 0xff);
-                return count++;
-            });
-        }
-
-        int addLong(long v) {
-            return longMap.computeIfAbsent(v, k -> {
-                buf.write(5);
-                writeLong(k);
-                int idx = count;
-                count += 2;
-                return idx;
-            });
-        }
-
-        int addDouble(double v) {
-            return doubleMap.computeIfAbsent(v, k -> {
-                buf.write(6);
-                writeLong(Double.doubleToRawLongBits(k));
-                int idx = count;
-                count += 2;
-                return idx;
-            });
-        }
-
-        int addNameAndType(String name, String desc) {
-            String key = name + "\0" + desc;
-            return natMap.computeIfAbsent(key, k -> {
-                int n = addUtf8(name);
-                int d = addUtf8(desc);
-                buf.write(12);
-                writeShort(n);
-                writeShort(d);
-                return count++;
-            });
-        }
-
-        int addFieldref(String owner, String name, String desc) {
-            return addRef(9, owner, name, desc);
-        }
-
-        int addMethodref(String owner, String name, String desc) {
-            return addRef(10, owner, name, desc);
-        }
-
-        int addInterfaceMethodref(String owner, String name, String desc) {
-            return addRef(11, owner, name, desc);
-        }
-
-        private int addRef(int tag, String owner, String name, String desc) {
-            String key = tag + "\0" + owner + "\0" + name + "\0" + desc;
-            return refMap.computeIfAbsent(key, k -> {
-                int c = addClass(owner);
-                int nat = addNameAndType(name, desc);
-                buf.write(tag);
-                writeShort(c);
-                writeShort(nat);
-                return count++;
-            });
-        }
-
-        private void writeShort(int v) {
-            buf.write((v >>> 8) & 0xff);
-            buf.write(v & 0xff);
-        }
-
-        private void writeLong(long v) {
-            for (int i = 56; i >= 0; i -= 8) {
-                buf.write((int) ((v >>> i) & 0xff));
-            }
-        }
-
-        void writeTo(DataOutputStream out) throws IOException {
-            out.writeShort(count);
-            out.write(buf.toByteArray());
-        }
-    }
-
-    private static final class CodeGen {
+    static final class CodeGen {
         final ClassEmitter ce;
         final int accessFlags;
         final int nameIdx;
@@ -2384,6 +1668,14 @@ public final class BytecodeJIT {
             adjStack(width);
         }
 
+        void putstatic(String owner, String name, String desc, int width) {
+            int idx = ce.cp.addFieldref(owner, name, desc);
+            code.write(0xb3); // PUTSTATIC
+            code.write((idx >>> 8) & 0xff);
+            code.write(idx & 0xff);
+            adjStack(-width);
+        }
+
         void getfield(String owner, String name, String desc, int width) {
             int idx = ce.cp.addFieldref(owner, name, desc);
             code.write(GETFIELD);
@@ -2436,10 +1728,7 @@ public final class BytecodeJIT {
 
         void loadConstObj(Object obj) {
             int cIdx = ce.addConstObject(obj);
-            aload(0);
-            getfield(ce.className, "consts", "[Ljava/lang/Object;", 1);
-            iconst(cIdx);
-            aaload();
+            getstatic(ce.className, "k" + cIdx, "Ljava/lang/Object;", 1);
         }
 
         // ====================================================================
@@ -3131,6 +2420,10 @@ public final class BytecodeJIT {
                     }
                     return false;
                 }
+                if (!lc.unchecked) {
+                    int primRes = tryEmitPrimCall(lc.a, ValType.LONG);
+                    if (primRes != 0) return primRes == 2;
+                }
                 if (emitBoxed(lc.a)) return true;
                 invokestatic("cljl/Numbers", lc.unchecked ? "uncheckedLong" : "longCast", "(Ljava/lang/Object;)J", 1, 2);
                 return false;
@@ -3484,6 +2777,8 @@ public final class BytecodeJIT {
             if (tryEmitSelfCall(node, ValType.LONG)) {
                 return false;
             }
+            int primLongRes = tryEmitPrimCall(node, ValType.LONG);
+            if (primLongRes != 0) return primLongRes == 2;
 
             if (emitBoxedImpl(node)) return true;
             invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J", 1, 2);
@@ -3547,6 +2842,8 @@ public final class BytecodeJIT {
                     l2d();
                     return false;
                 }
+                int primRes = tryEmitPrimCall(dc.a, ValType.DOUBLE);
+                if (primRes != 0) return primRes == 2;
                 if (emitBoxed(dc.a)) return true;
                 invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D", 1, 2);
                 return false;
@@ -3766,9 +3063,91 @@ public final class BytecodeJIT {
                 l2d();
                 return false;
             }
+            int primDblRes = tryEmitPrimCall(node, ValType.DOUBLE);
+            if (primDblRes != 0) return primDblRes == 2;
             if (emitBoxedImpl(node)) return true;
             invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D", 1, 2);
             return false;
+        }
+
+        /**
+         * Emits a direct primitive-specialized virtual call on cljl.Fn (invokePrim_*) when the
+         * call arguments and desired return type match one of Fn's primitive dispatch hooks.
+         * Returns 0 = not applicable, 1 = emitted, 2 = terminated.
+         */
+        private int tryEmitPrimCall(Node node, ValType desiredRet) {
+            if (desiredRet == ValType.DOUBLE) {
+                if (node instanceof Call1Node c && typeOf(c.a) == ValType.DOUBLE) {
+                    emitRef(c.fn, Fn.class);
+                    if (emitDouble(c.a)) return 2;
+                    invokevirtual("cljl/Fn", "invokePrim_D_D", "(D)D", 3, 2);
+                    return 1;
+                }
+                if (node instanceof VarCall1Node c && typeOf(c.a) == ValType.DOUBLE) {
+                    emitVarFn(c.v);
+                    if (emitDouble(c.a)) return 2;
+                    invokevirtual("cljl/Fn", "invokePrim_D_D", "(D)D", 3, 2);
+                    return 1;
+                }
+                if (node instanceof Call2Node c && typeOf(c.a) == ValType.DOUBLE && typeOf(c.b) == ValType.DOUBLE) {
+                    emitRef(c.fn, Fn.class);
+                    if (emitDouble(c.a)) return 2;
+                    if (emitDouble(c.b)) return 2;
+                    invokevirtual("cljl/Fn", "invokePrim_DD_D", "(DD)D", 5, 2);
+                    return 1;
+                }
+                if (node instanceof VarCall2Node c && typeOf(c.a) == ValType.DOUBLE && typeOf(c.b) == ValType.DOUBLE) {
+                    emitVarFn(c.v);
+                    if (emitDouble(c.a)) return 2;
+                    if (emitDouble(c.b)) return 2;
+                    invokevirtual("cljl/Fn", "invokePrim_DD_D", "(DD)D", 5, 2);
+                    return 1;
+                }
+                return 0;
+            }
+            if (desiredRet == ValType.LONG) {
+                if (node instanceof Call1Node c && typeOf(c.a) == ValType.LONG) {
+                    emitRef(c.fn, Fn.class);
+                    if (emitLong(c.a)) return 2;
+                    invokevirtual("cljl/Fn", "invokePrim_J_J", "(J)J", 3, 2);
+                    return 1;
+                }
+                if (node instanceof VarCall1Node c && typeOf(c.a) == ValType.LONG) {
+                    emitVarFn(c.v);
+                    if (emitLong(c.a)) return 2;
+                    invokevirtual("cljl/Fn", "invokePrim_J_J", "(J)J", 3, 2);
+                    return 1;
+                }
+                if (node instanceof Call2Node c && typeOf(c.b) == ValType.LONG) {
+                    if (typeOf(c.a) == ValType.LONG) {
+                        emitRef(c.fn, Fn.class);
+                        if (emitLong(c.a)) return 2;
+                        if (emitLong(c.b)) return 2;
+                        invokevirtual("cljl/Fn", "invokePrim_JJ_J", "(JJ)J", 5, 2);
+                        return 1;
+                    }
+                    emitRef(c.fn, Fn.class);
+                    if (emitBoxed(c.a)) return 2;
+                    if (emitLong(c.b)) return 2;
+                    invokevirtual("cljl/Fn", "invokePrim_OJ_J", "(Ljava/lang/Object;J)J", 4, 2);
+                    return 1;
+                }
+                if (node instanceof VarCall2Node c && typeOf(c.b) == ValType.LONG) {
+                    if (typeOf(c.a) == ValType.LONG) {
+                        emitVarFn(c.v);
+                        if (emitLong(c.a)) return 2;
+                        if (emitLong(c.b)) return 2;
+                        invokevirtual("cljl/Fn", "invokePrim_JJ_J", "(JJ)J", 5, 2);
+                        return 1;
+                    }
+                    emitVarFn(c.v);
+                    if (emitBoxed(c.a)) return 2;
+                    if (emitLong(c.b)) return 2;
+                    invokevirtual("cljl/Fn", "invokePrim_OJ_J", "(Ljava/lang/Object;J)J", 4, 2);
+                    return 1;
+                }
+            }
+            return 0;
         }
 
         private boolean isDoubleOrLongPair(Node a, Node b) {

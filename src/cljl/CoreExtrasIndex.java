@@ -187,8 +187,8 @@ final class CoreExtrasIndex {
             case "ref-history-count", "ref-min-history", "ref-max-history" -> 20;
             // 21: CoreExtras.initProtocolsAndTypes (38 vars)
             case "satisfies?", "extends?", "extenders", "find-protocol-impl", "find-protocol-method" -> 21;
-            case "-cache-protocol-fn", "-reset-methods", "extend", "register-protocol*", "protocol-dispatch*" -> 21;
-            case "defprotocol", "extend-type", "extend-protocol", "register-record*", "defrecord" -> 21;
+            case "-cache-protocol-fn", "-reset-methods", "extend", "register-protocol*", "protocol-dispatch*", "make-protocol-fn*" -> 21;
+            case "defprotocol", "extend-type", "extend-protocol", "register-record*", "register-record-class*", "register-record-impls*", "defrecord" -> 21;
             case "register-type*", "deftype", "reify*", "reify", "definterface*" -> 21;
             case "definterface", "gen-interface", "gen-class", "get-proxy-class", "construct-proxy" -> 21;
             case "init-proxy", "update-proxy", "proxy-mappings", "proxy-name", "proxy-call-with-super" -> 21;

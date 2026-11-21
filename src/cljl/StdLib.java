@@ -174,13 +174,49 @@ public final class StdLib {
     }
 
     private static String joinStrings(String sep, Object coll) {
+        if (coll instanceof LongRange lr) {
+            int n = lr.count();
+            StringBuilder sb = new StringBuilder(n * (sep.length() + 4));
+            long v = lr.start;
+            long step = lr.step;
+            for (int i = 0; i < n; i++) {
+                if (i > 0) sb.append(sep);
+                sb.append(v);
+                v += step;
+            }
+            return sb.toString();
+        }
         StringBuilder sb = new StringBuilder();
         boolean first = true;
-        for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-            if (!first) sb.append(sep);
-            first = false;
-            Object item = s.first();
-            if (item != null) sb.append(item);
+        ISeq s = RT.seq(coll);
+        while (s != null) {
+            if (s instanceof IChunkedSeq cs) {
+                IChunk c = cs.chunkedFirst();
+                int n = c.count();
+                if (c instanceof ArrayChunk ac && ac.array instanceof Object[] arr) {
+                    int off = ac.off;
+                    for (int i = 0; i < n; i++) {
+                        if (!first) sb.append(sep);
+                        first = false;
+                        Object item = arr[off + i];
+                        if (item != null) sb.append(item);
+                    }
+                } else {
+                    for (int i = 0; i < n; i++) {
+                        if (!first) sb.append(sep);
+                        first = false;
+                        Object item = c.nth(i);
+                        if (item != null) sb.append(item);
+                    }
+                }
+                s = cs.chunkedNext();
+            } else {
+                if (!first) sb.append(sep);
+                first = false;
+                Object item = s.first();
+                if (item != null) sb.append(item);
+                s = s.next();
+            }
         }
         return sb.toString();
     }
