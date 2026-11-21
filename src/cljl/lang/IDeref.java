@@ -1,7 +1,8 @@
 package cljl.lang;
 
-public interface IDeref {
+public interface IDeref extends IBlockingDeref {
     Object deref();
+    @Override
     default Object deref(long timeoutMs, Object timeoutVal) {
         return deref();
     }

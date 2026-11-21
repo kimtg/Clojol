@@ -9,7 +9,7 @@ import java.util.*;
  * Persistent sorted map implemented as an immutable AVL tree with structural sharing.
  */
 public final class PersistentTreeMap extends Fn
-        implements Associative, IObj, Sorted, Reversible, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
+        implements IPersistentMap, IObj, Sorted, Reversible, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static final Comparator<Object> DEFAULT_COMPARATOR = (k1, k2) -> {

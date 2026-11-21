@@ -7,7 +7,7 @@ import cljl.RT;
  * Thunk-backed memoized lazy sequence.
  * Unwraps nested LazySeq instances iteratively to prevent stack overflow on deep lazy chains.
  */
-public class LazySeq extends ASeq implements IReduceInit {
+public class LazySeq extends ASeq implements IReduceInit, IPending {
     private volatile Fn fn;
     private Object sv;
     private ISeq s;

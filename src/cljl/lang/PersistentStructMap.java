@@ -5,7 +5,7 @@ import cljl.RT;
 import java.util.*;
 
 public final class PersistentStructMap extends Fn
-        implements Associative, IObj, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
+        implements IPersistentMap, IObj, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
 
     public static final class Def {
         public final ISeq keys;

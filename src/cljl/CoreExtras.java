@@ -904,6 +904,8 @@ public final class CoreExtras {
         defMacro(ns, "defrecord", new ExtraFnV(56, "defrecord"));
 
         def(ns, "register-type*", new ExtraFnV(57, "register-type*"));
+        def(ns, "register-type-class*", new ExtraFnV(71, "register-type-class*"));
+        def(ns, "register-type-impls*", new ExtraFnV(72, "register-type-impls*"));
         defMacro(ns, "deftype", new ExtraFnV(58, "deftype"));
 
         def(ns, "reify*", new ExtraFnV(59, "reify*"));
@@ -1011,32 +1013,37 @@ public final class CoreExtras {
         }
 
         List<Object> specs = new ArrayList<>();
-        List<Object> javaMapKVs = new ArrayList<>();
+        Map<String, List<ISeq>> allJavaGrouped = new LinkedHashMap<>();
         List<Object> protoMapKVs = new ArrayList<>();
-        List<Object> javaMethodNames = new ArrayList<>();
+        Set<String> javaMethodNameSet = new LinkedHashSet<>();
 
         int i = 2;
         while (i < args.length) {
             Object spec = args[i++];
             specs.add(spec);
-            Map<String, ISeq> methods = new LinkedHashMap<>();
+            Map<String, List<ISeq>> specGrouped = new LinkedHashMap<>();
             while (i < args.length && args[i] instanceof ISeq ms) {
                 Symbol mname = (Symbol) ms.first();
                 ISeq mbody = wrapMethodWithFields(fieldsVec, ms.next(), isRecord, mutableSet, isRecord ? nameSym : null);
                 String mn = mname.name;
-                javaMethodNames.add(mn);
-                javaMapKVs.add(mn);
-                javaMapKVs.add(RT.cons(Symbol.intern("fn"), mbody));
-                methods.put(mn, RT.cons(Symbol.intern("fn"), mbody));
+                javaMethodNameSet.add(mn);
+                addMethodClause(allJavaGrouped, mn, mbody);
+                addMethodClause(specGrouped, mn, mbody);
                 i++;
             }
             List<Object> protoM = new ArrayList<>();
-            for (Map.Entry<String, ISeq> e : methods.entrySet()) {
+            for (Map.Entry<String, List<ISeq>> e : specGrouped.entrySet()) {
                 protoM.add(Keyword.intern(e.getKey()));
-                protoM.add(e.getValue());
+                protoM.add(buildMethodFnForm(e.getValue()));
             }
             protoMapKVs.add(spec);
             protoMapKVs.add(RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(protoM)));
+        }
+        List<Object> javaMethodNames = new ArrayList<>(javaMethodNameSet);
+        List<Object> javaMapKVs = new ArrayList<>();
+        for (Map.Entry<String, List<ISeq>> e : allJavaGrouped.entrySet()) {
+            javaMapKVs.add(e.getKey());
+            javaMapKVs.add(buildMethodFnForm(e.getValue()));
         }
 
         if (isRecord) {
@@ -1054,14 +1061,19 @@ public final class CoreExtras {
                     RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(protoMapKVs)));
             return PersistentList.createFromArray(Symbol.intern("do"), defineClsForm, attachImplsForm);
         }
-        return PersistentList.createFromArray(
-                Symbol.intern("clojure.core", "register-type*"),
+        Object defineTypeClsForm = PersistentList.createFromArray(
+                Symbol.intern("clojure.core", "register-type-class*"),
                 PersistentList.createFromArray(Symbol.intern("quote"), nameSym),
                 PersistentVector.create(fieldNames),
                 PersistentVector.create(specs),
-                RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(javaMapKVs)),
-                RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(protoMapKVs)),
+                PersistentVector.create(javaMethodNames),
                 PersistentVector.create(mutFlags));
+        Object attachTypeImplsForm = PersistentList.createFromArray(
+                Symbol.intern("clojure.core", "register-type-impls*"),
+                PersistentList.createFromArray(Symbol.intern("quote"), nameSym),
+                RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(javaMapKVs)),
+                RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(protoMapKVs)));
+        return PersistentList.createFromArray(Symbol.intern("do"), defineTypeClsForm, attachTypeImplsForm);
     }
 
     private static ISeq wrapMethodWithFields(
@@ -1290,26 +1302,51 @@ public final class CoreExtras {
         return form;
     }
 
+    private static void addMethodClause(Map<String, List<ISeq>> grouped, String mn, ISeq mbody) {
+        List<ISeq> list = grouped.computeIfAbsent(mn, k -> new ArrayList<>());
+        if (mbody.first() instanceof PersistentVector) {
+            list.add(mbody);
+        } else {
+            for (ISeq s = mbody; s != null; s = s.next()) {
+                list.add((ISeq) s.first());
+            }
+        }
+    }
+
+    private static ISeq buildMethodFnForm(List<ISeq> arities) {
+        if (arities.size() == 1) {
+            return RT.cons(Symbol.intern("fn"), arities.get(0));
+        }
+        return RT.cons(Symbol.intern("fn"), PersistentList.create(arities));
+    }
+
     private static Object expandReify(Object[] args) {
         List<Object> specs = new ArrayList<>();
-        List<Object> javaMapKVs = new ArrayList<>();
+        Map<String, List<ISeq>> allJavaGrouped = new LinkedHashMap<>();
         List<Object> protoMapKVs = new ArrayList<>();
         int i = 0;
         while (i < args.length) {
             Object spec = args[i++];
             specs.add(spec);
-            List<Object> protoM = new ArrayList<>();
+            Map<String, List<ISeq>> specGrouped = new LinkedHashMap<>();
             while (i < args.length && args[i] instanceof ISeq ms) {
                 Symbol mname = (Symbol) ms.first();
-                ISeq fnForm = RT.cons(Symbol.intern("fn"), ms.next());
-                javaMapKVs.add(mname.name);
-                javaMapKVs.add(fnForm);
-                protoM.add(Keyword.intern(mname.name));
-                protoM.add(fnForm);
+                addMethodClause(allJavaGrouped, mname.name, ms.next());
+                addMethodClause(specGrouped, mname.name, ms.next());
                 i++;
+            }
+            List<Object> protoM = new ArrayList<>();
+            for (Map.Entry<String, List<ISeq>> e : specGrouped.entrySet()) {
+                protoM.add(Keyword.intern(e.getKey()));
+                protoM.add(buildMethodFnForm(e.getValue()));
             }
             protoMapKVs.add(spec);
             protoMapKVs.add(RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(protoM)));
+        }
+        List<Object> javaMapKVs = new ArrayList<>();
+        for (Map.Entry<String, List<ISeq>> e : allJavaGrouped.entrySet()) {
+            javaMapKVs.add(e.getKey());
+            javaMapKVs.add(buildMethodFnForm(e.getValue()));
         }
         return PersistentList.createFromArray(
                 Symbol.intern("clojure.core", "reify*"),
@@ -1326,7 +1363,7 @@ public final class CoreExtras {
     }
 
     private static Class<?>[] resolveInterfaces(Object coll) {
-        List<Class<?>> ifaces = new ArrayList<>();
+        Set<Class<?>> ifaces = new LinkedHashSet<>();
         for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
             if (s.first() instanceof Class<?> c && c.isInterface()) ifaces.add(c);
         }
@@ -2007,7 +2044,7 @@ public final class CoreExtras {
         
             }
             case 98: { Object rdr = _a; return (Compiler.load((java.io.Reader) rdr, "<reader>")); }
-            case 99: { Object lib = _a; return (lib); }
+            case 99: { Object lib = _a; return (GenClass.compileNamespace((Symbol) lib)); }
             case 100: {
                 Object fObj = _a;
             Fn f = (Fn) fObj;
@@ -3139,7 +3176,7 @@ public final class CoreExtras {
             Map<Protocol, Map<Keyword, Fn>> protoImpls = toProtoMap(args[4]);
 
             Namespace cur = RT.currentNS();
-            String binaryName = cur.name.name + "." + nameSym.name;
+            String binaryName = cur.name.name.replace('-', '_') + "." + nameSym.name;
             Class<?> recCls = TypeFactory.defineRecord(binaryName, fields, ifaces, javaMethods);
             cur.importClass(nameSym, recCls);
             for (Map.Entry<Protocol, Map<Keyword, Fn>> e : protoImpls.entrySet()) {
@@ -3186,7 +3223,7 @@ public final class CoreExtras {
             Map<Protocol, Map<Keyword, Fn>> protoImpls = toProtoMap(args[4]);
 
             Namespace cur = RT.currentNS();
-            String binaryName = cur.name.name + "." + nameSym.name;
+            String binaryName = cur.name.name.replace('-', '_') + "." + nameSym.name;
             Class<?> typeCls = TypeFactory.defineType(binaryName, fields, mutables, ifaces, javaMethods);
             cur.importClass(nameSym, typeCls);
             for (Map.Entry<Protocol, Map<Keyword, Fn>> e : protoImpls.entrySet()) {
@@ -3232,7 +3269,7 @@ public final class CoreExtras {
             return TypeFactory.defineInterface(name, ms);
         
             }
-            case 63: { Object[] args = _args; return (null); }
+            case 63: { Object[] args = _args; return (GenClass.genClass(args)); }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
         }
     }
@@ -3342,7 +3379,7 @@ public final class CoreExtras {
                     }
                 }
                 Namespace cur = RT.currentNS();
-                String binaryName = cur.name.name + "." + nameSym.name;
+                String binaryName = cur.name.name.replace('-', '_') + "." + nameSym.name;
                 Class<?> recCls = TypeFactory.defineRecord(binaryName, fields, fieldTypes, ifaces, placeholderMethods, directProtos);
                 cur.importClass(nameSym, recCls);
                 cur.intern("->" + nameSym.name, Fn.ofVarargs("->" + nameSym.name,
@@ -3375,7 +3412,7 @@ public final class CoreExtras {
                 Map<String, Fn> javaMethods = toMethodMap(args[1]);
                 Map<Protocol, Map<Keyword, Fn>> protoImpls = toProtoMap(args[2]);
                 Namespace cur = RT.currentNS();
-                String binaryName = cur.name.name + "." + nameSym.name;
+                String binaryName = cur.name.name.replace('-', '_') + "." + nameSym.name;
                 Class<?> recCls = Interop.resolveClass(cur, nameSym.name);
                 TypeFactory.setClassMethods(binaryName, javaMethods);
                 TypeFactory.bindRecordProtocolMethods(recCls, protoImpls);
@@ -3407,6 +3444,46 @@ public final class CoreExtras {
                     }
                 }
                 return new Protocol(nameSym, doc, onIface, aritiesMap);
+            }
+            case 71: {
+                // register-type-class*: defines deftype JVM class & ->Name ctor BEFORE method bodies compile
+                Object[] args = _args;
+                Symbol nameSym = (Symbol) args[0];
+                String[] fields = toStringArray(args[1]);
+                Class<?>[] ifaces = resolveInterfaces(args[2]);
+                Map<String, Fn> placeholderMethods = new LinkedHashMap<>();
+                for (String mn : toStringArray(args[3])) {
+                    placeholderMethods.put(mn, null);
+                }
+                boolean[] mutables = new boolean[fields.length];
+                if (args.length > 4 && args[4] != null) {
+                    int k = 0;
+                    for (ISeq s = RT.seq(args[4]); s != null && k < fields.length; s = s.next(), k++) {
+                        mutables[k] = RT.truthy(s.first());
+                    }
+                }
+                Namespace cur = RT.currentNS();
+                String binaryName = cur.name.name.replace('-', '_') + "." + nameSym.name;
+                Class<?> typeCls = TypeFactory.defineType(binaryName, fields, mutables, ifaces, placeholderMethods);
+                cur.importClass(nameSym, typeCls);
+                cur.intern("->" + nameSym.name, Fn.ofVarargs("->" + nameSym.name,
+                        ctorArgs -> Interop.invokeConstructor(typeCls, ctorArgs)));
+                return typeCls;
+            }
+            case 72: {
+                // register-type-impls*: attaches compiled Java & protocol method fns to already-defined deftype class
+                Object[] args = _args;
+                Symbol nameSym = (Symbol) args[0];
+                Map<String, Fn> javaMethods = toMethodMap(args[1]);
+                Map<Protocol, Map<Keyword, Fn>> protoImpls = toProtoMap(args[2]);
+                Namespace cur = RT.currentNS();
+                String binaryName = cur.name.name.replace('-', '_') + "." + nameSym.name;
+                Class<?> typeCls = Interop.resolveClass(cur, nameSym.name);
+                TypeFactory.setClassMethods(binaryName, javaMethods);
+                for (Map.Entry<Protocol, Map<Keyword, Fn>> e : protoImpls.entrySet()) {
+                    e.getKey().addImpl(typeCls, e.getValue());
+                }
+                return typeCls;
             }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
         }

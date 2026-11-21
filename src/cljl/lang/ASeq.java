@@ -3,7 +3,7 @@ package cljl.lang;
 import cljl.RT;
 import java.util.*;
 
-public abstract class ASeq implements ISeq, IObj {
+public abstract class ASeq implements ISeq, IObj, Sequential {
     protected final PersistentHashMap meta;
     private int hash;
     private volatile boolean hasHash;

@@ -61,6 +61,87 @@ public final class StdLibMore {
                 }
                 yield true;
             }
+            case "clojure.java.process" -> {
+                synchronized (StdLibMore.class) {
+                    if (!LOADED.contains("clojure.java.process")) {
+                        ProcessLib.initNamespace();
+                        LOADED.add("clojure.java.process");
+                    }
+                }
+                yield true;
+            }
+            case "clojure.repl.deps" -> {
+                synchronized (StdLibMore.class) {
+                    if (!LOADED.contains("clojure.repl.deps")) {
+                        Deps.initReplDepsNamespace();
+                        LOADED.add("clojure.repl.deps");
+                    }
+                }
+                yield true;
+            }
+            case "clojure.core.protocols" -> {
+                synchronized (StdLibMore.class) {
+                    if (!LOADED.contains("clojure.core.protocols")) {
+                        StdLibExtra.initCoreProtocols();
+                        LOADED.add("clojure.core.protocols");
+                    }
+                }
+                yield true;
+            }
+            case "clojure.core.server" -> {
+                synchronized (StdLibMore.class) {
+                    if (!LOADED.contains("clojure.core.server")) {
+                        ServerLib.initNamespace();
+                        LOADED.add("clojure.core.server");
+                    }
+                }
+                yield true;
+            }
+            case "clojure.stacktrace" -> {
+                synchronized (StdLibMore.class) {
+                    if (!LOADED.contains("clojure.stacktrace")) {
+                        StdLibExtra.initStacktrace();
+                        LOADED.add("clojure.stacktrace");
+                    }
+                }
+                yield true;
+            }
+            case "clojure.template" -> {
+                synchronized (StdLibMore.class) {
+                    if (!LOADED.contains("clojure.template")) {
+                        StdLibExtra.initTemplate();
+                        LOADED.add("clojure.template");
+                    }
+                }
+                yield true;
+            }
+            case "clojure.instant" -> {
+                synchronized (StdLibMore.class) {
+                    if (!LOADED.contains("clojure.instant")) {
+                        StdLibExtra.initInstant();
+                        LOADED.add("clojure.instant");
+                    }
+                }
+                yield true;
+            }
+            case "clojure.reflect" -> {
+                synchronized (StdLibMore.class) {
+                    if (!LOADED.contains("clojure.reflect")) {
+                        StdLibExtra.initReflect();
+                        LOADED.add("clojure.reflect");
+                    }
+                }
+                yield true;
+            }
+            case "clojure.uuid" -> {
+                synchronized (StdLibMore.class) {
+                    if (!LOADED.contains("clojure.uuid")) {
+                        StdLibExtra.initUuid();
+                        LOADED.add("clojure.uuid");
+                    }
+                }
+                yield true;
+            }
             case "clojure.tools.deps.cli.api" -> { Deps.ensureDepsCliApiLoaded(); yield true; }
             default -> false;
         };
@@ -488,6 +569,76 @@ public final class StdLibMore {
             pw.flush();
             return null;
         }));
+
+        Fn simpleDispatch = Fn.of1("simple-dispatch", obj ->
+                pprintToWriter(obj, StdLib.outWriter(), StdLib.toInt(rightMargin.deref())));
+        ns.intern("simple-dispatch", simpleDispatch);
+        ns.intern("code-dispatch", simpleDispatch);
+        ns.intern(Symbol.intern("*print-pprint-dispatch*")).bindRoot(simpleDispatch).setDynamic();
+
+        ns.internMacro("with-pprint-dispatch", Fn.ofVarargs("with-pprint-dispatch", args -> {
+            List<Object> body = new ArrayList<>();
+            body.add(Symbol.intern("binding"));
+            body.add(PersistentVector.createOwning(Symbol.intern("clojure.pprint", "*print-pprint-dispatch*"), args[0]));
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            return PersistentList.create(body);
+        }));
+
+        ns.intern("write", Fn.ofVarargs("write", args -> {
+            Object obj = args[0];
+            Object stream = Boolean.TRUE;
+            boolean pretty = true;
+            for (int i = 1; i + 1 < args.length; i += 2) {
+                Object k = args[i];
+                if (Keyword.intern("stream").equals(k)) stream = args[i + 1];
+                else if (Keyword.intern("pretty").equals(k)) pretty = RT.truthy(args[i + 1]);
+            }
+            String out;
+            if (pretty) {
+                StringBuilder sb = new StringBuilder();
+                pprintFormat(obj, sb, 0, StdLib.toInt(rightMargin.deref()), 0);
+                out = sb.toString();
+            } else {
+                out = RT.printString(obj, true);
+            }
+            if (stream == null) return out;
+            PrintWriter pw = Boolean.TRUE.equals(stream) ? StdLib.outWriter() : toPrintWriter(stream);
+            pw.print(out);
+            pw.flush();
+            return null;
+        }));
+
+        ns.internMacro("formatter", Fn.of1("formatter", fmt ->
+                PersistentList.createFromArray(
+                        Symbol.intern("fn"),
+                        PersistentVector.createOwning(Symbol.intern("stream__"), Symbol.intern("&"), Symbol.intern("args__")),
+                        PersistentList.createFromArray(
+                                Symbol.intern("clojure.core", "apply"),
+                                Symbol.intern("clojure.pprint", "cl-format"),
+                                Symbol.intern("stream__"),
+                                fmt,
+                                Symbol.intern("args__")))));
+
+        ns.internMacro("formatter-out", Fn.of1("formatter-out", fmt ->
+                PersistentList.createFromArray(
+                        Symbol.intern("fn"),
+                        PersistentVector.createOwning(Symbol.intern("&"), Symbol.intern("args__")),
+                        PersistentList.createFromArray(
+                                Symbol.intern("clojure.core", "apply"),
+                                Symbol.intern("clojure.pprint", "cl-format"),
+                                Boolean.TRUE,
+                                fmt,
+                                Symbol.intern("args__")))));
+
+        ns.intern("fresh-line", Fn.of0("fresh-line", () -> {
+            PrintWriter pw = StdLib.outWriter();
+            pw.println();
+            pw.flush();
+            return null;
+        }));
+
+        ns.internMacro("pp", Fn.of0("pp", () ->
+                PersistentList.createFromArray(Symbol.intern("clojure.pprint", "pprint"), Symbol.intern("*1"))));
 
         LOADED.add("clojure.pprint");
     }

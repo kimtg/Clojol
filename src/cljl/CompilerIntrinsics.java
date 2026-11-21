@@ -39,30 +39,37 @@ final class CompilerIntrinsics {
 
     private static final class MathOps {
         static Node tryCreate(String name, Node[] args, int arity) {
+            boolean unchecked = RT.truthy(RT.UNCHECKED_MATH.get());
             return switch (name) {
                 case "+" -> switch (arity) {
                     case 0 -> new ConstNode(0L);
                     case 1 -> args[0];
-                    case 2 -> new Add2Node(args[0], args[1]);
-                    case 3 -> new Add2Node(new Add2Node(args[0], args[1]), args[2]);
+                    case 2 -> unchecked ? new UncheckedAdd2Node(args[0], args[1]) : new Add2Node(args[0], args[1]);
+                    case 3 -> unchecked
+                            ? new UncheckedAdd2Node(new UncheckedAdd2Node(args[0], args[1]), args[2])
+                            : new Add2Node(new Add2Node(args[0], args[1]), args[2]);
                     default -> null;
                 };
                 case "-" -> switch (arity) {
-                    case 1 -> new NegateNode(args[0]);
-                    case 2 -> new Sub2Node(args[0], args[1]);
-                    case 3 -> new Sub2Node(new Sub2Node(args[0], args[1]), args[2]);
+                    case 1 -> unchecked ? new UncheckedNegateNode(args[0]) : new NegateNode(args[0]);
+                    case 2 -> unchecked ? new UncheckedSub2Node(args[0], args[1]) : new Sub2Node(args[0], args[1]);
+                    case 3 -> unchecked
+                            ? new UncheckedSub2Node(new UncheckedSub2Node(args[0], args[1]), args[2])
+                            : new Sub2Node(new Sub2Node(args[0], args[1]), args[2]);
                     default -> null;
                 };
                 case "*" -> switch (arity) {
                     case 0 -> new ConstNode(1L);
                     case 1 -> args[0];
-                    case 2 -> new Mul2Node(args[0], args[1]);
-                    case 3 -> new Mul2Node(new Mul2Node(args[0], args[1]), args[2]);
+                    case 2 -> unchecked ? new UncheckedMul2Node(args[0], args[1]) : new Mul2Node(args[0], args[1]);
+                    case 3 -> unchecked
+                            ? new UncheckedMul2Node(new UncheckedMul2Node(args[0], args[1]), args[2])
+                            : new Mul2Node(new Mul2Node(args[0], args[1]), args[2]);
                     default -> null;
                 };
                 case "/" -> arity == 2 ? new Div2Node(args[0], args[1]) : null;
-                case "inc" -> arity == 1 ? new IncNode(args[0]) : null;
-                case "dec" -> arity == 1 ? new DecNode(args[0]) : null;
+                case "inc" -> arity == 1 ? (unchecked ? new UncheckedIncNode(args[0]) : new IncNode(args[0])) : null;
+                case "dec" -> arity == 1 ? (unchecked ? new UncheckedDecNode(args[0]) : new DecNode(args[0])) : null;
                 case "rem" -> arity == 2 ? new Rem2Node(args[0], args[1]) : null;
                 case "mod" -> arity == 2 ? new Mod2Node(args[0], args[1]) : null;
                 case "quot" -> arity == 2 ? new Quot2Node(args[0], args[1]) : null;

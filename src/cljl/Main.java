@@ -122,6 +122,14 @@ public final class Main {
             Deps.applyClasspath(basis, opts);
         }
 
+        // Start any -Dclojure.server.<name>=... socket REPLs only if configured
+        for (String propName : System.getProperties().stringPropertyNames()) {
+            if (propName.startsWith("clojure.server.")) {
+                ServerLib.startServersFromSystemProps();
+                break;
+            }
+        }
+
         if (opts.mode == Mode.EXEC || opts.mode == Mode.TOOL) {
             RT.ensureInit();
             try {

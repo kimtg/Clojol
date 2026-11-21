@@ -83,6 +83,41 @@ public final class RT {
     private static final AtomicInteger GENSYM_ID = new AtomicInteger(1000);
     private static volatile ClassLoader runtimeClassLoader = null;
     private static volatile boolean strictRuntimeLoader = false;
+    private static volatile PersistentHashMap classpathDataReaders = null;
+
+    public static PersistentHashMap getClasspathDataReaders() {
+        PersistentHashMap cached = classpathDataReaders;
+        if (cached != null) return cached;
+        return loadClasspathDataReaders();
+    }
+
+    private static synchronized PersistentHashMap loadClasspathDataReaders() {
+        if (classpathDataReaders != null) return classpathDataReaders;
+        PersistentHashMap merged = PersistentHashMap.EMPTY;
+        ClassLoader cl = baseLoader();
+        for (String resName : new String[]{"data_readers.clj", "data_readers.cljc"}) {
+            try {
+                Enumeration<java.net.URL> urls = cl.getResources(resName);
+                while (urls.hasMoreElements()) {
+                    java.net.URL url = urls.nextElement();
+                    try (InputStream is = url.openStream()) {
+                        String content = new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                        Object form = Reader.readString(content);
+                        if (form instanceof PersistentHashMap pm) {
+                            for (ISeq s = pm.seq(); s != null; s = s.next()) {
+                                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                                if (me.key instanceof Symbol tagSym && me.val instanceof Symbol fnSym) {
+                                    merged = merged.assoc(tagSym, fnSym);
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            } catch (IOException ignored) {}
+        }
+        classpathDataReaders = merged;
+        return merged;
+    }
 
     private static volatile boolean coreInitialized = false;
 
@@ -113,6 +148,7 @@ public final class RT {
     public static void setRuntimeClassLoader(ClassLoader cl, boolean strict) {
         strictRuntimeLoader = strict;
         runtimeClassLoader = cl;
+        classpathDataReaders = null;
         if (cl != null) {
             Thread.currentThread().setContextClassLoader(cl);
         }
@@ -1053,6 +1089,16 @@ public final class RT {
                 count++;
             }
             sb.append(')');
+            return;
+        }
+        if (x instanceof UUID u) {
+            if (readably) sb.append("#uuid \"").append(u.toString()).append('"');
+            else sb.append(u.toString());
+            return;
+        }
+        if (x instanceof Date dt) {
+            if (readably) sb.append("#inst \"").append(dt.toInstant().toString()).append('"');
+            else sb.append(dt.toString());
             return;
         }
         if (x instanceof Class<?> c) {

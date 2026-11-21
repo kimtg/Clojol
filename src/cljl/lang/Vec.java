@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * Primitive-array-backed persistent vector (Vec, VecNode, VecSeq) for ->Vec / ->VecNode / ->VecSeq.
  */
 public final class Vec extends Fn
-        implements Associative, IObj, Reversible, List<Object>, RandomAccess, Comparable<Object> {
+        implements IPersistentVector, IObj, List<Object>, RandomAccess, Comparable<Object> {
 
     public static final class VecNode {
         public final AtomicReference<Thread> edit;

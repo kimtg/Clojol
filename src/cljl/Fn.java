@@ -20,7 +20,7 @@ import java.util.function.Predicate;
  * Provides arity-specialized invoke() overloads (0 to 4 args) to eliminate Object[]
  * allocation on the vast majority of calls, plus applyTo(Object[]) for variable arity.
  */
-public abstract class Fn implements Callable<Object>, Runnable,
+public abstract class Fn implements clojure.lang.IFn, Callable<Object>, Runnable,
         Function<Object, Object>, Predicate<Object> {
 
     public static final Object[] EMPTY_ARGS = new Object[0];
@@ -62,6 +62,31 @@ public abstract class Fn implements Callable<Object>, Runnable,
     public Object invoke(Object a, Object b, Object c, Object d) {
         return invokeVarargs(new Object[]{a, b, c, d});
     }
+
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11, Object a12) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11, Object a12, Object a13) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11, Object a12, Object a13, Object a14) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11, Object a12, Object a13, Object a14, Object a15) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11, Object a12, Object a13, Object a14, Object a15, Object a16) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11, Object a12, Object a13, Object a14, Object a15, Object a16, Object a17) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11, Object a12, Object a13, Object a14, Object a15, Object a16, Object a17, Object a18) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11, Object a12, Object a13, Object a14, Object a15, Object a16, Object a17, Object a18, Object a19) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11, Object a12, Object a13, Object a14, Object a15, Object a16, Object a17, Object a18, Object a19, Object a20) { return invokeVarargs(new Object[]{a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20}); }
+    @Override public Object invoke(Object a1, Object a2, Object a3, Object a4, Object a5, Object a6, Object a7, Object a8, Object a9, Object a10, Object a11, Object a12, Object a13, Object a14, Object a15, Object a16, Object a17, Object a18, Object a19, Object a20, Object... more) {
+        Object[] all = new Object[20 + (more != null ? more.length : 0)];
+        all[0]=a1; all[1]=a2; all[2]=a3; all[3]=a4; all[4]=a5; all[5]=a6; all[6]=a7; all[7]=a8; all[8]=a9; all[9]=a10;
+        all[10]=a11; all[11]=a12; all[12]=a13; all[13]=a14; all[14]=a15; all[15]=a16; all[16]=a17; all[17]=a18; all[18]=a19; all[19]=a20;
+        if (more != null && more.length > 0) System.arraycopy(more, 0, all, 20, more.length);
+        return invokeVarargs(all);
+    }
+    @Override public Object applyTo(cljl.lang.ISeq arglist) { return applyTo(RT.toArray(arglist)); }
 
     public Object invokeVarargs(Object[] args) {
         throw arityError(args.length);

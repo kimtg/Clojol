@@ -36,6 +36,12 @@ public final class TypeFactory {
         return LOADER.findAlreadyLoaded(binaryName);
     }
 
+    public static synchronized Class<?> defineRawClass(String binaryName, byte[] bytes) {
+        Class<?> existing = LOADER.findAlreadyLoaded(binaryName);
+        if (existing != null) return existing;
+        return LOADER.define(binaryName, bytes);
+    }
+
     public static final class DynamicClassLoader extends ClassLoader {
         DynamicClassLoader() {
             super(TypeFactory.class.getClassLoader());
@@ -217,6 +223,7 @@ public final class TypeFactory {
             cw.addAbstractMethod(m.name(), methodDesc(m.returnType(), m.paramTypes()));
         }
         byte[] bytes = cw.toByteArray();
+        GenClass.writeClassFileIfCompiling(binaryName, bytes);
         Class<?> cls = LOADER.define(binaryName, bytes);
         Interop.registerClass(binaryName, cls);
         return cls;
@@ -326,6 +333,7 @@ public final class TypeFactory {
         emitInterfaceBridges(cw, binaryName, interfaces, methodImpls);
 
         byte[] bytes = cw.toByteArray();
+        GenClass.writeClassFileIfCompiling(binaryName, bytes);
         Class<?> cls = LOADER.define(binaryName, bytes);
         if (pmHolderBinary != null) {
             RECORD_PM_HOLDER.put(cls, pmHolderBinary);
@@ -409,6 +417,7 @@ public final class TypeFactory {
         emitInterfaceBridges(cw, binaryName, interfaces, methodImpls);
 
         byte[] bytes = cw.toByteArray();
+        GenClass.writeClassFileIfCompiling(binaryName, bytes);
         Class<?> cls = LOADER.define(binaryName, bytes);
         Interop.registerClass(binaryName, cls);
         return cls;

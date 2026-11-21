@@ -95,7 +95,18 @@ public final class Compiler {
 
     private static Object loadReader(Reader reader, String filename) {
         RT.ensureInit();
-        Var.pushThreadBindings(Map.of(RT.FILE, filename != null ? filename : "NO_SOURCE_PATH"));
+        String fname = filename != null ? filename : "NO_SOURCE_PATH";
+        Map<Var, Object> bindings = new HashMap<>(12);
+        bindings.put(RT.FILE, fname);
+        bindings.put(RT.SOURCE_PATH, fname);
+        bindings.put(RT.WARN_ON_REFLECTION, RT.WARN_ON_REFLECTION.deref());
+        bindings.put(RT.UNCHECKED_MATH, RT.UNCHECKED_MATH.deref());
+        bindings.put(RT.DATA_READERS, RT.DATA_READERS.deref());
+        bindings.put(RT.READ_EVAL, RT.READ_EVAL.deref());
+        bindings.put(RT.ASSERT, RT.ASSERT.deref());
+        bindings.put(RT.COMPILER_OPTIONS, RT.COMPILER_OPTIONS.deref());
+        bindings.put(RT.MATH_CONTEXT, RT.MATH_CONTEXT.deref());
+        Var.pushThreadBindings(bindings);
         try {
             final Object[] last = new Object[]{null};
             reader.consumeForms(new java.util.function.Consumer<Object>() {
@@ -374,6 +385,17 @@ public final class Compiler {
     // ========================================================================
 
     private static final Keyword TAG_KW = Keyword.intern("tag");
+    private static final Keyword PARAM_TAGS_KW = Keyword.intern("param-tags");
+
+    private static Class<?>[] extractParamTags(Symbol sym, Namespace ns) {
+        if (sym != null && sym.meta() != null) {
+            Object pt = sym.meta().valAt(PARAM_TAGS_KW);
+            if (pt != null) {
+                return Interop.resolveParamTags(ns, pt);
+            }
+        }
+        return null;
+    }
 
     private static ValType extractTagHint(Object obj) {
         if (obj instanceof IMeta im && im.meta() != null) {
@@ -626,6 +648,23 @@ public final class Compiler {
             }
             Class<?> cls = Interop.resolveClass(cur, sym.ns);
             if (cls != null) {
+                if (Interop.isArrayDimToken(sym.name)) {
+                    Class<?> arrCls = Interop.resolveArrayClass(cur, sym.ns, sym.name);
+                    if (arrCls != null) return new ConstNode(arrCls);
+                }
+                Class<?>[] paramTags = extractParamTags(sym, cur);
+                if ("new".equals(sym.name)) {
+                    return new ConstNode(Interop.createConstructorFn(cls, paramTags));
+                }
+                if (sym.name.startsWith(".") && sym.name.length() > 1) {
+                    return new ConstNode(Interop.createInstanceMethodFn(cls, sym.name.substring(1), paramTags));
+                }
+                if (paramTags == null && Interop.hasStaticField(cls, sym.name)) {
+                    return new StaticFieldNode(cls, sym.name);
+                }
+                if (paramTags != null || Interop.hasStaticMethod(cls, sym.name)) {
+                    return new ConstNode(Interop.createStaticMethodFn(cls, sym.name, paramTags));
+                }
                 return new StaticFieldNode(cls, sym.name);
             }
             // Auto-load built-in standard library namespace if not yet initialized
@@ -735,7 +774,7 @@ public final class Compiler {
                 }
             }
 
-            // Check if this is a static method call (ClassName/staticMethod ...)
+            // Check if this is a static/qualified method or constructor call (Class/method, Class/.method, Class/new)
             if (!shadowed && sym.ns != null) {
                 Namespace cur = RT.currentNS();
                 Namespace targetNs = cur.lookupAlias(Symbol.intern(sym.ns));
@@ -743,8 +782,22 @@ public final class Compiler {
                 if (targetNs == null && !StdLib.ensureLoaded(sym.ns)) {
                     Class<?> cls = Interop.resolveClass(cur, sym.ns);
                     if (cls != null) {
+                        Class<?>[] paramTags = extractParamTags(sym, cur);
                         Node[] argNodes = compileArgs(args, scope);
-                        return createStaticMethodNode(cls, sym.name, argNodes);
+                        if ("new".equals(sym.name)) {
+                            return new NewNode(cls, argNodes, paramTags);
+                        }
+                        if (sym.name.startsWith(".") && sym.name.length() > 1) {
+                            if (argNodes.length < 1) {
+                                throw new IllegalArgumentException(sym + " requires a target instance" + locSuffix());
+                            }
+                            Node targetNode = argNodes[0];
+                            Node[] restArgs = argNodes.length == 1
+                                    ? EMPTY_NODES
+                                    : Arrays.copyOfRange(argNodes, 1, argNodes.length);
+                            return new InstanceMethodNode(targetNode, sym.name.substring(1), restArgs, cls, paramTags);
+                        }
+                        return createStaticMethodNode(cls, sym.name, argNodes, paramTags);
                     }
                 }
             }
@@ -996,7 +1049,7 @@ public final class Compiler {
             }
         }
 
-        FnMethod[] fixedMethods = new FnMethod[21];
+        FnMethod[] fixedMethods = new FnMethod[23];
         FnMethod variadicMethod = null;
         boolean anyCaptures = false;
 
@@ -1023,6 +1076,39 @@ public final class Compiler {
     private static FnMethod compileFnMethod(Symbol fnName, ISeq mform, Scope parentScope) {
         PersistentVector rawParams = (PersistentVector) mform.first();
         ISeq bodyForms = mform.next();
+
+        // Support Clojure {:pre [...] :post [...]} condition maps in fn/defn bodies
+        if (bodyForms != null && bodyForms.next() != null && bodyForms.first() instanceof PersistentHashMap condMap) {
+            Object preConds = condMap.valAt(Keyword.intern("pre"));
+            Object postConds = condMap.valAt(Keyword.intern("post"));
+            ISeq realBody = bodyForms.next();
+            if (preConds != null || postConds != null) {
+                Object innerExpr = realBody.next() == null
+                        ? realBody.first()
+                        : RT.cons(Symbol.intern("do"), realBody);
+                if (postConds != null) {
+                    List<Object> postBody = new ArrayList<>();
+                    for (ISeq ps = RT.seq(postConds); ps != null; ps = ps.next()) {
+                        postBody.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "assert"), ps.first()));
+                    }
+                    postBody.add(Symbol.intern("%"));
+                    innerExpr = PersistentList.createFromArray(
+                            Symbol.intern("let*"),
+                            PersistentVector.createOwning(Symbol.intern("%"), innerExpr),
+                            RT.cons(Symbol.intern("do"), PersistentList.create(postBody)));
+                }
+                if (preConds != null) {
+                    List<Object> preList = new ArrayList<>();
+                    for (ISeq ps = RT.seq(preConds); ps != null; ps = ps.next()) {
+                        preList.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "assert"), ps.first()));
+                    }
+                    preList.add(innerExpr);
+                    bodyForms = PersistentList.create(preList);
+                } else {
+                    bodyForms = PersistentList.createFromArray(innerExpr);
+                }
+            }
+        }
 
         Scope fnScope = new Scope(parentScope);
         int selfSlot = -1;
@@ -1322,13 +1408,17 @@ public final class Compiler {
     }
 
     private static Node createStaticMethodNode(Class<?> cls, String name, Node[] argNodes) {
-        if (cls == Math.class || cls == StrictMath.class) {
+        return createStaticMethodNode(cls, name, argNodes, null);
+    }
+
+    private static Node createStaticMethodNode(Class<?> cls, String name, Node[] argNodes, Class<?>[] paramTags) {
+        if (paramTags == null && (cls == Math.class || cls == StrictMath.class)) {
             Object folded = tryFoldMathStatic(cls == StrictMath.class, name, argNodes);
             if (folded != null) {
                 return new ConstNode(folded);
             }
         }
-        return new StaticMethodNode(cls, name, argNodes);
+        return new StaticMethodNode(cls, name, argNodes, paramTags);
     }
 
     private static Object tryFoldMathStatic(boolean strict, String name, Node[] args) {
@@ -2332,31 +2422,31 @@ public final class Compiler {
     public static final class Call0Node extends Node {
         public final Node fn;
         public Call0Node(Node fn) { this.fn = fn; }
-        @Override public Object eval(Object[] frame) { return ((Fn) fn.eval(frame)).invoke(); }
+        @Override public Object eval(Object[] frame) { return ((clojure.lang.IFn) fn.eval(frame)).invoke(); }
     }
 
     public static final class Call1Node extends Node {
         public final Node fn, a;
         public Call1Node(Node fn, Node a) { this.fn = fn; this.a = a; }
-        @Override public Object eval(Object[] frame) { return ((Fn) fn.eval(frame)).invoke(a.eval(frame)); }
+        @Override public Object eval(Object[] frame) { return ((clojure.lang.IFn) fn.eval(frame)).invoke(a.eval(frame)); }
     }
 
     public static final class Call2Node extends Node {
         public final Node fn, a, b;
         public Call2Node(Node fn, Node a, Node b) { this.fn = fn; this.a = a; this.b = b; }
-        @Override public Object eval(Object[] frame) { return ((Fn) fn.eval(frame)).invoke(a.eval(frame), b.eval(frame)); }
+        @Override public Object eval(Object[] frame) { return ((clojure.lang.IFn) fn.eval(frame)).invoke(a.eval(frame), b.eval(frame)); }
     }
 
     public static final class Call3Node extends Node {
         public final Node fn, a, b, c;
         public Call3Node(Node fn, Node a, Node b, Node c) { this.fn = fn; this.a = a; this.b = b; this.c = c; }
-        @Override public Object eval(Object[] frame) { return ((Fn) fn.eval(frame)).invoke(a.eval(frame), b.eval(frame), c.eval(frame)); }
+        @Override public Object eval(Object[] frame) { return ((clojure.lang.IFn) fn.eval(frame)).invoke(a.eval(frame), b.eval(frame), c.eval(frame)); }
     }
 
     public static final class Call4Node extends Node {
         public final Node fn, a, b, c, d;
         public Call4Node(Node fn, Node a, Node b, Node c, Node d) { this.fn = fn; this.a = a; this.b = b; this.c = c; this.d = d; }
-        @Override public Object eval(Object[] frame) { return ((Fn) fn.eval(frame)).invoke(a.eval(frame), b.eval(frame), c.eval(frame), d.eval(frame)); }
+        @Override public Object eval(Object[] frame) { return ((clojure.lang.IFn) fn.eval(frame)).invoke(a.eval(frame), b.eval(frame), c.eval(frame), d.eval(frame)); }
     }
 
     public static final class CallNNode extends Node {
@@ -2365,10 +2455,11 @@ public final class Compiler {
         public CallNNode(Node fn, Node[] args) { this.fn = fn; this.args = args; }
         @Override
         public Object eval(Object[] frame) {
-            Fn f = (Fn) fn.eval(frame);
+            Object fObj = fn.eval(frame);
             Object[] evaluated = new Object[args.length];
             for (int i = 0; i < args.length; i++) evaluated[i] = args[i].eval(frame);
-            return f.invokeVarargs(evaluated);
+            if (fObj instanceof Fn f) return f.invokeVarargs(evaluated);
+            return ((clojure.lang.IFn) fObj).applyTo(PersistentList.createFromArray(evaluated));
         }
     }
 
@@ -2697,12 +2788,20 @@ public final class Compiler {
     public static final class NewNode extends Node {
         public final Class<?> clazz;
         public final Node[] args;
-        public NewNode(Class<?> clazz, Node[] args) { this.clazz = clazz; this.args = args; }
+        public final Class<?>[] paramTags;
+        public NewNode(Class<?> clazz, Node[] args) { this(clazz, args, null); }
+        public NewNode(Class<?> clazz, Node[] args, Class<?>[] paramTags) {
+            this.clazz = clazz;
+            this.args = args;
+            this.paramTags = paramTags;
+        }
         @Override
         public Object eval(Object[] frame) {
             Object[] evaluated = new Object[args.length];
             for (int i = 0; i < args.length; i++) evaluated[i] = args[i].eval(frame);
-            return Interop.invokeConstructor(clazz, evaluated);
+            return paramTags != null
+                    ? Interop.invokeConstructorWithTags(clazz, paramTags, evaluated)
+                    : Interop.invokeConstructor(clazz, evaluated);
         }
     }
 
@@ -2723,14 +2822,19 @@ public final class Compiler {
         public final Class<?> clazz;
         public final String methodName;
         public final Node[] args;
+        public final Class<?>[] paramTags;
         public StaticMethodNode(Class<?> clazz, String methodName, Node[] args) {
+            this(clazz, methodName, args, null);
+        }
+        public StaticMethodNode(Class<?> clazz, String methodName, Node[] args, Class<?>[] paramTags) {
             this.clazz = clazz;
             this.methodName = methodName;
             this.args = args;
+            this.paramTags = paramTags;
         }
         @Override
         public Object eval(Object[] frame) {
-            if (clazz == Math.class) {
+            if (paramTags == null && clazz == Math.class) {
                 if (args.length == 1) {
                     Object a0 = args[0].eval(frame);
                     if (a0 instanceof Number n0) {
@@ -2775,7 +2879,9 @@ public final class Compiler {
             }
             Object[] evaluated = new Object[args.length];
             for (int i = 0; i < args.length; i++) evaluated[i] = args[i].eval(frame);
-            return Interop.invokeStaticMethod(clazz, methodName, evaluated);
+            return paramTags != null
+                    ? Interop.invokeStaticMethodWithTags(clazz, methodName, paramTags, evaluated)
+                    : Interop.invokeStaticMethod(clazz, methodName, evaluated);
         }
     }
 
@@ -2796,17 +2902,26 @@ public final class Compiler {
         public final Node target;
         public final String methodName;
         public final Node[] args;
+        public final Class<?> declaredClass;
+        public final Class<?>[] paramTags;
         public InstanceMethodNode(Node target, String methodName, Node[] args) {
+            this(target, methodName, args, null, null);
+        }
+        public InstanceMethodNode(Node target, String methodName, Node[] args, Class<?> declaredClass, Class<?>[] paramTags) {
             this.target = target;
             this.methodName = methodName;
             this.args = args;
+            this.declaredClass = declaredClass;
+            this.paramTags = paramTags;
         }
         @Override
         public Object eval(Object[] frame) {
             Object t = target.eval(frame);
             Object[] evaluated = new Object[args.length];
             for (int i = 0; i < args.length; i++) evaluated[i] = args[i].eval(frame);
-            return Interop.invokeInstanceMethod(t, methodName, evaluated);
+            return declaredClass != null
+                    ? Interop.invokeQualifiedInstanceMethod(declaredClass, methodName, paramTags, t, evaluated)
+                    : Interop.invokeInstanceMethod(t, methodName, evaluated);
         }
     }
 

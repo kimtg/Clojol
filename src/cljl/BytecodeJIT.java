@@ -4500,6 +4500,14 @@ public final class BytecodeJIT {
                 invokevirtual("cljl/Fn", "asComparator", "()Ljava/util/Comparator;", 1, 1);
                 return 1;
             }
+            if (Interop.isFunctionalInterface(pt) && !pt.isAssignableFrom(typeOf(arg).boxClass())) {
+                loadConstObj(pt);
+                checkcast("java/lang/Class");
+                emitBoxed(arg);
+                invokestatic("cljl/Interop", "coerceArg", "(Ljava/lang/Class;Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                checkcast(pt.getName().replace('.', '/'));
+                return 1;
+            }
             emitRef(arg, pt);
             return 1;
         }
@@ -4524,7 +4532,7 @@ public final class BytecodeJIT {
             String owner = ownerCls.getName().replace('.', '/');
             Class<?>[] pts = m.getParameterTypes();
             Class<?> ret = m.getReturnType();
-            emitRef(im.target, ownerCls);
+            emitRef(im.target, im.declaredClass != null ? im.declaredClass : ownerCls);
             int argWords = 1 + emitJavaArgs(im.args, pts);
             int retWords = slotWidth(ret);
             if (ownerCls.isInterface()) {
@@ -4771,40 +4779,68 @@ public final class BytecodeJIT {
                 return false;
             }
 
-            // General fn calls
+            // General fn calls (supports both cljl.Fn and any external clojure.lang.IFn)
             if (node instanceof Call0Node c) {
                 if (isDirectSelf(c.fn, 0)) {
                     aload(0);
                     invokevirtual(ce.className, "invoke", "()Ljava/lang/Object;", 1, 1);
-                } else {
+                } else if (Fn.class.isAssignableFrom(typeOf(c.fn).boxClass())) {
                     emitBoxed(c.fn);
                     checkcast("cljl/Fn");
                     invokevirtual("cljl/Fn", "invoke", "()Ljava/lang/Object;", 1, 1);
+                } else {
+                    emitBoxed(c.fn);
+                    checkcast("clojure/lang/IFn");
+                    invokeinterface("clojure/lang/IFn", "invoke", "()Ljava/lang/Object;", 1, 1);
                 }
                 return false;
             }
             if (node instanceof Call1Node c) {
-                emitBoxed(c.fn);
-                checkcast("cljl/Fn");
-                emitBoxed(c.a);
-                invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                if (Fn.class.isAssignableFrom(typeOf(c.fn).boxClass())) {
+                    emitBoxed(c.fn);
+                    checkcast("cljl/Fn");
+                    emitBoxed(c.a);
+                    invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                } else {
+                    emitBoxed(c.fn);
+                    checkcast("clojure/lang/IFn");
+                    emitBoxed(c.a);
+                    invokeinterface("clojure/lang/IFn", "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                }
                 return false;
             }
             if (node instanceof Call2Node c) {
-                emitBoxed(c.fn);
-                checkcast("cljl/Fn");
-                emitBoxed(c.a);
-                emitBoxed(c.b);
-                invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                if (Fn.class.isAssignableFrom(typeOf(c.fn).boxClass())) {
+                    emitBoxed(c.fn);
+                    checkcast("cljl/Fn");
+                    emitBoxed(c.a);
+                    emitBoxed(c.b);
+                    invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                } else {
+                    emitBoxed(c.fn);
+                    checkcast("clojure/lang/IFn");
+                    emitBoxed(c.a);
+                    emitBoxed(c.b);
+                    invokeinterface("clojure/lang/IFn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                }
                 return false;
             }
             if (node instanceof Call3Node c) {
-                emitBoxed(c.fn);
-                checkcast("cljl/Fn");
-                emitBoxed(c.a);
-                emitBoxed(c.b);
-                emitBoxed(c.c);
-                invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
+                if (Fn.class.isAssignableFrom(typeOf(c.fn).boxClass())) {
+                    emitBoxed(c.fn);
+                    checkcast("cljl/Fn");
+                    emitBoxed(c.a);
+                    emitBoxed(c.b);
+                    emitBoxed(c.c);
+                    invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
+                } else {
+                    emitBoxed(c.fn);
+                    checkcast("clojure/lang/IFn");
+                    emitBoxed(c.a);
+                    emitBoxed(c.b);
+                    emitBoxed(c.c);
+                    invokeinterface("clojure/lang/IFn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
+                }
                 return false;
             }
             if (node instanceof Call4Node c) {
@@ -4812,11 +4848,16 @@ public final class BytecodeJIT {
                     aload(0);
                     emitBoxed(c.a); emitBoxed(c.b); emitBoxed(c.c); emitBoxed(c.d);
                     invokevirtual(ce.className, "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
-                } else {
+                } else if (Fn.class.isAssignableFrom(typeOf(c.fn).boxClass())) {
                     emitBoxed(c.fn);
                     checkcast("cljl/Fn");
                     emitBoxed(c.a); emitBoxed(c.b); emitBoxed(c.c); emitBoxed(c.d);
                     invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
+                } else {
+                    emitBoxed(c.fn);
+                    checkcast("clojure/lang/IFn");
+                    emitBoxed(c.a); emitBoxed(c.b); emitBoxed(c.c); emitBoxed(c.d);
+                    invokeinterface("clojure/lang/IFn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
                 }
                 return false;
             }
@@ -5462,8 +5503,15 @@ public final class BytecodeJIT {
                 }
                 loadConstObj(nn.clazz);
                 checkcast("java/lang/Class");
-                emitObjectArrayOrEmpty(nn.args);
-                invokestatic("cljl/Interop", "invokeConstructor", "(Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                if (nn.paramTags != null) {
+                    loadConstObj(nn.paramTags);
+                    checkcast("[Ljava/lang/Class;");
+                    emitObjectArrayOrEmpty(nn.args);
+                    invokestatic("cljl/Interop", "invokeConstructorWithTags", "(Ljava/lang/Class;[Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                } else {
+                    emitObjectArrayOrEmpty(nn.args);
+                    invokestatic("cljl/Interop", "invokeConstructor", "(Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                }
                 return false;
             }
             if (node instanceof StaticFieldNode sf) {
@@ -5489,8 +5537,15 @@ public final class BytecodeJIT {
                 loadConstObj(sm.clazz);
                 checkcast("java/lang/Class");
                 ldcString(sm.methodName);
-                emitObjectArrayOrEmpty(sm.args);
-                invokestatic("cljl/Interop", "invokeStaticMethod", "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                if (sm.paramTags != null) {
+                    loadConstObj(sm.paramTags);
+                    checkcast("[Ljava/lang/Class;");
+                    emitObjectArrayOrEmpty(sm.args);
+                    invokestatic("cljl/Interop", "invokeStaticMethodWithTags", "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
+                } else {
+                    emitObjectArrayOrEmpty(sm.args);
+                    invokestatic("cljl/Interop", "invokeStaticMethod", "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                }
                 return false;
             }
             if (node instanceof InstanceFieldNode inf) {
@@ -5512,10 +5567,25 @@ public final class BytecodeJIT {
                     coerceJavaReturnToStack(m.getReturnType(), ValType.ANY);
                     return false;
                 }
-                emitBoxed(im.target);
-                ldcString(im.methodName);
-                emitObjectArrayOrEmpty(im.args);
-                invokestatic("cljl/Interop", "invokeInstanceMethod", "(Ljava/lang/Object;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                if (im.declaredClass != null) {
+                    loadConstObj(im.declaredClass);
+                    checkcast("java/lang/Class");
+                    ldcString(im.methodName);
+                    if (im.paramTags != null) {
+                        loadConstObj(im.paramTags);
+                        checkcast("[Ljava/lang/Class;");
+                    } else {
+                        aconstNull();
+                    }
+                    emitBoxed(im.target);
+                    emitObjectArrayOrEmpty(im.args);
+                    invokestatic("cljl/Interop", "invokeQualifiedInstanceMethod", "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
+                } else {
+                    emitBoxed(im.target);
+                    ldcString(im.methodName);
+                    emitObjectArrayOrEmpty(im.args);
+                    invokestatic("cljl/Interop", "invokeInstanceMethod", "(Ljava/lang/Object;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                }
                 return false;
             }
             if (node instanceof SetVarNode sv) {

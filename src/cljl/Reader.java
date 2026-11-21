@@ -595,8 +595,10 @@ public final class Reader {
             metaMap = PersistentHashMap.EMPTY.assoc(kw, Boolean.TRUE);
         } else if (metaVal instanceof PersistentHashMap m) {
             metaMap = m;
+        } else if (metaVal instanceof PersistentVector v) {
+            metaMap = PersistentHashMap.EMPTY.assoc(Keyword.intern("param-tags"), v);
         } else {
-            throw readerError("Metadata must be Symbol, Keyword, String or Map");
+            throw readerError("Metadata must be Symbol, Keyword, String, Vector or Map");
         }
         Object target = readForm(true, null);
         if (target instanceof IObj io) {
@@ -679,6 +681,14 @@ public final class Reader {
         Object readerFn = (readersObj != null) ? RT.get(readersObj, tag) : null;
         if (readerFn == null) {
             readerFn = RT.DEFAULT_DATA_READERS_MAP.valAt(tag);
+        }
+        if (readerFn == null) {
+            Object cpReaderSym = RT.getClasspathDataReaders().valAt(tag);
+            if (cpReaderSym instanceof Symbol fnSym && fnSym.ns != null) {
+                Core.loadLib(fnSym.ns);
+                Var v = Compiler.lookupVar(RT.currentNS(), fnSym, false);
+                if (v != null && v.isBound()) readerFn = v.deref();
+            }
         }
         if (readerFn instanceof Fn f) {
             return f.invoke(form);
@@ -914,6 +924,12 @@ public final class Reader {
         }
         Namespace cur = RT.currentNS();
         if (sym.ns != null) {
+            if (Interop.isArrayDimToken(sym.name)) {
+                Class<?> comp = Interop.resolveClass(cur, sym.ns);
+                if (comp != null) {
+                    return Symbol.intern(comp.getName(), sym.name);
+                }
+            }
             Namespace aliasNs = cur.lookupAlias(Symbol.intern(sym.ns));
             if (aliasNs != null) {
                 return Symbol.intern(aliasNs.name.name, sym.name);
@@ -1071,6 +1087,77 @@ public final class Reader {
         }
 
         return Symbol.intern(s);
+    }
+
+    public static final class StringReaderFn extends Fn.NamedFn {
+        public StringReaderFn() {
+            super("LispReader$StringReader");
+        }
+
+        @Override
+        public Object invoke(Object rdrObj, Object doublequote) {
+            return invoke(rdrObj, doublequote, null);
+        }
+
+        @Override
+        public Object invoke(Object rdrObj, Object doublequote, Object opts, Object pendingForms) {
+            return invoke(rdrObj, doublequote, opts);
+        }
+
+        @Override
+        public Object invoke(Object rdrObj, Object doublequote, Object opts) {
+            java.io.Reader r = (java.io.Reader) rdrObj;
+            StringBuilder sb = new StringBuilder();
+            try {
+                while (true) {
+                    int c = r.read();
+                    if (c == -1) throw new RuntimeException("EOF while reading string");
+                    if (c == '"') return sb.toString();
+                    if (c == '\\') {
+                        int esc = r.read();
+                        if (esc == -1) throw new RuntimeException("EOF while reading string escape");
+                        switch (esc) {
+                            case 't' -> sb.append('\t');
+                            case 'r' -> sb.append('\r');
+                            case 'n' -> sb.append('\n');
+                            case '\\' -> sb.append('\\');
+                            case '"' -> sb.append('"');
+                            case 'b' -> sb.append('\b');
+                            case 'f' -> sb.append('\f');
+                            case 'u' -> {
+                                StringBuilder hex = new StringBuilder(4);
+                                for (int i = 0; i < 4; i++) {
+                                    int hc = r.read();
+                                    if (hc == -1) throw new RuntimeException("Invalid unicode escape");
+                                    hex.append((char) hc);
+                                }
+                                sb.append((char) Integer.parseInt(hex.toString(), 16));
+                            }
+                            default -> {
+                                if (esc >= '0' && esc <= '7') {
+                                    StringBuilder oct = new StringBuilder();
+                                    oct.append((char) esc);
+                                    if (r instanceof java.io.PushbackReader pbr) {
+                                        for (int i = 0; i < 2; i++) {
+                                            int next = pbr.read();
+                                            if (next >= '0' && next <= '7') oct.append((char) next);
+                                            else { if (next != -1) pbr.unread(next); break; }
+                                        }
+                                    }
+                                    sb.append((char) Integer.parseInt(oct.toString(), 8));
+                                } else {
+                                    throw new RuntimeException("Unsupported escape character: \\" + (char) esc);
+                                }
+                            }
+                        }
+                    } else {
+                        sb.append((char) c);
+                    }
+                }
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        }
     }
 
     private RuntimeException readerError(String msg) {

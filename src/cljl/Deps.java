@@ -869,6 +869,73 @@ public final class Deps {
         Core.markLibLoaded("clojure.tools.deps.cli.api");
     }
 
+    public static synchronized void initReplDepsNamespace() {
+        Namespace ns = Namespace.findOrCreate("clojure.repl.deps");
+        ns.intern("add-libs", Fn.of1("add-libs", libCoordsObj -> {
+            if (!(libCoordsObj instanceof PersistentHashMap libCoords) || libCoords.count() == 0) {
+                return PersistentList.EMPTY;
+            }
+            PersistentHashMap sdepsMap = PersistentHashMap.create(Keyword.intern("deps"), libCoords);
+            CliOptions opts = new CliOptions();
+            opts.sdeps = RT.printString(sdepsMap, true);
+            opts.sforce = true;
+            BasisResult basis = resolveBasis(opts);
+            List<Symbol> added = new ArrayList<>();
+            for (String root : basis.classpathRoots) {
+                if (root != null && !root.isEmpty()) {
+                    RT.addClasspath(root);
+                }
+            }
+            for (ISeq s = libCoords.seq(); s != null; s = s.next()) {
+                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                if (me.key instanceof Symbol sym) added.add(sym);
+            }
+            return PersistentList.create(added);
+        }));
+        ns.intern("add-lib", Fn.of12("add-lib",
+                lib -> {
+                    CliOptions opts = new CliOptions();
+                    opts.sforce = true;
+                    BasisResult basis = resolveBasis(opts);
+                    Object depsObj = basis.mergedDeps.valAt(Keyword.intern("deps"));
+                    Object coord = depsObj instanceof PersistentHashMap dm ? dm.valAt(lib) : null;
+                    if (coord == null) {
+                        throw new IllegalArgumentException("No coordinate found in deps.edn for lib: " + lib);
+                    }
+                    Fn addLibsFn = (Fn) ns.findInternedVar(Symbol.intern("add-libs")).deref();
+                    return addLibsFn.invoke(PersistentHashMap.create(lib, coord));
+                },
+                (lib, coord) -> {
+                    Fn addLibsFn = (Fn) ns.findInternedVar(Symbol.intern("add-libs")).deref();
+                    return addLibsFn.invoke(PersistentHashMap.create(lib, coord));
+                }));
+        ns.intern("sync-deps", Fn.of01("sync-deps",
+                () -> syncDepsImpl(PersistentHashMap.EMPTY),
+                optsObj -> syncDepsImpl(asMap(optsObj))));
+        Core.markLibLoaded("clojure.repl.deps");
+    }
+
+    private static Object syncDepsImpl(PersistentHashMap optsMap) {
+        CliOptions cli = new CliOptions();
+        cli.sforce = true;
+        Object aliasesObj = optsMap.valAt(Keyword.intern("aliases"));
+        if (aliasesObj != null) {
+            for (ISeq s = RT.seq(aliasesObj); s != null; s = s.next()) {
+                Object a = s.first();
+                if (a instanceof Keyword kw) cli.aliases.add(kw);
+            }
+        }
+        BasisResult basis = resolveBasis(cli);
+        for (String root : basis.classpathRoots) {
+            if (root != null && !root.isEmpty()) {
+                RT.addClasspath(root);
+            }
+        }
+        List<Symbol> libs = new ArrayList<>();
+        for (Symbol k : basis.libsBySymbol.keySet()) libs.add(k);
+        return PersistentList.create(libs);
+    }
+
     private static PersistentHashMap asMap(Object o) {
         return (o instanceof PersistentHashMap m) ? m : PersistentHashMap.EMPTY;
     }

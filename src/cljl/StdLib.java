@@ -744,21 +744,94 @@ public final class StdLib {
         if (LOADED.contains("clojure.test")) return;
         Namespace ns = Namespace.findOrCreate("clojure.test");
         Var counters = ns.intern(Symbol.intern("*report-counters*")).bindRoot(new Atom(PersistentHashMap.EMPTY)).setDynamic();
-        Var currentTest = ns.intern(Symbol.intern("*testing-vars*")).bindRoot(PersistentList.EMPTY).setDynamic();
+        Var testingVars = ns.intern(Symbol.intern("*testing-vars*")).bindRoot(PersistentList.EMPTY).setDynamic();
+        Var testingContexts = ns.intern(Symbol.intern("*testing-contexts*")).bindRoot(PersistentList.EMPTY).setDynamic();
+        Var loadTests = ns.intern(Symbol.intern("*load-tests*")).bindRoot(Boolean.TRUE).setDynamic();
+        Var stackTraceDepth = ns.intern(Symbol.intern("*stack-trace-depth*")).bindRoot(null).setDynamic();
+
+        Keyword kTest = Keyword.intern("test");
+        Keyword kPass = Keyword.intern("pass");
+        Keyword kFail = Keyword.intern("fail");
+        Keyword kError = Keyword.intern("error");
+        Keyword kType = Keyword.intern("type");
+        Keyword kOnce = Keyword.intern("once");
+        Keyword kEach = Keyword.intern("each");
+        Keyword kOnceFixtures = Keyword.intern("clojure.test", "once-fixtures");
+        Keyword kEachFixtures = Keyword.intern("clojure.test", "each-fixtures");
 
         ns.intern("inc-report-counter", Fn.of1("inc-report-counter", name -> {
-            Atom a = (Atom) counters.deref();
-            a.swap(Fn.of1("inc-c", m -> {
-                PersistentHashMap pm = (PersistentHashMap) m;
-                long cur = Numbers.toLong(pm.valAt(name, 0L));
-                return pm.assoc(name, cur + 1L);
-            }));
+            Object aObj = counters.deref();
+            if (aObj instanceof Atom a) {
+                a.swap(Fn.of1("inc-c", m -> {
+                    PersistentHashMap pm = (PersistentHashMap) m;
+                    long cur = Numbers.toLong(pm.valAt(name, 0L));
+                    return pm.assoc(name, cur + 1L);
+                }));
+            }
             return null;
         }));
 
+        ns.intern("testing-vars-str", Fn.of1("testing-vars-str", m -> {
+            StringBuilder sb = new StringBuilder();
+            for (ISeq s = RT.seq(testingVars.deref()); s != null; s = s.next()) {
+                if (!sb.isEmpty()) sb.append(' ');
+                Object v = s.first();
+                sb.append(v instanceof Var vr ? vr.sym.name : String.valueOf(v));
+            }
+            return sb.toString();
+        }));
+
+        ns.intern("testing-contexts-str", Fn.of0("testing-contexts-str", () -> {
+            List<String> parts = new ArrayList<>();
+            for (ISeq s = RT.seq(testingContexts.deref()); s != null; s = s.next()) {
+                parts.add(String.valueOf(s.first()));
+            }
+            Collections.reverse(parts);
+            return String.join(" ", parts);
+        }));
+
+        ns.intern("function?", Fn.of1("function?", x -> x instanceof Fn));
+
+        ns.intern("successful?", Fn.of1("successful?", summary -> {
+            if (!(summary instanceof Map<?, ?> m)) return Boolean.FALSE;
+            long fails = Numbers.toLong(RT.get(summary, kFail, 0L));
+            long errs = Numbers.toLong(RT.get(summary, kError, 0L));
+            return fails == 0L && errs == 0L;
+        }));
+
+        MultiFn reportMulti = new MultiFn("report", Fn.of1("report-dispatch", m -> RT.get(m, kType)), Keyword.intern("default"));
+        reportMulti.addMethod(Keyword.intern("default"), Fn.of1("report-default", m -> null));
+        reportMulti.addMethod(kPass, Fn.of1("report-pass", m -> {
+            ((Fn) ns.findInternedVar(Symbol.intern("inc-report-counter")).deref()).invoke(kPass);
+            return null;
+        }));
+        reportMulti.addMethod(kFail, Fn.of1("report-fail", m -> {
+            ((Fn) ns.findInternedVar(Symbol.intern("inc-report-counter")).deref()).invoke(kFail);
+            String ctx = String.valueOf(((Fn) ns.findInternedVar(Symbol.intern("testing-contexts-str")).deref()).invoke());
+            String vars = String.valueOf(((Fn) ns.findInternedVar(Symbol.intern("testing-vars-str")).deref()).invoke(m));
+            System.err.println("FAIL in (" + vars + ")" + (ctx.isEmpty() ? "" : " " + ctx)
+                    + ": " + RT.get(m, Keyword.intern("message"), "")
+                    + " expected: " + RT.printString(RT.get(m, Keyword.intern("expected")))
+                    + " actual: " + RT.printString(RT.get(m, Keyword.intern("actual"))));
+            return null;
+        }));
+        reportMulti.addMethod(kError, Fn.of1("report-error", m -> {
+            ((Fn) ns.findInternedVar(Symbol.intern("inc-report-counter")).deref()).invoke(kError);
+            String ctx = String.valueOf(((Fn) ns.findInternedVar(Symbol.intern("testing-contexts-str")).deref()).invoke());
+            String vars = String.valueOf(((Fn) ns.findInternedVar(Symbol.intern("testing-vars-str")).deref()).invoke(m));
+            System.err.println("ERROR in (" + vars + ")" + (ctx.isEmpty() ? "" : " " + ctx)
+                    + ": " + RT.get(m, Keyword.intern("message"), "")
+                    + " expected: " + RT.printString(RT.get(m, Keyword.intern("expected")))
+                    + " actual: " + RT.printString(RT.get(m, Keyword.intern("actual"))));
+            return null;
+        }));
+        Var reportVar = ns.intern("report", reportMulti);
+
+        ns.intern("do-report", Fn.of1("do-report", m -> ((Fn) reportVar.deref()).invoke(m)));
+
         ns.internMacro("deftest", Fn.ofVarargs("deftest", args -> {
             Symbol name = (Symbol) args[0];
-            Symbol named = name.withMeta(PersistentHashMap.EMPTY.assoc(Keyword.intern("test"), Boolean.TRUE));
+            Symbol named = name.withMeta(PersistentHashMap.EMPTY.assoc(kTest, Boolean.TRUE));
             List<Object> body = new ArrayList<>();
             body.add(Symbol.intern("do"));
             for (int i = 1; i < args.length; i++) body.add(args[i]);
@@ -766,27 +839,75 @@ public final class StdLib {
                     Symbol.intern("defn"), named, PersistentVector.EMPTY, PersistentList.create(body));
         }));
 
-        ns.internMacro("testing", Fn.ofVarargs("testing", args -> {
+        ns.internMacro("set-test", Fn.ofVarargs("set-test", args -> {
+            Symbol name = (Symbol) args[0];
             List<Object> body = new ArrayList<>();
-            body.add(Symbol.intern("do"));
+            body.add(Symbol.intern("fn"));
+            body.add(PersistentVector.EMPTY);
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            return PersistentList.createFromArray(
+                    Symbol.intern("clojure.core", "alter-meta!"),
+                    PersistentList.createFromArray(Symbol.intern("var"), name),
+                    Symbol.intern("clojure.core", "assoc"),
+                    kTest,
+                    PersistentList.create(body));
+        }));
+
+        ns.internMacro("with-test", Fn.ofVarargs("with-test", args -> {
+            Object defForm = args[0];
+            Object defName = RT.second(defForm);
+            List<Object> setTestArgs = new ArrayList<>();
+            setTestArgs.add(Symbol.intern("clojure.test", "set-test"));
+            setTestArgs.add(defName);
+            for (int i = 1; i < args.length; i++) setTestArgs.add(args[i]);
+            return PersistentList.createFromArray(
+                    Symbol.intern("do"),
+                    defForm,
+                    PersistentList.create(setTestArgs));
+        }));
+
+        ns.internMacro("testing", Fn.ofVarargs("testing", args -> {
+            Object desc = args[0];
+            List<Object> body = new ArrayList<>();
+            body.add(Symbol.intern("clojure.core", "binding"));
+            body.add(PersistentVector.createOwning(
+                    Symbol.intern("clojure.test", "*testing-contexts*"),
+                    PersistentList.createFromArray(
+                            Symbol.intern("clojure.core", "conj"),
+                            Symbol.intern("clojure.test", "*testing-contexts*"),
+                            desc)));
             for (int i = 1; i < args.length; i++) body.add(args[i]);
             return PersistentList.create(body);
         }));
 
-        ns.intern("do-report", Fn.of1("do-report", m -> {
-            PersistentHashMap pm = (PersistentHashMap) m;
-            Object type = pm.valAt(Keyword.intern("type"));
-            Atom a = (Atom) counters.deref();
-            a.swap(Fn.of1("inc-c", cm -> {
-                PersistentHashMap pcm = (PersistentHashMap) cm;
-                long cur = Numbers.toLong(pcm.valAt(type, 0L));
-                return pcm.assoc(type, cur + 1L);
-            }));
-            if (Keyword.intern("fail").equals(type) || Keyword.intern("error").equals(type)) {
-                System.err.println("FAIL/ERROR: " + pm.valAt(Keyword.intern("message"), "")
-                        + " expected: " + RT.printString(pm.valAt(Keyword.intern("expected")))
-                        + " actual: " + RT.printString(pm.valAt(Keyword.intern("actual"))));
+        Fn composeFixtures = Fn.of2("compose-fixtures", (f1, f2) ->
+                Fn.of1("composed-fixture", g -> ((Fn) f1).invoke(Fn.of0("inner-fixture", () -> ((Fn) f2).invoke(g)))));
+        ns.intern("compose-fixtures", composeFixtures);
+
+        Fn joinFixtures = Fn.of1("join-fixtures", fixtures -> {
+            Fn combined = Fn.of1("default-fixture", f -> ((Fn) f).invoke());
+            List<Fn> list = new ArrayList<>();
+            for (ISeq s = RT.seq(fixtures); s != null; s = s.next()) {
+                list.add((Fn) s.first());
             }
+            for (int i = list.size() - 1; i >= 0; i--) {
+                combined = (Fn) composeFixtures.invoke(list.get(i), combined);
+            }
+            return combined;
+        });
+        ns.intern("join-fixtures", joinFixtures);
+
+        ns.intern("use-fixtures", Fn.ofVarargs("use-fixtures", args -> {
+            Object fixtureType = args[0];
+            List<Object> fns = new ArrayList<>();
+            for (int i = 1; i < args.length; i++) fns.add(args[i]);
+            Keyword metaKey;
+            if (kOnce.equals(fixtureType)) metaKey = kOnceFixtures;
+            else if (kEach.equals(fixtureType)) metaKey = kEachFixtures;
+            else throw new IllegalArgumentException("use-fixtures expects :once or :each, got: " + fixtureType);
+            Namespace cur = RT.currentNS();
+            PersistentHashMap curMeta = cur.meta() != null ? cur.meta() : PersistentHashMap.EMPTY;
+            cur.resetMeta(curMeta.assoc(metaKey, PersistentVector.create(fns)));
             return null;
         }));
 
@@ -918,49 +1039,128 @@ public final class StdLib {
             return PersistentList.create(body);
         }));
 
-        ns.intern("run-tests", Fn.ofVarargs("run-tests", args -> {
-            Namespace targetNs = args.length == 0 ? RT.currentNS()
-                    : (args[0] instanceof Namespace n ? n : Namespace.find((Symbol) args[0]));
-            Atom report = new Atom(PersistentHashMap.create(
-                    Keyword.intern("test"), 0L,
-                    Keyword.intern("pass"), 0L,
-                    Keyword.intern("fail"), 0L,
-                    Keyword.intern("error"), 0L));
-            Map<Var, Object> bindings = Map.of(counters, report);
-            Var.pushThreadBindings(bindings);
+        Fn testVarFn = Fn.of1("test-var", vObj -> {
+            Var v = (Var) vObj;
+            Object tMeta = v.meta().valAt(kTest);
+            if (!RT.truthy(tMeta)) return null;
+            ((Fn) ns.findInternedVar(Symbol.intern("inc-report-counter")).deref()).invoke(kTest);
+            Var.pushThreadBindings(Map.of(testingVars, RT.conj(testingVars.deref(), v)));
             try {
-                System.out.println("\nTesting " + targetNs.name);
-                for (Map.Entry<Symbol, Object> e : targetNs.getMappings().entrySet()) {
-                    if (e.getValue() instanceof Var v && v.ns == targetNs
-                            && RT.truthy(v.meta().valAt(Keyword.intern("test")))) {
-                        report.swap(Fn.of1("inc-test", m -> {
-                            PersistentHashMap pm = (PersistentHashMap) m;
-                            return pm.assoc(Keyword.intern("test"), Numbers.toLong(pm.valAt(Keyword.intern("test"), 0L)) + 1L);
-                        }));
-                        try {
-                            v.invoke();
-                        } catch (Throwable t) {
-                            report.swap(Fn.of1("inc-err", m -> {
-                                PersistentHashMap pm = (PersistentHashMap) m;
-                                return pm.assoc(Keyword.intern("error"), Numbers.toLong(pm.valAt(Keyword.intern("error"), 0L)) + 1L);
-                            }));
-                            System.err.println("ERROR in (" + v.sym.name + "): " + t);
-                        }
-                    }
-                }
-                PersistentHashMap summary = (PersistentHashMap) report.deref();
-                System.out.println("Ran " + summary.valAt(Keyword.intern("test"), 0L) + " tests containing "
-                        + (Numbers.toLong(summary.valAt(Keyword.intern("pass"), 0L))
-                        + Numbers.toLong(summary.valAt(Keyword.intern("fail"), 0L))
-                        + Numbers.toLong(summary.valAt(Keyword.intern("error"), 0L)))
-                        + " assertions.");
-                System.out.println(summary.valAt(Keyword.intern("fail"), 0L) + " failures, "
-                        + summary.valAt(Keyword.intern("error"), 0L) + " errors.");
-                return summary;
+                if (tMeta instanceof Fn tf) tf.invoke();
+                else v.invoke();
+            } catch (Throwable t) {
+                ((Fn) reportVar.deref()).invoke(PersistentHashMap.create(
+                        kType, kError,
+                        Keyword.intern("message"), "Uncaught exception, not in assertion.",
+                        Keyword.intern("expected"), null,
+                        Keyword.intern("actual"), t));
             } finally {
                 Var.popThreadBindings();
             }
+            return null;
+        });
+        ns.intern("test-var", testVarFn);
+
+        Fn testVarsFn = Fn.of1("test-vars", varsObj -> {
+            Map<Namespace, List<Var>> byNs = new LinkedHashMap<>();
+            for (ISeq s = RT.seq(varsObj); s != null; s = s.next()) {
+                if (s.first() instanceof Var v) {
+                    byNs.computeIfAbsent(v.ns, k -> new ArrayList<>()).add(v);
+                }
+            }
+            for (Map.Entry<Namespace, List<Var>> entry : byNs.entrySet()) {
+                Namespace targetNs = entry.getKey();
+                PersistentHashMap nsMeta = targetNs.meta();
+                Fn onceFixture = (Fn) joinFixtures.invoke(nsMeta != null ? nsMeta.valAt(kOnceFixtures) : null);
+                Fn eachFixture = (Fn) joinFixtures.invoke(nsMeta != null ? nsMeta.valAt(kEachFixtures) : null);
+                onceFixture.invoke(Fn.of0("run-ns-vars", () -> {
+                    for (Var v : entry.getValue()) {
+                        if (RT.truthy(v.meta().valAt(kTest))) {
+                            eachFixture.invoke(Fn.of0("run-one-var", () -> testVarFn.invoke(v)));
+                        }
+                    }
+                    return null;
+                }));
+            }
+            return null;
+        });
+        ns.intern("test-vars", testVarsFn);
+
+        Fn testAllVarsFn = Fn.of1("test-all-vars", nsObj -> {
+            Namespace targetNs = nsObj instanceof Namespace n ? n : Namespace.find((Symbol) nsObj);
+            if (targetNs == null) return null;
+            List<Var> vars = new ArrayList<>();
+            for (Map.Entry<Symbol, Object> e : targetNs.getMappings().entrySet()) {
+                if (e.getValue() instanceof Var v && v.ns == targetNs && RT.truthy(v.meta().valAt(kTest))) {
+                    vars.add(v);
+                }
+            }
+            return testVarsFn.invoke(PersistentList.create(vars));
+        });
+        ns.intern("test-all-vars", testAllVarsFn);
+
+        Fn testNsFn = Fn.of1("test-ns", nsObj -> {
+            Namespace targetNs = nsObj instanceof Namespace n ? n : Namespace.find((Symbol) nsObj);
+            if (targetNs == null) throw new IllegalArgumentException("No namespace: " + nsObj);
+            Atom report = new Atom(PersistentHashMap.create(
+                    kTest, 0L, kPass, 0L, kFail, 0L, kError, 0L));
+            Var.pushThreadBindings(Map.of(counters, report));
+            try {
+                System.out.println("\nTesting " + targetNs.name);
+                Var hook = targetNs.findInternedVar(Symbol.intern("test-ns-hook"));
+                if (hook != null && hook.isBound() && hook.deref() instanceof Fn hookFn) {
+                    hookFn.invoke();
+                } else {
+                    testAllVarsFn.invoke(targetNs);
+                }
+                return report.deref();
+            } finally {
+                Var.popThreadBindings();
+            }
+        });
+        ns.intern("test-ns", testNsFn);
+
+        ns.intern("run-tests", Fn.ofVarargs("run-tests", args -> {
+            List<Namespace> targets = new ArrayList<>();
+            if (args.length == 0) {
+                targets.add(RT.currentNS());
+            } else {
+                for (Object a : args) {
+                    Namespace t = a instanceof Namespace n ? n : Namespace.find((Symbol) a);
+                    if (t == null) throw new IllegalArgumentException("No namespace: " + a);
+                    targets.add(t);
+                }
+            }
+            long totalTest = 0, totalPass = 0, totalFail = 0, totalErr = 0;
+            for (Namespace t : targets) {
+                PersistentHashMap m = (PersistentHashMap) testNsFn.invoke(t);
+                totalTest += Numbers.toLong(m.valAt(kTest, 0L));
+                totalPass += Numbers.toLong(m.valAt(kPass, 0L));
+                totalFail += Numbers.toLong(m.valAt(kFail, 0L));
+                totalErr += Numbers.toLong(m.valAt(kError, 0L));
+            }
+            PersistentHashMap summary = PersistentHashMap.create(
+                    kTest, totalTest, kPass, totalPass, kFail, totalFail, kError, totalErr,
+                    kType, Keyword.intern("summary"));
+            System.out.println("Ran " + totalTest + " tests containing "
+                    + (totalPass + totalFail + totalErr) + " assertions.");
+            System.out.println(totalFail + " failures, " + totalErr + " errors.");
+            return summary;
         }));
+
+        ns.intern("run-all-tests", Fn.of01("run-all-tests",
+                () -> {
+                    List<Object> all = new ArrayList<>(Namespace.all());
+                    return ((Fn) ns.findInternedVar(Symbol.intern("run-tests")).deref()).applyTo(all.toArray());
+                },
+                reObj -> {
+                    Pattern pat = reObj instanceof Pattern p ? p : Pattern.compile(String.valueOf(reObj));
+                    List<Object> matched = new ArrayList<>();
+                    for (Namespace n : Namespace.all()) {
+                        if (pat.matcher(n.name.name).find()) matched.add(n);
+                    }
+                    return ((Fn) ns.findInternedVar(Symbol.intern("run-tests")).deref()).applyTo(matched.toArray());
+                }));
 
         LOADED.add("clojure.test");
     }

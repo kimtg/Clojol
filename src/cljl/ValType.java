@@ -76,6 +76,10 @@ public final class ValType {
         }
         String name;
         if (tag instanceof Symbol sym) {
+            if (sym.ns != null && Interop.isArrayDimToken(sym.name)) {
+                Class<?> arrCls = Interop.resolveArrayClass(ns, sym.ns, sym.name);
+                if (arrCls != null) return ref(arrCls, false);
+            }
             name = sym.ns == null ? sym.name : (sym.ns + "." + sym.name);
         } else if (tag instanceof String s) {
             name = s;

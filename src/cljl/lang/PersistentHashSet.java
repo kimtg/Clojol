@@ -5,7 +5,7 @@ import cljl.RT;
 import java.util.*;
 
 public final class PersistentHashSet extends Fn
-        implements Seqable, Counted, IObj, Set<Object> {
+        implements IPersistentSet, IObj, Set<Object> {
 
     public static final PersistentHashSet EMPTY = new PersistentHashSet(null, PersistentHashMap.EMPTY);
 

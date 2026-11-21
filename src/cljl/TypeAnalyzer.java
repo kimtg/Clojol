@@ -1753,7 +1753,7 @@ public final class TypeAnalyzer {
         // Java interop
         if (n instanceof NewNode nn) {
             ValType[] argTypes = analyzeArray(nn.args);
-            Constructor<?> ctor = Interop.findPublicConstructorForTypes(nn.clazz, argTypes);
+            Constructor<?> ctor = Interop.findPublicConstructorForTags(nn.clazz, nn.paramTags, argTypes);
             if (ctor != null) resolvedCtors.put(nn, ctor);
             else resolvedCtors.remove(nn);
             return record(n, ValType.ref(nn.clazz, true));
@@ -1769,7 +1769,7 @@ public final class TypeAnalyzer {
         }
         if (n instanceof StaticMethodNode sm) {
             ValType[] argTypes = analyzeArray(sm.args);
-            Method m = Interop.findPublicMethodForTypes(sm.clazz, sm.methodName, argTypes, true);
+            Method m = Interop.findPublicMethodForTags(sm.clazz, sm.methodName, sm.paramTags, argTypes, true);
             if (m != null && !m.getDeclaringClass().isInterface()) {
                 // Classfile version 49 disallows invokestatic to InterfaceMethodref under verification;
                 // leave interface static calls unresolved so BytecodeJIT routes them through Interop.
@@ -1794,8 +1794,9 @@ public final class TypeAnalyzer {
         if (n instanceof InstanceMethodNode im) {
             ValType tt = analyzeNode(im.target);
             ValType[] argTypes = analyzeArray(im.args);
-            if (tt.isRef()) {
-                Method m = Interop.findPublicMethodForTypes(tt.refClass, im.methodName, argTypes, false);
+            Class<?> targetCls = im.declaredClass != null ? im.declaredClass : (tt.isRef() ? tt.refClass : null);
+            if (targetCls != null) {
+                Method m = Interop.findPublicMethodForTags(targetCls, im.methodName, im.paramTags, argTypes, false);
                 if (m != null) {
                     resolvedMethods.put(im, m);
                     return record(n, ValType.fromJavaReturn(m.getReturnType()));

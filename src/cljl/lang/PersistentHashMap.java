@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 32-way Hash Array Mapped Trie (HAMT) persistent map with MapEntry and TransientHashMap.
  */
 public final class PersistentHashMap extends Fn
-        implements Associative, IObj, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
+        implements IPersistentMap, IObj, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
 
     private static final Object NOT_FOUND = new Object();
     public static final PersistentHashMap EMPTY = new PersistentHashMap(null, 0, null, false, null);

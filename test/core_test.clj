@@ -1881,6 +1881,157 @@
           (is (= 50 (count s)))
           (is (= c1 @calls)))))))
 
+(require '[unloaded.alias.demo :as-alias uad]
+         '[clojure.java.process :as proc]
+         '[clojure.repl.deps :as rdeps]
+         '[clojure.core.protocols :as cp]
+         '[clojure.core.server :as srv]
+         '[clojure.stacktrace :as st]
+         '[clojure.template :as tmpl]
+         '[clojure.instant :as inst]
+         '[clojure.reflect :as refl]
+         '[clojure.uuid]
+         '[clojure.pprint :as pp])
+
+(deftest clojure-1-12-replacement-test
+  (testing "Phase 1: Method values, qualified calls, param-tags, array classes, SAM adaptation, :as-alias, process"
+    (is (= [1 2 3] (mapv ^[String] Integer/parseInt ["1" "2" "3"])))
+    (is (= 42 (^[String] Integer/parseInt "42")))
+    (is (= ["A" "B"] (mapv String/.toUpperCase ["a" "b"])))
+    (is (= ["hi" "yo"] (mapv str (mapv ^[String] StringBuilder/new ["hi" "yo"]))))
+    (is (= 2 (String/.indexOf "hello" "l")))
+    (is (= "llo" (^[int] String/.substring "hello" 2)))
+    (is (= "el" (^[_ int] String/.substring "hello" 1 3)))
+    (is (= (Class/forName "[Ljava.lang.String;") String/1))
+    (is (= (Class/forName "[[J") long/2))
+    (is (= [10 20 30]
+           (let [xs (java.util.ArrayList.)]
+             (.forEach (.stream [1 2 3]) #(.add xs (* % 10)))
+             (vec xs))))
+    (is (= [2 4] (vec (.toList (.filter (.map (.stream [1 2 3 4]) #(* % 1)) even?)))))
+    (is (= 15 (.reduce (.stream [1 2 3 4 5]) 0 +)))
+    (is (= :unloaded.alias.demo/foo ::uad/foo))
+    (is (fn? proc/start))
+    (is (fn? proc/exec))
+    (is (fn? rdeps/add-lib))
+    (is (fn? rdeps/add-libs))
+    (is (fn? rdeps/sync-deps)))
+
+  (testing "Phase 2: PersistentQueue, clojure.lang.* interfaces, ex-info maps, self-referencing deftype"
+    (let [q (conj clojure.lang.PersistentQueue/EMPTY 1 2 3)]
+      (is (= 1 (peek q)))
+      (is (= [1 2 3] q))
+      (is (= q [1 2 3]))
+      (is (= q '(1 2 3)))
+      (is (= (hash [1 2 3]) (hash q)))
+      (is (= [2 3] (pop q)))
+      (is (= 3 (count q)))
+      (is (= clojure.lang.PersistentQueue/EMPTY (empty q)))
+      (is (= clojure.lang.PersistentQueue/EMPTY (pop clojure.lang.PersistentQueue/EMPTY)))
+      (is (nil? (peek clojure.lang.PersistentQueue/EMPTY)))
+      (is (sequential? q))
+      (is (not (seq? q)))
+      (is (= 6 (reduce + 0 q)))
+      (is (= "(1 2 3)" (pr-str q))))
+    (is (not= [[:a 1]] (sorted-map :a 1)))
+    (let [e (ex-info "boom" (sorted-map :code 500))]
+      (is (instance? clojure.lang.ExceptionInfo e))
+      (is (instance? clojure.lang.IExceptionInfo e))
+      (is (= {:code 500} (ex-data e))))
+    (is (instance? clojure.lang.IPersistentMap {:a 1}))
+    (is (instance? clojure.lang.IPersistentVector [1 2]))
+    (is (instance? clojure.lang.Indexed [1 2]))
+    (is (instance? clojure.lang.IPersistentSet #{1 2}))
+    (is (instance? clojure.lang.Named :a/b))
+    (is (instance? clojure.lang.Sequential [1 2]))
+    (is (instance? clojure.lang.IPending (lazy-seq [1])))
+    (eval '(do
+             (deftype SelfRefBox [v]
+               clojure.lang.Seqable
+               clojure.lang.IPersistentCollection
+               (seq [_] (seq [v]))
+               Object
+               (equals [_ other] (and (instance? SelfRefBox other) (= v (.-v other))))
+               (toString [_] (str "Box(" v ")")))
+             (assert (= (SelfRefBox. 7) (SelfRefBox. 7)))
+             (assert (= "Box(7)" (str (SelfRefBox. 7)))))))
+
+  (testing "Phase 3: core.protocols, server/prepl, stacktrace, template, instant, reflect, uuid, pprint"
+    (is (= 10 (cp/coll-reduce [1 2 3 4] + 0)))
+    (is (= 6 (cp/kv-reduce {:a 1 :b 2 :c 3} (fn [a _ v] (+ a v)) 0)))
+    (is (= '(+ 1 2) (tmpl/apply-template '[x y] '(+ x y) [1 2])))
+    (let [d (inst/read-instant-date "2026-01-02T03:04:05Z")]
+      (is (instance? java.util.Date d))
+      (is (.startsWith (pr-str d) "#inst \"2026-01-02T03:04:05")))
+    (let [u (random-uuid)]
+      (is (= u (read-string (pr-str u)))))
+    (let [r (refl/reflect String)]
+      (is (contains? (:flags r) :public))
+      (is (some #(= 'length (:name %)) (:members r))))
+    (let [root (IllegalArgumentException. "root")
+          outer (RuntimeException. "outer" root)]
+      (is (identical? root (st/root-cause outer))))
+    (is (= "42" (pp/write 42 :stream nil :pretty false)))
+    (is (= "x=5" (with-out-str ((pp/formatter-out "x=~a") 5))))
+    (let [ss (srv/start-server {:name "core-test-prepl" :port 0 :accept 'clojure.core.server/io-prepl})
+          port (.getLocalPort ss)]
+      (try
+        (let [out (atom [])]
+          (srv/remote-prepl "127.0.0.1" port (java.io.StringReader. "(+ 20 22)\n") #(swap! out conj %))
+          (is (= 1 (count @out)))
+          (is (= :ret (:tag (first @out))))
+          (is (= "42" (:val (first @out)))))
+        (finally
+          (srv/stop-server "core-test-prepl")))))
+
+  (testing "Phase 4: clojure.java.api.Clojure, clojure.lang.IFn, gen-class"
+    (let [plus (clojure.java.api.Clojure/var "clojure.core" "+")
+          inc-fn (clojure.java.api.Clojure/var "clojure.core/inc")]
+      (is (instance? clojure.lang.IFn plus))
+      (is (= 15 (.invoke plus 1 2 3 4 5)))
+      (is (= 42 (.invoke inc-fn 41)))
+      (is (= {:k 1} (clojure.java.api.Clojure/read "{:k 1}"))))
+    (eval '(do
+             (ns cljl.genclass-test-demo
+               (:gen-class
+                 :name cljl.GenClassDemo
+                 :state state
+                 :init init
+                 :constructors {[String] []}
+                 :methods [[greet [String] String]
+                           ^{:static true} [add [long long] long]]
+                 :main true))
+             (defn -init [prefix] [[] prefix])
+             (defn -greet [this who] (str (.-state this) ", " who "!"))
+             (defn -add [a b] (+ a b))
+             (def main-args (atom nil))
+             (defn -main [& args] (reset! main-args (vec args)))
+             (let [g (cljl.GenClassDemo. "Hi")]
+               (assert (= "Hi, World!" (.greet g "World")))
+               (assert (= 7 (cljl.GenClassDemo/add 3 4)))
+               (cljl.GenClassDemo/main (into-array String ["x" "y"]))
+               (assert (= ["x" "y"] @main-args)))))
+    (in-ns 'cljl.core-test))
+
+  (testing "Phase 5 regressions: {:pre :post}, defonce in do, *unchecked-math*, *warn-on-reflection* in load"
+    (let [f (fn [x] {:pre [(pos? x)] :post [(even? %)]} (* x 2))]
+      (is (= 6 (f 3)))
+      (is (thrown? AssertionError (f -1))))
+    (let [g (fn [x] {:post [(pos? %)]} (- x 10))]
+      (is (thrown? AssertionError (g 5))))
+    (is (= :first
+           (load-string "(do (defonce __defonce_test_val__ :first) (defonce __defonce_test_val__ :second) __defonce_test_val__)")))
+    (is (= Long/MIN_VALUE
+           (load-string "(set! *unchecked-math* true) (+ Long/MAX_VALUE 1)")))
+    (is (= :ok
+           (load-string "(set! *warn-on-reflection* true) :ok")))
+    (is (thrown? java.io.FileNotFoundException (slurp "nonexistent_clojol_test_file_xyz.txt")))
+    (let [f (reify clojure.lang.IFn
+              (invoke [_ x] (* x 2))
+              (invoke [_ x y] (+ x y)))]
+      (is (= 10 (f 5)))
+      (is (= 9 (f 4 5))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

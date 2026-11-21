@@ -67,6 +67,151 @@ public final class Interop {
         return findClass(name);
     }
 
+    public static boolean isArrayDimToken(String s) {
+        return s != null && s.length() == 1 && s.charAt(0) >= '1' && s.charAt(0) <= '9';
+    }
+
+    public static Class<?> resolveArrayClass(Namespace ns, String componentName, String dimsStr) {
+        if (!isArrayDimToken(dimsStr)) return null;
+        int dims = dimsStr.charAt(0) - '0';
+        Class<?> comp = resolveClass(ns, componentName);
+        if (comp == null) return null;
+        Class<?> arr = comp;
+        for (int i = 0; i < dims; i++) arr = arr.arrayType();
+        return arr;
+    }
+
+    public static Class<?>[] resolveParamTags(Namespace ns, Object paramTagsObj) {
+        if (!(paramTagsObj instanceof cljl.lang.PersistentVector pv)) return null;
+        int n = pv.count();
+        Class<?>[] tags = new Class<?>[n];
+        for (int i = 0; i < n; i++) {
+            Object item = pv.nth(i);
+            if (item == null || (item instanceof Symbol s && s.ns == null && "_".equals(s.name))) {
+                tags[i] = null; // wildcard
+            } else if (item instanceof Class<?> c) {
+                tags[i] = c;
+            } else if (item instanceof Symbol sym) {
+                Class<?> c = (sym.ns != null && isArrayDimToken(sym.name))
+                        ? resolveArrayClass(ns, sym.ns, sym.name)
+                        : resolveClass(ns, sym.ns == null ? sym.name : (sym.ns + "." + sym.name));
+                if (c == null) throw new IllegalArgumentException("Unable to resolve param-tag class: " + sym);
+                tags[i] = c;
+            } else if (item instanceof String str) {
+                Class<?> c = resolveClass(ns, str);
+                if (c == null) throw new IllegalArgumentException("Unable to resolve param-tag class: " + str);
+                tags[i] = c;
+            } else {
+                throw new IllegalArgumentException("Invalid param-tag: " + item);
+            }
+        }
+        return tags;
+    }
+
+    public static boolean hasStaticField(Class<?> clazz, String fieldName) {
+        try {
+            Field f = clazz.getField(fieldName);
+            return Modifier.isStatic(f.getModifiers());
+        } catch (NoSuchFieldException e) {
+            return false;
+        }
+    }
+
+    public static boolean hasStaticMethod(Class<?> clazz, String methodName) {
+        for (Method m : clazz.getMethods()) {
+            if (m.getName().equals(methodName) && Modifier.isStatic(m.getModifiers())) return true;
+        }
+        return false;
+    }
+
+    // Cached Functional Interface (SAM) lookup: returns the single abstract Method or NO_SAM_SENTINEL.
+    private static final Method NO_SAM_SENTINEL;
+    static {
+        try {
+            NO_SAM_SENTINEL = Object.class.getMethod("toString");
+        } catch (NoSuchMethodException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    private static final ClassValue<Method> SAM_CACHE = new ClassValue<>() {
+        @Override
+        protected Method computeValue(Class<?> type) {
+            if (!type.isInterface()) return NO_SAM_SENTINEL;
+            Method found = null;
+            for (Method m : type.getMethods()) {
+                int mod = m.getModifiers();
+                if (!Modifier.isAbstract(mod) || Modifier.isStatic(mod)) continue;
+                if (isObjectPublicMethod(m)) continue;
+                if (found != null) return NO_SAM_SENTINEL;
+                found = m;
+            }
+            return found != null ? found : NO_SAM_SENTINEL;
+        }
+    };
+
+    private static boolean isObjectPublicMethod(Method m) {
+        String name = m.getName();
+        int pc = m.getParameterCount();
+        if ("toString".equals(name) && pc == 0) return true;
+        if ("hashCode".equals(name) && pc == 0) return true;
+        if ("equals".equals(name) && pc == 1 && m.getParameterTypes()[0] == Object.class) return true;
+        return false;
+    }
+
+    public static boolean isFunctionalInterface(Class<?> c) {
+        return c != null && c.isInterface() && SAM_CACHE.get(c) != NO_SAM_SENTINEL;
+    }
+
+    public static Object adaptFnToSam(Class<?> iface, Fn fn) {
+        if (iface.isInstance(fn)) return fn;
+        if (iface == Comparator.class) return fn.asComparator();
+        Method sam = SAM_CACHE.get(iface);
+        if (sam == NO_SAM_SENTINEL) {
+            throw new IllegalArgumentException(iface.getName() + " is not a functional interface");
+        }
+        ClassLoader cl = iface.getClassLoader();
+        if (cl == null) cl = RT.baseLoader();
+        return Proxy.newProxyInstance(cl, new Class<?>[]{iface}, new SamInvocationHandler(sam, fn));
+    }
+
+    private static final class SamInvocationHandler implements InvocationHandler {
+        private final Method sam;
+        private final Fn fn;
+
+        SamInvocationHandler(Method sam, Fn fn) {
+            this.sam = sam;
+            this.fn = fn;
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            if (method.getDeclaringClass() == Object.class) {
+                return switch (method.getName()) {
+                    case "toString" -> fn.toString();
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> method.invoke(this, args);
+                };
+            }
+            if (method.isDefault()) {
+                return InvocationHandler.invokeDefault(proxy, method, args);
+            }
+            Object res;
+            if (args == null || args.length == 0) {
+                res = fn.invoke();
+            } else {
+                Object[] boxed = new Object[args.length];
+                for (int i = 0; i < args.length; i++) boxed[i] = boxResult(args[i]);
+                res = fn.applyTo(boxed);
+            }
+            Class<?> ret = method.getReturnType();
+            if (ret == void.class || ret == Void.class) return null;
+            if (ret == boolean.class || ret == Boolean.class) return RT.truthy(res);
+            return coerceArg(ret, res);
+        }
+    }
+
     public static Class<?> findClass(String name) {
         Class<?> cached = CLASS_CACHE.get(name);
         if (cached != null) return cached == NOT_A_CLASS ? null : cached;
@@ -91,23 +236,66 @@ public final class Interop {
             case "floats" -> float[].class;
             case "shorts" -> short[].class;
             case "clojure.lang.IDeref" -> cljl.lang.IDeref.class;
+            case "clojure.lang.IBlockingDeref" -> cljl.lang.IBlockingDeref.class;
+            case "clojure.lang.IPending" -> cljl.lang.IPending.class;
             case "clojure.lang.IMeta" -> cljl.lang.IMeta.class;
             case "clojure.lang.IObj" -> cljl.lang.IObj.class;
             case "clojure.lang.IReference" -> cljl.lang.IReference.class;
             case "clojure.lang.ISeq" -> cljl.lang.ISeq.class;
+            case "clojure.lang.ASeq" -> cljl.lang.ASeq.class;
             case "clojure.lang.Seqable" -> cljl.lang.Seqable.class;
+            case "clojure.lang.Sequential" -> cljl.lang.Sequential.class;
             case "clojure.lang.Associative" -> cljl.lang.Associative.class;
+            case "clojure.lang.ILookup" -> cljl.lang.ILookup.class;
+            case "clojure.lang.Indexed" -> cljl.lang.Indexed.class;
+            case "clojure.lang.Named" -> cljl.lang.Named.class;
             case "clojure.lang.Counted" -> cljl.lang.Counted.class;
             case "clojure.lang.Sorted" -> cljl.lang.Sorted.class;
             case "clojure.lang.Reversible" -> cljl.lang.Reversible.class;
-            case "clojure.lang.IFn" -> Fn.class;
+            case "clojure.lang.IReduce", "clojure.lang.IReduceInit" -> cljl.lang.IReduceInit.class;
+            case "clojure.lang.IChunk" -> cljl.lang.IChunk.class;
+            case "clojure.lang.IChunkedSeq" -> cljl.lang.IChunkedSeq.class;
+            case "clojure.lang.ChunkedCons" -> cljl.lang.ChunkedCons.class;
+            case "clojure.lang.ArrayChunk" -> cljl.lang.ArrayChunk.class;
+            case "clojure.lang.IPersistentMap" -> cljl.lang.IPersistentMap.class;
+            case "clojure.lang.IPersistentVector" -> cljl.lang.IPersistentVector.class;
+            case "clojure.lang.IPersistentSet" -> cljl.lang.IPersistentSet.class;
+            case "clojure.lang.IPersistentList" -> cljl.lang.IPersistentList.class;
+            case "clojure.lang.IPersistentCollection" -> cljl.lang.Seqable.class;
+            case "clojure.lang.PersistentHashMap", "clojure.lang.PersistentArrayMap", "clojure.lang.APersistentMap" -> cljl.lang.PersistentHashMap.class;
+            case "clojure.lang.PersistentVector", "clojure.lang.APersistentVector" -> cljl.lang.PersistentVector.class;
+            case "clojure.lang.PersistentHashSet", "clojure.lang.APersistentSet" -> cljl.lang.PersistentHashSet.class;
+            case "clojure.lang.PersistentList" -> cljl.lang.PersistentList.class;
+            case "clojure.lang.PersistentQueue" -> cljl.lang.PersistentQueue.class;
+            case "clojure.lang.PersistentTreeMap" -> cljl.lang.PersistentTreeMap.class;
+            case "clojure.lang.PersistentTreeSet" -> cljl.lang.PersistentTreeSet.class;
+            case "clojure.lang.PersistentStructMap" -> cljl.lang.PersistentStructMap.class;
+            case "clojure.lang.MapEntry", "clojure.lang.IMapEntry" -> cljl.lang.PersistentHashMap.MapEntry.class;
+            case "clojure.lang.LazySeq" -> cljl.lang.LazySeq.class;
+            case "clojure.lang.LongRange" -> cljl.lang.LongRange.class;
+            case "clojure.lang.Reduced" -> cljl.lang.Reduced.class;
+            case "clojure.lang.Ratio" -> cljl.lang.Ratio.class;
+            case "clojure.lang.BigInt" -> java.math.BigInteger.class;
+            case "clojure.lang.TaggedLiteral" -> cljl.lang.TaggedLiteral.class;
+            case "clojure.lang.ReaderConditional" -> cljl.lang.ReaderConditional.class;
+            case "clojure.lang.ExceptionInfo" -> Core.ExceptionInfo.class;
+            case "clojure.lang.IExceptionInfo" -> cljl.lang.IExceptionInfo.class;
+            case "clojure.lang.IFn" -> clojure.lang.IFn.class;
+            case "clojure.lang.AFn", "clojure.lang.AFunction" -> Fn.class;
+            case "clojure.lang.MultiFn" -> MultiFn.class;
             case "clojure.lang.Var" -> Var.class;
             case "clojure.lang.Atom" -> Atom.class;
+            case "clojure.lang.Volatile" -> Atom.Volatile.class;
             case "clojure.lang.Agent" -> Agent.class;
             case "clojure.lang.Ref" -> Ref.class;
+            case "clojure.lang.LockingTransaction" -> LockingTransaction.class;
             case "clojure.lang.Namespace" -> Namespace.class;
             case "clojure.lang.Symbol" -> Symbol.class;
             case "clojure.lang.Keyword" -> Keyword.class;
+            case "clojure.lang.RT" -> RT.class;
+            case "clojure.lang.Numbers" -> Numbers.class;
+            case "clojure.lang.Compiler" -> Compiler.class;
+            case "clojure.lang.LispReader$StringReader" -> Reader.StringReaderFn.class;
             default -> null;
         };
 
@@ -596,6 +784,7 @@ public final class Interop {
                 if (p == ac) score += 0;
                 else if (p.isAssignableFrom(ac)) score += (p == Object.class ? 3 : 1);
                 else if (p == Comparator.class && Fn.class.isAssignableFrom(ac)) score += 1;
+                else if (Fn.class.isAssignableFrom(ac) && isFunctionalInterface(p)) score += 2;
                 else return -1;
             }
         }
@@ -643,6 +832,7 @@ public final class Interop {
         if (param == ac) return 0;
         if (param.isAssignableFrom(ac)) return 1;
         if (param == Comparator.class && arg instanceof Fn) return 1;
+        if (arg instanceof Fn && isFunctionalInterface(param)) return 2;
         if (param == long.class || param == Long.class) {
             if (arg instanceof Long) return 0;
             if (Numbers.isInteger(arg)) return 2;
@@ -712,6 +902,7 @@ public final class Interop {
         if (arg == null) return null;
         if (param.isInstance(arg)) return arg;
         if (param == Comparator.class && arg instanceof Fn f) return f.asComparator();
+        if (arg instanceof Fn f && isFunctionalInterface(param)) return adaptFnToSam(param, f);
         if (param == int.class || param == Integer.class) return ((Number) arg).intValue();
         if (param == long.class || param == Long.class) return ((Number) arg).longValue();
         if (param == double.class || param == Double.class) return ((Number) arg).doubleValue();
@@ -732,5 +923,300 @@ public final class Interop {
         if (res instanceof Byte b) return b.longValue();
         if (res instanceof Float f) return f.doubleValue();
         return res;
+    }
+
+    // ========================================================================
+    // Clojure 1.12 Param-Tags, Qualified Method Invocations & Method Values
+    // ========================================================================
+
+    private static boolean matchesParamTags(Class<?>[] paramTypes, Class<?>[] paramTags) {
+        if (paramTags == null) return true;
+        if (paramTypes.length != paramTags.length) return false;
+        for (int i = 0; i < paramTags.length; i++) {
+            Class<?> tag = paramTags[i];
+            if (tag != null && paramTypes[i] != tag) return false;
+        }
+        return true;
+    }
+
+    public static Method findPublicMethodForTags(
+            Class<?> clazz, String name, Class<?>[] paramTags, ValType[] argTypes, boolean isStatic) {
+        if (paramTags == null) return findPublicMethodForTypes(clazz, name, argTypes, isStatic);
+        if (clazz == null || !Modifier.isPublic(clazz.getModifiers())) return null;
+        int arity = argTypes == null ? 0 : argTypes.length;
+        if (paramTags.length != arity) return null;
+        Method best = null;
+        int bestScore = Integer.MAX_VALUE;
+        boolean ambiguous = false;
+        int matchCount = 0;
+        Method singleMatch = null;
+        for (Method m : clazz.getMethods()) {
+            if (!m.getName().equals(name)) continue;
+            if (Modifier.isStatic(m.getModifiers()) != isStatic) continue;
+            if (m.getParameterCount() != arity) continue;
+            if (!matchesParamTags(m.getParameterTypes(), paramTags)) continue;
+            matchCount++;
+            singleMatch = m;
+            int s = staticMatchScore(m.getParameterTypes(), argTypes);
+            if (s >= 0) {
+                if (s < bestScore) { bestScore = s; best = m; ambiguous = false; }
+                else if (s == bestScore) ambiguous = true;
+            }
+        }
+        if (matchCount == 1 && singleMatch != null && !singleMatch.isVarArgs()
+                && staticCompatibleWithUnknown(singleMatch.getParameterTypes(), argTypes)) {
+            best = singleMatch;
+            ambiguous = false;
+        }
+        if (best == null || ambiguous || best.isVarArgs()) return null;
+        if (!Modifier.isPublic(best.getModifiers())) return null;
+        if (!Modifier.isPublic(best.getDeclaringClass().getModifiers())) {
+            Method pub = findPublicMethodOnHierarchy(clazz, best.getName(), best.getParameterTypes());
+            if (pub == null) return null;
+            best = pub;
+        }
+        return best;
+    }
+
+    public static Constructor<?> findPublicConstructorForTags(
+            Class<?> clazz, Class<?>[] paramTags, ValType[] argTypes) {
+        if (paramTags == null) return findPublicConstructorForTypes(clazz, argTypes);
+        if (clazz == null || !Modifier.isPublic(clazz.getModifiers())) return null;
+        int arity = argTypes == null ? 0 : argTypes.length;
+        if (paramTags.length != arity) return null;
+        Constructor<?> best = null;
+        int bestScore = Integer.MAX_VALUE;
+        boolean ambiguous = false;
+        int matchCount = 0;
+        Constructor<?> singleMatch = null;
+        for (Constructor<?> c : clazz.getConstructors()) {
+            if (c.getParameterCount() != arity) continue;
+            if (!matchesParamTags(c.getParameterTypes(), paramTags)) continue;
+            matchCount++;
+            singleMatch = c;
+            int s = staticMatchScore(c.getParameterTypes(), argTypes);
+            if (s >= 0) {
+                if (s < bestScore) { bestScore = s; best = c; ambiguous = false; }
+                else if (s == bestScore) ambiguous = true;
+            }
+        }
+        if (matchCount == 1 && singleMatch != null && !singleMatch.isVarArgs()
+                && staticCompatibleWithUnknown(singleMatch.getParameterTypes(), argTypes)) {
+            best = singleMatch;
+            ambiguous = false;
+        }
+        return (best != null && !ambiguous && !best.isVarArgs() && Modifier.isPublic(best.getModifiers())) ? best : null;
+    }
+
+    public static Object invokeConstructorWithTags(Class<?> clazz, Class<?>[] paramTags, Object[] args) {
+        if (paramTags == null) return invokeConstructor(clazz, args);
+        if (isConcurrencyClass(clazz)) Atom.markMultiThreaded();
+        int arity = args == null ? 0 : args.length;
+        if (paramTags.length != arity) {
+            throw new IllegalArgumentException("Expected " + paramTags.length + " args for " + clazz.getName() + "/new, got " + arity);
+        }
+        Constructor<?> best = null;
+        int bestScore = Integer.MAX_VALUE;
+        for (Constructor<?> c : clazz.getConstructors()) {
+            if (!matchesParamTags(c.getParameterTypes(), paramTags)) continue;
+            int score = matchScore(c.getParameterTypes(), false, args);
+            if (score >= 0 && score < bestScore) {
+                bestScore = score;
+                best = c;
+            }
+        }
+        if (best == null) {
+            throw new IllegalArgumentException("No matching constructor for " + clazz.getName() + " with param-tags");
+        }
+        if (!Modifier.isPublic(best.getModifiers()) || !isAccessibleFromHere(clazz)) {
+            try { best.setAccessible(true); } catch (Exception ignored) {}
+        }
+        try {
+            return best.newInstance(coerceArgs(best.getParameterTypes(), false, args));
+        } catch (InvocationTargetException e) {
+            throw RT.sneakyThrow(e.getTargetException());
+        } catch (ReflectiveOperationException e) {
+            throw RT.sneakyThrow(e);
+        }
+    }
+
+    public static Object invokeStaticMethodWithTags(Class<?> clazz, String methodName, Class<?>[] paramTags, Object[] args) {
+        if (paramTags == null) return invokeStaticMethod(clazz, methodName, args);
+        if (isConcurrencyClass(clazz)) Atom.markMultiThreaded();
+        int arity = args == null ? 0 : args.length;
+        if (paramTags.length != arity) {
+            throw new IllegalArgumentException("Expected " + paramTags.length + " args for " + clazz.getName() + "/" + methodName + ", got " + arity);
+        }
+        Method best = null;
+        int bestScore = Integer.MAX_VALUE;
+        for (Method m : clazz.getMethods()) {
+            if (!m.getName().equals(methodName) || !Modifier.isStatic(m.getModifiers())) continue;
+            if (!matchesParamTags(m.getParameterTypes(), paramTags)) continue;
+            int score = matchScore(m.getParameterTypes(), false, args);
+            if (score >= 0 && score < bestScore) {
+                bestScore = score;
+                best = m;
+            }
+        }
+        if (best == null) {
+            throw new IllegalArgumentException("No matching static method " + clazz.getName() + "/" + methodName + " with param-tags");
+        }
+        best = setAccessibleSafe(best, clazz);
+        try {
+            return boxResult(best.invoke(null, coerceArgs(best.getParameterTypes(), false, args)));
+        } catch (InvocationTargetException e) {
+            throw RT.sneakyThrow(e.getTargetException());
+        } catch (ReflectiveOperationException e) {
+            throw RT.sneakyThrow(e);
+        }
+    }
+
+    public static Object invokeQualifiedInstanceMethod(
+            Class<?> declaredClass, String methodName, Class<?>[] paramTags, Object target, Object[] args) {
+        if (target == null) {
+            throw new NullPointerException("Cannot call " + declaredClass.getName() + "/." + methodName + " on nil");
+        }
+        if (!declaredClass.isInstance(target)) {
+            throw new ClassCastException("Cannot cast " + target.getClass().getName() + " to " + declaredClass.getName());
+        }
+        if (paramTags == null) {
+            return invokeInstanceMethod(target, methodName, args);
+        }
+        if (isConcurrencyClass(declaredClass)) Atom.markMultiThreaded();
+        int arity = args == null ? 0 : args.length;
+        if (paramTags.length != arity) {
+            throw new IllegalArgumentException("Expected " + paramTags.length + " args for " + declaredClass.getName() + "/." + methodName + ", got " + arity);
+        }
+        Method best = null;
+        int bestScore = Integer.MAX_VALUE;
+        for (Method m : declaredClass.getMethods()) {
+            if (!m.getName().equals(methodName) || Modifier.isStatic(m.getModifiers())) continue;
+            if (!matchesParamTags(m.getParameterTypes(), paramTags)) continue;
+            int score = matchScore(m.getParameterTypes(), false, args);
+            if (score >= 0 && score < bestScore) {
+                bestScore = score;
+                best = m;
+            }
+        }
+        if (best == null) {
+            throw new IllegalArgumentException("No matching instance method " + declaredClass.getName() + "/." + methodName + " with param-tags");
+        }
+        best = setAccessibleSafe(best, declaredClass);
+        try {
+            return boxResult(best.invoke(target, coerceArgs(best.getParameterTypes(), false, args)));
+        } catch (InvocationTargetException e) {
+            throw RT.sneakyThrow(e.getTargetException());
+        } catch (ReflectiveOperationException e) {
+            throw RT.sneakyThrow(e);
+        }
+    }
+
+    public static Fn createStaticMethodFn(Class<?> clazz, String methodName, Class<?>[] paramTags) {
+        if (paramTags != null) {
+            boolean found = false;
+            for (Method m : clazz.getMethods()) {
+                if (m.getName().equals(methodName) && Modifier.isStatic(m.getModifiers())
+                        && matchesParamTags(m.getParameterTypes(), paramTags)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                throw new IllegalArgumentException("No matching static method " + clazz.getName() + "/" + methodName + " for param-tags");
+            }
+        }
+        return new StaticMethodValueFn(clazz, methodName, paramTags);
+    }
+
+    public static Fn createInstanceMethodFn(Class<?> clazz, String methodName, Class<?>[] paramTags) {
+        boolean found = false;
+        for (Method m : clazz.getMethods()) {
+            if (m.getName().equals(methodName) && !Modifier.isStatic(m.getModifiers())
+                    && matchesParamTags(m.getParameterTypes(), paramTags)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw new IllegalArgumentException("No matching instance method " + clazz.getName() + "/." + methodName);
+        }
+        return new InstanceMethodValueFn(clazz, methodName, paramTags);
+    }
+
+    public static Fn createConstructorFn(Class<?> clazz, Class<?>[] paramTags) {
+        if (paramTags != null) {
+            boolean found = false;
+            for (Constructor<?> c : clazz.getConstructors()) {
+                if (matchesParamTags(c.getParameterTypes(), paramTags)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                throw new IllegalArgumentException("No matching constructor " + clazz.getName() + "/new for param-tags");
+            }
+        }
+        return new ConstructorValueFn(clazz, paramTags);
+    }
+
+    private static final class StaticMethodValueFn extends Fn.NamedFn {
+        private final Class<?> clazz;
+        private final String methodName;
+        private final Class<?>[] paramTags;
+
+        StaticMethodValueFn(Class<?> clazz, String methodName, Class<?>[] paramTags) {
+            super(clazz.getName() + "/" + methodName);
+            this.clazz = clazz;
+            this.methodName = methodName;
+            this.paramTags = paramTags;
+        }
+
+        @Override
+        public Object invokeVarargs(Object[] args) {
+            return paramTags != null
+                    ? invokeStaticMethodWithTags(clazz, methodName, paramTags, args)
+                    : invokeStaticMethod(clazz, methodName, args);
+        }
+    }
+
+    private static final class InstanceMethodValueFn extends Fn.NamedFn {
+        private final Class<?> clazz;
+        private final String methodName;
+        private final Class<?>[] paramTags;
+
+        InstanceMethodValueFn(Class<?> clazz, String methodName, Class<?>[] paramTags) {
+            super(clazz.getName() + "/." + methodName);
+            this.clazz = clazz;
+            this.methodName = methodName;
+            this.paramTags = paramTags;
+        }
+
+        @Override
+        public Object invokeVarargs(Object[] args) {
+            if (args.length < 1) {
+                throw arityError(0);
+            }
+            Object target = args[0];
+            Object[] rest = args.length == 1 ? Fn.EMPTY_ARGS : Arrays.copyOfRange(args, 1, args.length);
+            return invokeQualifiedInstanceMethod(clazz, methodName, paramTags, target, rest);
+        }
+    }
+
+    private static final class ConstructorValueFn extends Fn.NamedFn {
+        private final Class<?> clazz;
+        private final Class<?>[] paramTags;
+
+        ConstructorValueFn(Class<?> clazz, Class<?>[] paramTags) {
+            super(clazz.getName() + "/new");
+            this.clazz = clazz;
+            this.paramTags = paramTags;
+        }
+
+        @Override
+        public Object invokeVarargs(Object[] args) {
+            return paramTags != null
+                    ? invokeConstructorWithTags(clazz, paramTags, args)
+                    : invokeConstructor(clazz, args);
+        }
     }
 }

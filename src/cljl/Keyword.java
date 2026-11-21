@@ -5,7 +5,7 @@ import cljl.lang.PersistentHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-public final class Keyword extends Fn implements Comparable<Keyword> {
+public final class Keyword extends Fn implements cljl.lang.Named, Comparable<Keyword> {
     private static final ConcurrentHashMap<String, Keyword> TABLE = new ConcurrentHashMap<>(512);
 
     public final Symbol sym;

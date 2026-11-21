@@ -1704,10 +1704,20 @@ public final class Core {
                 if (s.contains("://") || s.startsWith("file:") || s.startsWith("jar:")) {
                     return readUrl(URI.create(s).toURL(), charset);
                 }
-                return Files.readString(Path.of(s), charset);
+                try (InputStream in = new FileInputStream(s)) {
+                    return new String(in.readAllBytes(), charset);
+                }
             }
-            if (f instanceof Path p) return Files.readString(p, charset);
-            if (f instanceof File file) return Files.readString(file.toPath(), charset);
+            if (f instanceof Path p) {
+                try (InputStream in = new FileInputStream(p.toFile())) {
+                    return new String(in.readAllBytes(), charset);
+                }
+            }
+            if (f instanceof File file) {
+                try (InputStream in = new FileInputStream(file)) {
+                    return new String(in.readAllBytes(), charset);
+                }
+            }
             if (f instanceof URL url) return readUrl(url, charset);
             if (f instanceof URI uri) return readUrl(uri.toURL(), charset);
             if (f instanceof InputStream is) {
@@ -2027,6 +2037,8 @@ public final class Core {
             Symbol libSym = (Symbol) v.nth(0);
             boolean reload = false;
             Symbol asAlias = null;
+            Symbol asAliasOnly = null;
+            boolean hasNonAliasOnlyOpt = false;
             ISeq referList = null;
             boolean referAll = false;
             Set<Symbol> exclude = new HashSet<>();
@@ -2037,29 +2049,45 @@ public final class Core {
                 Object opt = v.nth(i);
                 if (Keyword.intern("as").equals(opt)) {
                     asAlias = (Symbol) v.nth(++i);
+                    hasNonAliasOnlyOpt = true;
+                } else if (Keyword.intern("as-alias").equals(opt)) {
+                    asAliasOnly = (Symbol) v.nth(++i);
                 } else if (Keyword.intern("reload").equals(opt) || Keyword.intern("reload-all").equals(opt)) {
                     reload = true;
-                } else if (Keyword.intern("refer").equals(opt)) {
+                    hasNonAliasOnlyOpt = true;
+                } else if (Keyword.intern("refer").equals(opt) || Keyword.intern("refer-macros").equals(opt)) {
                     Object r = v.nth(++i);
                     if (Keyword.intern("all").equals(r)) referAll = true;
                     else referList = RT.seq(r);
+                    hasNonAliasOnlyOpt = true;
                 } else if (Keyword.intern("exclude").equals(opt)) {
                     for (ISeq s = RT.seq(v.nth(++i)); s != null; s = s.next()) exclude.add(((Symbol) s.first()).withMeta(null));
+                    hasNonAliasOnlyOpt = true;
                 } else if (Keyword.intern("only").equals(opt)) {
                     only = new HashSet<>();
                     for (ISeq s = RT.seq(v.nth(++i)); s != null; s = s.next()) only.add(((Symbol) s.first()).withMeta(null));
+                    hasNonAliasOnlyOpt = true;
                 } else if (Keyword.intern("rename").equals(opt)) {
                     for (ISeq s = RT.seq(v.nth(++i)); s != null; s = s.next()) {
                         Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
                         rename.put(((Symbol) e.getKey()).withMeta(null), ((Symbol) e.getValue()).withMeta(null));
                     }
+                    hasNonAliasOnlyOpt = true;
+                } else if (Keyword.intern("include-macros").equals(opt)) {
+                    i++; // .cljc compatibility
                 }
+            }
+            if (asAliasOnly != null && !hasNonAliasOnlyOpt && !isUse) {
+                Namespace aliasTarget = Namespace.findOrCreate(libSym);
+                RT.currentNS().addAlias(asAliasOnly, aliasTarget);
+                return;
             }
             if (reload) LOADED_LIBS.remove(libSym.name);
             loadLib(libSym.name);
             Namespace target = Namespace.find(libSym);
             if (target == null) throw new RuntimeException("Namespace not found after require: " + libSym);
             if (asAlias != null) RT.currentNS().addAlias(asAlias, target);
+            if (asAliasOnly != null) RT.currentNS().addAlias(asAliasOnly, target);
             if (referList != null) {
                 for (ISeq s = referList; s != null; s = s.next()) {
                     Symbol sym = ((Symbol) s.first()).withMeta(null);
@@ -2087,6 +2115,12 @@ public final class Core {
         }
     }
 
+    public static void unloadLib(String nsName) {
+        if (nsName != null) {
+            LOADED_LIBS.remove(nsName);
+        }
+    }
+
     public static void loadLib(String nsName) {
         if ("clojure.core".equals(nsName)) return;
         if (LOADED_LIBS.contains(nsName) && Namespace.find(nsName) != null) return;
@@ -2101,13 +2135,14 @@ public final class Core {
             try (InputStream is = RT.baseLoader().getResourceAsStream(rel + ext)) {
                 if (is != null) {
                     Namespace savedNs = RT.currentNS();
+                    Var.pushThreadBindings(Map.of(RT.CURRENT_NS, savedNs));
                     try {
                         String src = new String(is.readAllBytes(), StandardCharsets.UTF_8);
                         Compiler.load(src, rel + ext);
                         LOADED_LIBS.add(nsName);
                         return;
                     } finally {
-                        RT.CURRENT_NS.bindRoot(savedNs);
+                        Var.popThreadBindings();
                     }
                 }
             } catch (IOException e) {
@@ -2123,13 +2158,14 @@ public final class Core {
                     if (Files.isRegularFile(p)) {
                         try {
                             Namespace savedNs = RT.currentNS();
+                            Var.pushThreadBindings(Map.of(RT.CURRENT_NS, savedNs));
                             try {
                                 String src = Files.readString(p, StandardCharsets.UTF_8);
                                 Compiler.load(src, cand);
                                 LOADED_LIBS.add(nsName);
                                 return;
                             } finally {
-                                RT.CURRENT_NS.bindRoot(savedNs);
+                                Var.popThreadBindings();
                             }
                         } catch (IOException e) {
                             throw RT.sneakyThrow(e);
@@ -2169,13 +2205,26 @@ public final class Core {
         def(ns, "ex-cause", new CoreFn1(162, "ex-cause"));
     }
 
-    public static final class ExceptionInfo extends RuntimeException {
+    public static final class ExceptionInfo extends RuntimeException implements IExceptionInfo {
         private static final long serialVersionUID = 1L;
-        public final PersistentHashMap data;
+        public final Object data;
 
-        public ExceptionInfo(String msg, PersistentHashMap data, Throwable cause) {
+        public ExceptionInfo(String msg, Object data, Throwable cause) {
             super(msg, cause);
-            this.data = data != null ? data : PersistentHashMap.EMPTY;
+            if (data == null) {
+                throw new IllegalArgumentException("Additional data must be non-nil.");
+            }
+            this.data = data;
+        }
+
+        @Override
+        public Object getData() {
+            return data;
+        }
+
+        @Override
+        public String toString() {
+            return "clojure.lang.ExceptionInfo: " + getMessage() + " " + RT.printString(data);
         }
 
         private void readObject(java.io.ObjectInputStream in) throws IOException, ClassNotFoundException {
@@ -2758,7 +2807,7 @@ public final class Core {
             case 39: { Object x = _a; return (x instanceof Associative); }
             case 40: { Object x = _a; return (x instanceof ISeq || x instanceof PersistentVector || x instanceof List<?>); }
             case 41: { Object x = _a; return (x instanceof Counted); }
-            case 42: { Object x = _a; return (x instanceof Fn); }
+            case 42: { Object x = _a; return (x instanceof clojure.lang.IFn); }
             case 43: { Object x = _a; return (x instanceof Fn && !(x instanceof Keyword || x instanceof Symbol
                 || x instanceof PersistentVector || x instanceof PersistentHashMap || x instanceof PersistentHashSet
                 || x instanceof PersistentTreeMap || x instanceof PersistentTreeSet || x instanceof PersistentColl)); }
@@ -3100,7 +3149,8 @@ public final class Core {
             case 128: {
                 Object name = _a;
             Namespace target = Namespace.findOrCreate((Symbol) name);
-            RT.CURRENT_NS.bindRoot(target);
+            if (RT.CURRENT_NS.isThreadBound()) RT.CURRENT_NS.set(target);
+            else RT.CURRENT_NS.bindRoot(target);
             return target;
         
             }
@@ -3243,7 +3293,7 @@ public final class Core {
     @SuppressWarnings("unchecked")
     private static Object call1_5(int _id, Object _a) {
         switch (_id) {
-            case 160: { Object ex = _a; return (ex instanceof ExceptionInfo ei ? ei.data : null); }
+            case 160: { Object ex = _a; return (ex instanceof IExceptionInfo ei ? ei.getData() : null); }
             case 161: { Object ex = _a; return (((Throwable) ex).getMessage()); }
             case 162: { Object ex = _a; return (((Throwable) ex).getCause()); }
             case 163: { Object f = _a; return (new LazySeq((Fn) f)); }
@@ -3666,12 +3716,19 @@ public final class Core {
             }
             case 81: { Object mf = _a; Object val = _b; return (((MultiFn) mf).getMethod(val)); }
             case 82: { Object mf = _a; Object val = _b; return (((MultiFn) mf).removeMethod(val)); }
-            case 83: { Object msg = _a; Object data = _b; return (new ExceptionInfo((String) msg, (PersistentHashMap) data, null)); }
-            case 84: { Object name = _a; Object expr = _b; return (PersistentList.createFromArray(
-                        Symbol.intern("when-not"),
-                        PersistentList.createFromArray(Symbol.intern("clojure.core", "bound?"),
-                                PersistentList.createFromArray(Symbol.intern("var"), name)),
-                        PersistentList.createFromArray(defSym, name, expr))); }
+            case 83: { Object msg = _a; Object data = _b; return (new ExceptionInfo(msg != null ? msg.toString() : null, data, null)); }
+            case 84: {
+                Object name = _a;
+                Object expr = _b;
+                Symbol vSym = Symbol.intern("v__" + RT.nextID());
+                return PersistentList.createFromArray(
+                        letStar,
+                        PersistentVector.createOwning(vSym, PersistentList.createFromArray(defSym, name)),
+                        PersistentList.createFromArray(
+                                Symbol.intern("clojure.core", "when-not"),
+                                PersistentList.createFromArray(Symbol.intern("clojure.core", "bound?"), vSym),
+                                PersistentList.createFromArray(defSym, name, expr)));
+            }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
         }
     }
@@ -3740,7 +3797,7 @@ public final class Core {
             return ref;
         
             }
-            case 17: { Object msg = _a; Object data = _b; Object cause = _c; return (new ExceptionInfo((String) msg, (PersistentHashMap) data, (Throwable) cause)); }
+            case 17: { Object msg = _a; Object data = _b; Object cause = _c; return (new ExceptionInfo(msg != null ? msg.toString() : null, data, (Throwable) cause)); }
             case 18: { Object name = _a; Object dispatchFn = _b; Object defaultVal = _c; return (new MultiFn(name.toString(), (Fn) dispatchFn, defaultVal)); }
             case 19: { Object mf = _a; Object dispatchVal = _b; Object methodFn = _c; return (((MultiFn) mf).addMethod(dispatchVal, (Fn) methodFn)); }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
@@ -5146,6 +5203,27 @@ public final class Core {
                             imp.add(PersistentList.createFromArray(quoteSym, s.first()));
                         }
                         clauseForms.add(PersistentList.create(imp));
+                    } else if (Keyword.intern("gen-class").equals(head)) {
+                        List<Object> gc = new ArrayList<>();
+                        gc.add(Symbol.intern("clojure.core", "gen-class"));
+                        boolean hasName = false;
+                        for (ISeq s = clause.next(); s != null; s = s.next()) {
+                            Object item = s.first();
+                            if (Keyword.intern("name").equals(item)) hasName = true;
+                            gc.add(PersistentList.createFromArray(quoteSym, item));
+                        }
+                        if (!hasName) {
+                            gc.add(Keyword.intern("name"));
+                            gc.add(PersistentList.createFromArray(quoteSym, nsSym));
+                        }
+                        clauseForms.add(PersistentList.create(gc));
+                    } else if (Keyword.intern("load").equals(head)) {
+                        List<Object> ld = new ArrayList<>();
+                        ld.add(Symbol.intern("clojure.core", "load"));
+                        for (ISeq s = clause.next(); s != null; s = s.next()) {
+                            ld.add(s.first());
+                        }
+                        clauseForms.add(PersistentList.create(ld));
                     }
                 }
             }

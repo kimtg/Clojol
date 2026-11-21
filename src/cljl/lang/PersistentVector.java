@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * and TransientVector support for O(1) amortized batch construction.
  */
 public final class PersistentVector extends Fn
-        implements Associative, IObj, Reversible, IReduceInit, List<Object>, RandomAccess, Comparable<Object> {
+        implements IPersistentVector, IObj, IReduceInit, List<Object>, RandomAccess, Comparable<Object> {
 
     private static final AtomicReference<Thread> NO_EDIT = new AtomicReference<>(null);
     public static final Node EMPTY_NODE = new Node(NO_EDIT, new Object[32]);
@@ -395,7 +395,7 @@ public final class PersistentVector extends Fn
             return true;
         }
         if (obj instanceof Seqable) {
-            if (obj instanceof PersistentHashMap || obj instanceof PersistentHashSet) return false;
+            if (obj instanceof Map<?, ?> || obj instanceof Set<?>) return false;
             ISeq ms = RT.seq(obj);
             for (int i = 0; i < cnt; i++) {
                 if (ms == null || !RT.equiv(nth(i), ms.first())) return false;

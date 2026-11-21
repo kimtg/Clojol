@@ -8,7 +8,7 @@ import java.util.*;
  * Persistent sorted set backed by PersistentTreeMap.
  */
 public final class PersistentTreeSet extends Fn
-        implements IObj, Counted, Seqable, Sorted, Reversible, Set<Object>, Iterable<Object> {
+        implements IPersistentSet, IObj, Sorted, Reversible, Set<Object>, Iterable<Object> {
 
     public static final PersistentTreeSet EMPTY = new PersistentTreeSet(null, PersistentTreeMap.EMPTY);
 
