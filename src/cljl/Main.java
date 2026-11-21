@@ -321,12 +321,15 @@ public final class Main {
 
     private static void evalAndPrint(String src, String filename, String reportTarget) {
         try {
-            PrintWriter out = StdLib.outWriter();
-            new Reader(src, filename).consumeForms(form -> {
-                Object res = Compiler.eval(form);
-                if (res != null) {
-                    out.println(RT.printString(res, true));
-                    out.flush();
+            final PrintWriter out = RT.outWriter();
+            new Reader(src, filename).consumeForms(new java.util.function.Consumer<Object>() {
+                @Override
+                public void accept(Object form) {
+                    Object res = Compiler.eval(form);
+                    if (res != null) {
+                        out.println(RT.printString(res, true));
+                        out.flush();
+                    }
                 }
             });
         } catch (Throwable t) {

@@ -115,7 +115,12 @@ public final class Namespace implements IMeta, IReference {
     }
 
     public static Namespace findOrCreate(Symbol name) {
-        return NAMESPACES.computeIfAbsent(name.withMeta(null), Namespace::new);
+        Symbol key = name.withMeta(null);
+        Namespace existing = NAMESPACES.get(key);
+        if (existing != null) return existing;
+        Namespace created = new Namespace(key);
+        Namespace prev = NAMESPACES.putIfAbsent(key, created);
+        return prev != null ? prev : created;
     }
 
     public static Namespace findOrCreate(String name) {

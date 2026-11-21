@@ -20,17 +20,31 @@ public final class Keyword extends Fn implements Comparable<Keyword> {
 
     public static Keyword intern(Symbol sym) {
         final Symbol clean = sym.meta() != null ? sym.withMeta(null) : sym;
-        return TABLE.computeIfAbsent(clean.toString(), k -> new Keyword(clean));
+        String key = clean.toString();
+        Keyword kw = TABLE.get(key);
+        if (kw != null) return kw;
+        Keyword created = new Keyword(clean);
+        Keyword prev = TABLE.putIfAbsent(key, created);
+        return prev != null ? prev : created;
     }
 
     public static Keyword intern(String ns, String name) {
         if (ns == null || ns.isEmpty()) return intern(name);
-        return TABLE.computeIfAbsent(ns + "/" + name, k -> new Keyword(Symbol.intern(ns, name)));
+        String key = ns + "/" + name;
+        Keyword kw = TABLE.get(key);
+        if (kw != null) return kw;
+        Keyword created = new Keyword(Symbol.intern(ns, name));
+        Keyword prev = TABLE.putIfAbsent(key, created);
+        return prev != null ? prev : created;
     }
 
     public static Keyword intern(String nsname) {
         if (nsname.startsWith(":")) nsname = nsname.substring(1);
-        return TABLE.computeIfAbsent(nsname, k -> new Keyword(Symbol.intern(k)));
+        Keyword kw = TABLE.get(nsname);
+        if (kw != null) return kw;
+        Keyword created = new Keyword(Symbol.intern(nsname));
+        Keyword prev = TABLE.putIfAbsent(nsname, created);
+        return prev != null ? prev : created;
     }
 
     public static Keyword find(String ns, String name) {

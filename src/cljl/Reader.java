@@ -34,11 +34,13 @@ public final class Reader {
     private static final Symbol HASH_MAP = Symbol.intern("clojure.core", "hash-map");
     private static final Symbol HASH_SET = Symbol.intern("clojure.core", "hash-set");
 
-    private static final Pattern INT_PAT = Pattern.compile(
-            "^([-+]?)(?:(0)|([1-9][0-9]*)|0[xX]([0-9A-Fa-f]+)|0([0-7]+)|([1-9][0-9]?)[rR]([0-9A-Za-z]+)|0[bB]([01]+))(N)?$");
-    private static final Pattern RATIO_PAT = Pattern.compile("^([-+]?[0-9]+)/([0-9]+)$");
-    private static final Pattern FLOAT_PAT = Pattern.compile(
-            "^([-+]?[0-9]+(?:\\.[0-9]*(?:[eE][-+]?[0-9]+)?|[eE][-+]?[0-9]+))(M)?$|^([-+]?[0-9]+)(M)$");
+    private static final class NumberPatterns {
+        static final Pattern INT_PAT = Pattern.compile(
+                "^([-+]?)(?:(0)|([1-9][0-9]*)|0[xX]([0-9A-Fa-f]+)|0([0-7]+)|([1-9][0-9]?)[rR]([0-9A-Za-z]+)|0[bB]([01]+))(N)?$");
+        static final Pattern RATIO_PAT = Pattern.compile("^([-+]?[0-9]+)/([0-9]+)$");
+        static final Pattern FLOAT_PAT = Pattern.compile(
+                "^([-+]?[0-9]+(?:\\.[0-9]*(?:[eE][-+]?[0-9]+)?|[eE][-+]?[0-9]+))(M)?$|^([-+]?[0-9]+)(M)$");
+    }
 
     private final CharSource source;
     private int line = 1;
@@ -948,7 +950,40 @@ public final class Reader {
     }
 
     private static Number matchNumber(String s) {
-        Matcher m = INT_PAT.matcher(s);
+        // Fast zero-regex path for ordinary decimal integers (avoids loading java.util.regex.Pattern at startup)
+        int len = s.length();
+        if (len > 0) {
+            int i = 0;
+            boolean neg = false;
+            char c0 = s.charAt(0);
+            if (c0 == '-' || c0 == '+') {
+                neg = (c0 == '-');
+                i = 1;
+            }
+            int digits = len - i;
+            if (digits == 1) {
+                char d = s.charAt(i);
+                if (d >= '0' && d <= '9') {
+                    long v = d - '0';
+                    return Long.valueOf(neg ? -v : v);
+                }
+            } else if (digits > 1 && digits <= 18 && s.charAt(i) >= '1' && s.charAt(i) <= '9') {
+                long acc = 0L;
+                boolean allDigits = true;
+                for (int j = i; j < len; j++) {
+                    char ch = s.charAt(j);
+                    if (ch < '0' || ch > '9') {
+                        allDigits = false;
+                        break;
+                    }
+                    acc = acc * 10L + (ch - '0');
+                }
+                if (allDigits) {
+                    return Long.valueOf(neg ? -acc : acc);
+                }
+            }
+        }
+        Matcher m = NumberPatterns.INT_PAT.matcher(s);
         if (m.matches()) {
             if (m.group(2) != null) {
                 if (m.group(9) != null) return BigInteger.ZERO;
@@ -969,7 +1004,7 @@ public final class Reader {
             if (m.group(9) != null) return bn;
             return bn.bitLength() <= 63 ? bn.longValue() : bn;
         }
-        m = FLOAT_PAT.matcher(s);
+        m = NumberPatterns.FLOAT_PAT.matcher(s);
         if (m.matches()) {
             if (m.group(3) != null) {
                 return new BigDecimal(m.group(3));
@@ -979,7 +1014,7 @@ public final class Reader {
             }
             return Double.parseDouble(m.group(1));
         }
-        m = RATIO_PAT.matcher(s);
+        m = NumberPatterns.RATIO_PAT.matcher(s);
         if (m.matches()) {
             String numerator = m.group(1);
             if (numerator.startsWith("+")) numerator = numerator.substring(1);

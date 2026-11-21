@@ -10,7 +10,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
@@ -1935,10 +1934,18 @@ public final class Deps {
 
     private static List<String> splitClasspath(String cp) {
         if (cp == null || cp.isEmpty()) return Collections.emptyList();
-        String[] parts = cp.split(Pattern.quote(File.pathSeparator));
+        char sep = File.pathSeparatorChar;
         List<String> out = new ArrayList<>();
-        for (String p : parts) {
-            if (!p.isEmpty()) out.add(p);
+        int start = 0;
+        int len = cp.length();
+        while (start <= len) {
+            int idx = cp.indexOf(sep, start);
+            int end = (idx < 0) ? len : idx;
+            if (end > start) {
+                out.add(cp.substring(start, end));
+            }
+            if (idx < 0) break;
+            start = idx + 1;
         }
         return out;
     }
@@ -1966,27 +1973,91 @@ public final class Deps {
         }
     }
 
+    private static final int[] SHA256_K = {
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    };
+
+    /**
+     * Pure-Java FIPS 180-4 SHA-256 returning the first 16 bytes (32 hex chars).
+     * Avoids booting java.security.Security / JCA providers on CLI startup.
+     */
+    private static String sha256Hex16(byte[] msg) {
+        int h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+        int h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+
+        int msgLen = msg.length;
+        int paddedLen = ((msgLen + 9 + 63) / 64) * 64;
+        byte[] padded = new byte[paddedLen];
+        System.arraycopy(msg, 0, padded, 0, msgLen);
+        padded[msgLen] = (byte) 0x80;
+        long bitLen = ((long) msgLen) * 8L;
+        for (int i = 0; i < 8; i++) {
+            padded[paddedLen - 1 - i] = (byte) (bitLen >>> (i * 8));
+        }
+
+        int[] w = new int[64];
+        for (int off = 0; off < paddedLen; off += 64) {
+            for (int i = 0; i < 16; i++) {
+                int j = off + i * 4;
+                w[i] = ((padded[j] & 0xff) << 24)
+                        | ((padded[j + 1] & 0xff) << 16)
+                        | ((padded[j + 2] & 0xff) << 8)
+                        | (padded[j + 3] & 0xff);
+            }
+            for (int i = 16; i < 64; i++) {
+                int s0 = Integer.rotateRight(w[i - 15], 7) ^ Integer.rotateRight(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+                int s1 = Integer.rotateRight(w[i - 2], 17) ^ Integer.rotateRight(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+                w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+            }
+            int a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+            for (int i = 0; i < 64; i++) {
+                int s1 = Integer.rotateRight(e, 6) ^ Integer.rotateRight(e, 11) ^ Integer.rotateRight(e, 25);
+                int ch = (e & f) ^ (~e & g);
+                int t1 = h + s1 + ch + SHA256_K[i] + w[i];
+                int s0 = Integer.rotateRight(a, 2) ^ Integer.rotateRight(a, 13) ^ Integer.rotateRight(a, 22);
+                int maj = (a & b) ^ (a & c) ^ (b & c);
+                int t2 = s0 + maj;
+                h = g; g = f; f = e; e = d + t1;
+                d = c; c = b; b = a; a = t1 + t2;
+            }
+            h0 += a; h1 += b; h2 += c; h3 += d;
+            h4 += e; h5 += f; h6 += g; h7 += h;
+        }
+
+        int[] hs = {h0, h1, h2, h3};
+        char[] hex = new char[32];
+        final char[] digits = "0123456789abcdef".toCharArray();
+        for (int i = 0; i < 4; i++) {
+            int v = hs[i];
+            int base = i * 8;
+            for (int j = 7; j >= 0; j--) {
+                hex[base + j] = digits[v & 0xf];
+                v >>>= 4;
+            }
+        }
+        return new String(hex);
+    }
+
     private static String computeCacheKey(
             CliOptions opts,
             List<String> configFiles,
             Map<Object, Object> merged,
             Map<Object, Object> argmap,
             Path projectDir) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            md.update((projectDir.toString() + "|" + opts.mode + "|" + opts.srepro + "|" + opts.toolName + "|").getBytes(StandardCharsets.UTF_8));
-            md.update((opts.aliases + "|" + configFiles + "|").getBytes(StandardCharsets.UTF_8));
-            md.update(RT.printString(toPersistentMap(merged), true).getBytes(StandardCharsets.UTF_8));
-            md.update(RT.printString(toPersistentMap(argmap), true).getBytes(StandardCharsets.UTF_8));
-            byte[] dig = md.digest();
-            StringBuilder hex = new StringBuilder();
-            for (int i = 0; i < 16; i++) {
-                hex.append(String.format("%02x", dig[i] & 0xff));
-            }
-            return hex.toString();
-        } catch (Exception e) {
-            return "default";
-        }
+        StringBuilder sb = new StringBuilder(256);
+        sb.append(projectDir).append('|').append(opts.mode).append('|')
+          .append(opts.srepro).append('|').append(opts.toolName).append('|')
+          .append(opts.aliases).append('|').append(configFiles).append('|')
+          .append(RT.printString(toPersistentMap(merged), true))
+          .append(RT.printString(toPersistentMap(argmap), true));
+        return sha256Hex16(sb.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private static void writeTraceFile(Path path, Map<Object, Object> traceLog) {

@@ -25,7 +25,8 @@ import java.util.regex.Pattern;
  */
 public final class Core {
 
-    private static volatile boolean initialized = false;
+    private static volatile int doneMask = 0;
+    private static int loadingMask = 0;
     private static final Set<String> LOADED_LIBS = ConcurrentHashMap.newKeySet();
     static Fn addFn;
     static Fn incFn;
@@ -33,39 +34,43 @@ public final class Core {
 
     private Core() {}
 
-    public static synchronized void init() {
-        if (initialized) return;
-        initialized = true;
-        Namespace ns = RT.CLOJURE_NS;
-
-        initPredicates(ns);
-        initMath(ns);
-        initBitwiseAndCasts(ns);
-        initSequences(ns);
-        initCollections(ns);
-        initStringsAndIO(ns);
-        initFunctional(ns);
-        initConcurrencyAndVars(ns);
-        initNamespacesAndEval(ns);
-        initArraysAndExceptions(ns);
-        initMacros(ns);
-        ns.setLazyLoader(EXTRAS_LOADER);
+    public static void init() {
+        RT.CLOJURE_NS.setLazyLoader(CoreExtrasIndex.LOADER);
     }
 
-    private static final Namespace.LazyLoader EXTRAS_LOADER = new Namespace.LazyLoader() {
-        @Override
-        public boolean loadSymbol(Symbol sym) {
-            int sub = CoreExtrasIndex.subsystemOf(sym.name);
-            if (sub < 0) return false;
-            CoreExtras.initSubsystem(sub);
-            return true;
+    public static void initAll(Namespace ns) {
+        for (int i = 0; i < CoreExtrasIndex.CORE_SUBSYSTEM_COUNT; i++) {
+            initSubsystem(i);
         }
+    }
 
-        @Override
-        public void loadAll() {
-            CoreExtras.initAll(RT.CLOJURE_NS);
+    public static void initSubsystem(int id) {
+        int bit = 1 << id;
+        if ((doneMask & bit) != 0) return;
+        synchronized (Core.class) {
+            if ((doneMask & bit) != 0 || (loadingMask & bit) != 0) return;
+            loadingMask |= bit;
+            Namespace ns = RT.CLOJURE_NS;
+            try {
+                switch (id) {
+                    case 0 -> initPredicates(ns);
+                    case 1 -> initMath(ns);
+                    case 2 -> initBitwiseAndCasts(ns);
+                    case 3 -> initSequences(ns);
+                    case 4 -> initCollections(ns);
+                    case 5 -> initStringsAndIO(ns);
+                    case 6 -> initFunctional(ns);
+                    case 7 -> initConcurrencyAndVars(ns);
+                    case 8 -> initNamespacesAndEval(ns);
+                    case 9 -> initArraysAndExceptions(ns);
+                    case 10 -> initMacros(ns);
+                }
+            } finally {
+                loadingMask &= ~bit;
+            }
+            doneMask |= bit;
         }
-    };
+    }
 
     private static void def(Namespace ns, String name, Object val) {
         ns.intern(name, val);

@@ -94,9 +94,16 @@ public final class RT {
 
     private static synchronized void initCore() {
         if (coreInitialized) return;
-        Core.init();
+        CLOJURE_NS.setLazyLoader(CoreExtrasIndex.LOADER);
         USER_NS.referAll(CLOJURE_NS);
         coreInitialized = true;
+    }
+
+    public static PrintWriter outWriter() {
+        Object o = OUT.deref();
+        if (o instanceof PrintWriter pw) return pw;
+        if (o instanceof Writer w) return new PrintWriter(w, true);
+        return new PrintWriter(System.out, true);
     }
 
     public static void setRuntimeClassLoader(ClassLoader cl) {
