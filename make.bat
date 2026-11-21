@@ -5,6 +5,7 @@ if "%CLJL_HOME:~-1%"=="\" set "CLJL_HOME=%CLJL_HOME:~0,-1%"
 set "BUILD_DIR=%CLJL_HOME%\build"
 set "CLASSES_DIR=%BUILD_DIR%\classes"
 set "JAR=%BUILD_DIR%\cljl.jar"
+set "AOT=%BUILD_DIR%\cljl.aot"
 set "JSA=%BUILD_DIR%\cljl.jsa"
 
 set "CMD=%~1"
@@ -56,9 +57,16 @@ echo [Clojol] Packaging %JAR%...
 jar --create --file "%JAR%" --main-class cljl.Main -C "%CLASSES_DIR%" .
 if errorlevel 1 exit /b 1
 
-echo [Clojol] Generating AppCDS archive %JSA%...
+if exist "%AOT%" del /q "%AOT%"
 if exist "%JSA%" del /q "%JSA%"
-java -XX:ArchiveClassesAtExit="%JSA%" -jar "%JAR%" -Srepro -Sdeps "{}" -e "(+ 1 2)" >nul 2>&1
+echo [Clojol] Generating AOT cache %AOT%...
+java -XX:AOTCacheOutput="%AOT%" -jar "%JAR%" -Srepro -Sdeps "{}" -e "(+ 1 2)" >nul 2>&1
+if exist "%AOT%" (
+    echo [Clojol] AOT cache generated.
+) else (
+    echo [Clojol] Generating AppCDS archive %JSA%...
+    java -XX:ArchiveClassesAtExit="%JSA%" -jar "%JAR%" -Srepro -Sdeps "{}" -e "(+ 1 2)" >nul 2>&1
+)
 echo [Clojol] Build complete.
 exit /b 0
 
@@ -79,22 +87,30 @@ exit /b 0
 call :do_build_if_needed
 if errorlevel 1 exit /b 1
 echo [Clojol] Running tests (strict JIT)...
-set "JSA_OPT="
-if exist "%JSA%" set JSA_OPT=-XX:SharedArchiveFile="%JSA%"
-java %CLJL_OPTS% -Dcljl.jit.strict=true %JSA_OPT% -jar "%JAR%" "%CLJL_HOME%\test\core_test.clj"
+set "CACHE_OPT="
+if exist "%AOT%" (
+    set CACHE_OPT=-XX:AOTCache="%AOT%"
+) else if exist "%JSA%" (
+    set CACHE_OPT=-XX:SharedArchiveFile="%JSA%"
+)
+java %CLJL_OPTS% -Dcljl.jit.strict=true %CACHE_OPT% -jar "%JAR%" "%CLJL_HOME%\test\core_test.clj"
 if errorlevel 1 exit /b 1
-java %CLJL_OPTS% -Dcljl.jit.strict=true %JSA_OPT% -jar "%JAR%" "%CLJL_HOME%\test\cheatsheet_test.clj"
+java %CLJL_OPTS% -Dcljl.jit.strict=true %CACHE_OPT% -jar "%JAR%" "%CLJL_HOME%\test\cheatsheet_test.clj"
 if errorlevel 1 exit /b 1
-java %CLJL_OPTS% -Dcljl.jit.strict=true %JSA_OPT% -jar "%JAR%" "%CLJL_HOME%\test\cli_test.clj"
+java %CLJL_OPTS% -Dcljl.jit.strict=true %CACHE_OPT% -jar "%JAR%" "%CLJL_HOME%\test\cli_test.clj"
 exit /b %ERRORLEVEL%
 
 :bench
 call :do_build_if_needed
 if errorlevel 1 exit /b 1
 echo [Clojol] Running benchmarks...
-set "JSA_OPT="
-if exist "%JSA%" set JSA_OPT=-XX:SharedArchiveFile="%JSA%"
-java %CLJL_OPTS% %JSA_OPT% -jar "%JAR%" "%CLJL_HOME%\test\bench.clj"
+set "CACHE_OPT="
+if exist "%AOT%" (
+    set CACHE_OPT=-XX:AOTCache="%AOT%"
+) else if exist "%JSA%" (
+    set CACHE_OPT=-XX:SharedArchiveFile="%JSA%"
+)
+java %CLJL_OPTS% %CACHE_OPT% -jar "%JAR%" "%CLJL_HOME%\test\bench.clj"
 exit /b %ERRORLEVEL%
 
 :help

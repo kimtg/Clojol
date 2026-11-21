@@ -58,8 +58,12 @@ public final class RT {
     public static volatile MultiFn PRINT_METHOD_FN = null;
     public static volatile MultiFn PRINT_DUP_FN = null;
     public static final PersistentHashMap DEFAULT_DATA_READERS_MAP = PersistentHashMap.create(
-            Symbol.intern("uuid"), Fn.of1("uuid-reader", s -> UUID.fromString(s.toString())),
-            Symbol.intern("inst"), Fn.of1("inst-reader", s -> Date.from(java.time.Instant.parse(normalizeInst(s.toString()))))
+            Symbol.intern("uuid"), new Fn.NamedFn("uuid-reader") {
+                @Override public Object invoke(Object s) { return UUID.fromString(s.toString()); }
+            },
+            Symbol.intern("inst"), new Fn.NamedFn("inst-reader") {
+                @Override public Object invoke(Object s) { return Date.from(java.time.Instant.parse(normalizeInst(s.toString()))); }
+            }
     );
     public static final Var DEFAULT_DATA_READERS = CLOJURE_NS.intern(Symbol.intern("default-data-readers")).bindRoot(DEFAULT_DATA_READERS_MAP);
     public static final Var CLOJURE_VERSION = CLOJURE_NS.intern(Symbol.intern("*clojure-version*")).bindRoot(
@@ -80,13 +84,19 @@ public final class RT {
     private static volatile ClassLoader runtimeClassLoader = null;
     private static volatile boolean strictRuntimeLoader = false;
 
-    static {
-        Core.init();
-        USER_NS.referAll(CLOJURE_NS);
-    }
+    private static volatile boolean coreInitialized = false;
 
     public static void ensureInit() {
-        // Triggers static initializer if not yet run
+        if (!coreInitialized) {
+            initCore();
+        }
+    }
+
+    private static synchronized void initCore() {
+        if (coreInitialized) return;
+        Core.init();
+        USER_NS.referAll(CLOJURE_NS);
+        coreInitialized = true;
     }
 
     public static void setRuntimeClassLoader(ClassLoader cl) {

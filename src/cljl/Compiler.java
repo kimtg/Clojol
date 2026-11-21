@@ -57,6 +57,7 @@ public final class Compiler {
     // ========================================================================
 
     public static Object eval(Object form) {
+        RT.ensureInit();
         Node node = compile(form, null);
         if (node instanceof TopFrameNode tf && CompiledFn.containsLoop(tf.body)) {
             FnMethod[] fixed = new FnMethod[21];
@@ -82,6 +83,7 @@ public final class Compiler {
     }
 
     private static Object loadReader(Reader reader, String filename) {
+        RT.ensureInit();
         Var.pushThreadBindings(Map.of(RT.FILE, filename != null ? filename : "NO_SOURCE_PATH"));
         try {
             Object[] last = new Object[]{null};

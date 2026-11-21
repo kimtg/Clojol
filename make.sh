@@ -12,6 +12,7 @@ CLJL_HOME="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 BUILD_DIR="$CLJL_HOME/build"
 CLASSES_DIR="$BUILD_DIR/classes"
 JAR="$BUILD_DIR/cljl.jar"
+AOT="$BUILD_DIR/cljl.aot"
 JSA="$BUILD_DIR/cljl.jsa"
 
 do_clean() {
@@ -30,9 +31,15 @@ do_build() {
   echo "[Clojol] Packaging $JAR..."
   jar --create --file "$JAR" --main-class cljl.Main -C "$CLASSES_DIR" .
 
-  echo "[Clojol] Generating AppCDS archive $JSA..."
-  rm -f "$JSA"
-  java -XX:ArchiveClassesAtExit="$JSA" -jar "$JAR" -Srepro -Sdeps "{}" -e "(+ 1 2)" >/dev/null 2>&1 || true
+  rm -f "$AOT" "$JSA"
+  echo "[Clojol] Generating AOT cache $AOT..."
+  java -XX:AOTCacheOutput="$AOT" -jar "$JAR" -Srepro -Sdeps "{}" -e "(+ 1 2)" >/dev/null 2>&1 || true
+  if [ -f "$AOT" ]; then
+    echo "[Clojol] AOT cache generated."
+  else
+    echo "[Clojol] Generating AppCDS archive $JSA..."
+    java -XX:ArchiveClassesAtExit="$JSA" -jar "$JAR" -Srepro -Sdeps "{}" -e "(+ 1 2)" >/dev/null 2>&1 || true
+  fi
   echo "[Clojol] Build complete."
 }
 
@@ -43,7 +50,9 @@ do_build_if_needed() {
 }
 
 run_cljl() {
-  if [ -f "$JSA" ]; then
+  if [ -f "$AOT" ]; then
+    java ${CLJL_OPTS:-} -XX:AOTCache="$AOT" -jar "$JAR" "$@"
+  elif [ -f "$JSA" ]; then
     java ${CLJL_OPTS:-} -XX:SharedArchiveFile="$JSA" -jar "$JAR" "$@"
   else
     java ${CLJL_OPTS:-} -jar "$JAR" "$@"
@@ -51,7 +60,9 @@ run_cljl() {
 }
 
 run_cljl_strict() {
-  if [ -f "$JSA" ]; then
+  if [ -f "$AOT" ]; then
+    java ${CLJL_OPTS:-} -Dcljl.jit.strict=true -XX:AOTCache="$AOT" -jar "$JAR" "$@"
+  elif [ -f "$JSA" ]; then
     java ${CLJL_OPTS:-} -Dcljl.jit.strict=true -XX:SharedArchiveFile="$JSA" -jar "$JAR" "$@"
   else
     java ${CLJL_OPTS:-} -Dcljl.jit.strict=true -jar "$JAR" "$@"

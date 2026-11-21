@@ -87,7 +87,7 @@ public final class Deps {
         public final List<String> classpathRoots;
         public final List<String> jvmOpts;
         public final List<String> mainOpts;
-        public final PersistentHashMap basisMap;
+        private volatile PersistentHashMap basisMap;
         public final PersistentHashMap mergedDeps;
         public final PersistentHashMap argmap;
         public final List<String> configFiles;
@@ -133,6 +133,25 @@ public final class Deps {
             this.libsBySymbol = libsBySymbol;
             this.traceLog = traceLog;
             this.aliasSources = aliasSources;
+        }
+
+        public PersistentHashMap getBasisMap() {
+            PersistentHashMap m = this.basisMap;
+            if (m == null && basisFile != null) {
+                synchronized (this) {
+                    m = this.basisMap;
+                    if (m == null) {
+                        try {
+                            Object parsed = readEdn(Files.readString(basisFile, StandardCharsets.UTF_8));
+                            m = (parsed instanceof PersistentHashMap pm) ? pm : PersistentHashMap.EMPTY;
+                        } catch (Exception e) {
+                            m = PersistentHashMap.EMPTY;
+                        }
+                        this.basisMap = m;
+                    }
+                }
+            }
+            return m != null ? m : PersistentHashMap.EMPTY;
         }
     }
 
@@ -480,9 +499,8 @@ public final class Deps {
                     List<String> cachedJvm = Files.isRegularFile(jvmFile)
                             ? readLinesNonEmpty(jvmFile) : extractJvmOpts(argmap);
                     List<String> mainOpts = extractMainOpts(opts, argmap);
-                    PersistentHashMap basisMap = (PersistentHashMap) readEdn(Files.readString(basisFile, StandardCharsets.UTF_8));
                     return new BasisResult(
-                            cachedCp, cachedRoots, cachedJvm, mainOpts, basisMap,
+                            cachedCp, cachedRoots, cachedJvm, mainOpts, null,
                             toPersistentMap(merged), toPersistentMap(argmap), configFiles,
                             cacheDir, cpFile, basisFile, jvmFile,
                             Collections.emptyList(), Collections.emptyMap(), null, aliasSources);
@@ -605,16 +623,26 @@ public final class Deps {
                 System.setProperty("java.class.path", basis.classpath);
             }
         }
-        List<URL> urls = new ArrayList<>();
+        boolean strict = (opts != null && (opts.scp != null || opts.mode == Mode.TOOL
+                || opts.sdeps != null || opts.sdepsFile != null || !opts.aliases.isEmpty()))
+                || Files.isRegularFile(Path.of("deps.edn"));
+        boolean anyExists = false;
+        for (String root : basis.classpathRoots) {
+            if (root != null && !root.isEmpty() && Files.exists(Path.of(root))) {
+                anyExists = true;
+                break;
+            }
+        }
+        if (!anyExists && !strict) {
+            return;
+        }
+        List<URL> urls = new ArrayList<>(basis.classpathRoots.size());
         for (String root : basis.classpathRoots) {
             if (root == null || root.isEmpty()) continue;
             try {
                 urls.add(Path.of(root).toUri().toURL());
             } catch (Exception ignored) {}
         }
-        boolean strict = (opts != null && (opts.scp != null || opts.mode == Mode.TOOL
-                || opts.sdeps != null || opts.sdepsFile != null || !opts.aliases.isEmpty()))
-                || Files.isRegularFile(Path.of("deps.edn"));
         if (!urls.isEmpty() || strict) {
             URLClassLoader ucl = new URLClassLoader(urls.toArray(new URL[0]), RT.class.getClassLoader());
             RT.setRuntimeClassLoader(ucl, strict);
@@ -908,7 +936,7 @@ public final class Deps {
     }
 
     private static Object apiBasis(BasisResult basis, PersistentHashMap args) {
-        System.out.println(RT.printString(basis.basisMap, true));
+        System.out.println(RT.printString(basis.getBasisMap(), true));
         return null;
     }
 

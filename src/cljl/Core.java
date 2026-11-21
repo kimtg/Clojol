@@ -49,8 +49,23 @@ public final class Core {
         initNamespacesAndEval(ns);
         initArraysAndExceptions(ns);
         initMacros(ns);
-        CoreExtras.init(ns);
+        ns.setLazyLoader(EXTRAS_LOADER);
     }
+
+    private static final Namespace.LazyLoader EXTRAS_LOADER = new Namespace.LazyLoader() {
+        @Override
+        public boolean loadSymbol(Symbol sym) {
+            int sub = CoreExtrasIndex.subsystemOf(sym.name);
+            if (sub < 0) return false;
+            CoreExtras.initSubsystem(sub);
+            return true;
+        }
+
+        @Override
+        public void loadAll() {
+            CoreExtras.initAll(RT.CLOJURE_NS);
+        }
+    };
 
     private static void def(Namespace ns, String name, Object val) {
         ns.intern(name, val);
@@ -119,115 +134,70 @@ public final class Core {
     // ========================================================================
 
     private static void initPredicates(Namespace ns) {
-        def(ns, "nil?", Fn.of1("nil?", x -> x == null));
-        def(ns, "some?", Fn.of1("some?", x -> x != null));
-        def(ns, "true?", Fn.of1("true?", x -> x == Boolean.TRUE));
-        def(ns, "false?", Fn.of1("false?", x -> x == Boolean.FALSE));
-        def(ns, "boolean?", Fn.of1("boolean?", x -> x instanceof Boolean));
-        def(ns, "boolean", Fn.of1("boolean", RT::truthy));
-        def(ns, "not", Fn.of1("not", x -> !RT.truthy(x)));
-        def(ns, "identical?", Fn.of2("identical?", (a, b) -> a == b));
+        def(ns, "nil?", new CoreFn1(0, "nil?"));
+        def(ns, "some?", new CoreFn1(1, "some?"));
+        def(ns, "true?", new CoreFn1(2, "true?"));
+        def(ns, "false?", new CoreFn1(3, "false?"));
+        def(ns, "boolean?", new CoreFn1(4, "boolean?"));
+        def(ns, "boolean", new CoreFn1(5, "boolean"));
+        def(ns, "not", new CoreFn1(6, "not"));
+        def(ns, "identical?", new CoreFn2(0, "identical?"));
 
-        def(ns, "=", Fn.ofVarargs("=", args -> {
-            if (args.length <= 1) return Boolean.TRUE;
-            Object first = args[0];
-            for (int i = 1; i < args.length; i++) {
-                if (!RT.equiv(first, args[i])) return Boolean.FALSE;
-            }
-            return Boolean.TRUE;
-        }));
+        def(ns, "=", new CoreFnV(0, "="));
 
-        def(ns, "not=", Fn.ofVarargs("not=", args -> {
-            if (args.length <= 1) return Boolean.FALSE;
-            Object first = args[0];
-            for (int i = 1; i < args.length; i++) {
-                if (!RT.equiv(first, args[i])) return Boolean.TRUE;
-            }
-            return Boolean.FALSE;
-        }));
+        def(ns, "not=", new CoreFnV(1, "not="));
 
-        def(ns, "==", Fn.ofVarargs("==", args -> {
-            if (args.length <= 1) return Boolean.TRUE;
-            for (int i = 0; i < args.length - 1; i++) {
-                if (!Numbers.equal(args[i], args[i + 1])) return Boolean.FALSE;
-            }
-            return Boolean.TRUE;
-        }));
+        def(ns, "==", new CoreFnV(2, "=="));
 
-        def(ns, "compare", Fn.of2("compare", (a, b) -> (long) RT.compare(a, b)));
-        def(ns, "hash", Fn.of1("hash", x -> (long) RT.hash(x)));
+        def(ns, "compare", new CoreFn2(1, "compare"));
+        def(ns, "hash", new CoreFn1(7, "hash"));
 
-        def(ns, "number?", Fn.of1("number?", Numbers::isNumber));
-        def(ns, "integer?", Fn.of1("integer?", Numbers::isInteger));
-        def(ns, "int?", Fn.of1("int?", Numbers::isInteger));
-        def(ns, "pos-int?", Fn.of1("pos-int?", x -> Numbers.isInteger(x) && Numbers.isPos(x)));
-        def(ns, "nat-int?", Fn.of1("nat-int?", x -> Numbers.isInteger(x) && !Numbers.isNeg(x)));
-        def(ns, "neg-int?", Fn.of1("neg-int?", x -> Numbers.isInteger(x) && Numbers.isNeg(x)));
-        def(ns, "float?", Fn.of1("float?", x -> x instanceof Double || x instanceof Float));
-        def(ns, "double?", Fn.of1("double?", x -> x instanceof Double));
-        def(ns, "ratio?", Fn.of1("ratio?", x -> x instanceof Ratio));
-        def(ns, "decimal?", Fn.of1("decimal?", x -> x instanceof BigDecimal));
-        def(ns, "rational?", Fn.of1("rational?", x -> Numbers.isInteger(x) || x instanceof Ratio || x instanceof BigDecimal));
+        def(ns, "number?", new CoreFn1(8, "number?"));
+        def(ns, "integer?", new CoreFn1(9, "integer?"));
+        def(ns, "int?", new CoreFn1(10, "int?"));
+        def(ns, "pos-int?", new CoreFn1(11, "pos-int?"));
+        def(ns, "nat-int?", new CoreFn1(12, "nat-int?"));
+        def(ns, "neg-int?", new CoreFn1(13, "neg-int?"));
+        def(ns, "float?", new CoreFn1(14, "float?"));
+        def(ns, "double?", new CoreFn1(15, "double?"));
+        def(ns, "ratio?", new CoreFn1(16, "ratio?"));
+        def(ns, "decimal?", new CoreFn1(17, "decimal?"));
+        def(ns, "rational?", new CoreFn1(18, "rational?"));
 
-        def(ns, "zero?", Fn.of1("zero?", Numbers::isZero));
-        def(ns, "pos?", Fn.of1("pos?", Numbers::isPos));
-        def(ns, "neg?", Fn.of1("neg?", Numbers::isNeg));
-        def(ns, "even?", Fn.of1("even?", x -> {
-            if (!Numbers.isInteger(x)) throw new IllegalArgumentException("Argument must be an integer: " + x);
-            return (Numbers.toLong(x) & 1L) == 0L;
-        }));
-        def(ns, "odd?", Fn.of1("odd?", x -> {
-            if (!Numbers.isInteger(x)) throw new IllegalArgumentException("Argument must be an integer: " + x);
-            return (Numbers.toLong(x) & 1L) != 0L;
-        }));
+        def(ns, "zero?", new CoreFn1(19, "zero?"));
+        def(ns, "pos?", new CoreFn1(20, "pos?"));
+        def(ns, "neg?", new CoreFn1(21, "neg?"));
+        def(ns, "even?", new CoreFn1(22, "even?"));
+        def(ns, "odd?", new CoreFn1(23, "odd?"));
 
-        def(ns, "string?", Fn.of1("string?", x -> x instanceof String));
-        def(ns, "char?", Fn.of1("char?", x -> x instanceof Character));
-        def(ns, "symbol?", Fn.of1("symbol?", x -> x instanceof Symbol));
-        def(ns, "keyword?", Fn.of1("keyword?", x -> x instanceof Keyword));
-        def(ns, "simple-symbol?", Fn.of1("simple-symbol?", x -> x instanceof Symbol s && s.ns == null));
-        def(ns, "qualified-symbol?", Fn.of1("qualified-symbol?", x -> x instanceof Symbol s && s.ns != null));
-        def(ns, "simple-keyword?", Fn.of1("simple-keyword?", x -> x instanceof Keyword k && k.getNamespace() == null));
-        def(ns, "qualified-keyword?", Fn.of1("qualified-keyword?", x -> x instanceof Keyword k && k.getNamespace() != null));
-        def(ns, "list?", Fn.of1("list?", x -> x instanceof PersistentList || x instanceof PersistentList.EmptyList));
-        def(ns, "vector?", Fn.of1("vector?", x -> x instanceof PersistentVector || x instanceof PersistentVector.SubVec || x instanceof PersistentHashMap.MapEntry));
-        def(ns, "map?", Fn.of1("map?", x -> x instanceof PersistentHashMap || x instanceof Map<?, ?>));
-        def(ns, "set?", Fn.of1("set?", x -> x instanceof PersistentHashSet || x instanceof Set<?>));
-        def(ns, "seq?", Fn.of1("seq?", x -> x instanceof ISeq));
-        def(ns, "seqable?", Fn.of1("seqable?", x -> x == null || x instanceof Seqable || x instanceof Iterable<?>
-                || x instanceof Map<?, ?> || x instanceof CharSequence || x.getClass().isArray()));
-        def(ns, "coll?", Fn.of1("coll?", x -> x instanceof PersistentVector || x instanceof PersistentHashMap
-                || x instanceof PersistentHashSet || x instanceof PersistentTreeMap || x instanceof PersistentTreeSet
-                || x instanceof PersistentRecord || x instanceof PersistentColl
-                || x instanceof ISeq || x instanceof Collection<?>));
-        def(ns, "associative?", Fn.of1("associative?", x -> x instanceof Associative));
-        def(ns, "sequential?", Fn.of1("sequential?", x -> x instanceof ISeq || x instanceof PersistentVector || x instanceof List<?>));
-        def(ns, "counted?", Fn.of1("counted?", x -> x instanceof Counted));
-        def(ns, "ifn?", Fn.of1("ifn?", x -> x instanceof Fn));
-        def(ns, "fn?", Fn.of1("fn?", x -> x instanceof Fn && !(x instanceof Keyword || x instanceof Symbol
-                || x instanceof PersistentVector || x instanceof PersistentHashMap || x instanceof PersistentHashSet
-                || x instanceof PersistentTreeMap || x instanceof PersistentTreeSet || x instanceof PersistentColl)));
-        def(ns, "var?", Fn.of1("var?", x -> x instanceof Var));
-        def(ns, "class?", Fn.of1("class?", x -> x instanceof Class<?>));
-        def(ns, "instance?", Fn.of2("instance?", (c, x) -> ((Class<?>) c).isInstance(x)));
-        def(ns, "isa?", Fn.of23("isa?", CoreExtras::isa, CoreExtras::isa));
-        def(ns, "empty?", Fn.of1("empty?", x -> RT.seq(x) == null));
-        def(ns, "reduced?", Fn.of1("reduced?", x -> x instanceof Reduced));
-        def(ns, "realized?", Fn.of1("realized?", x -> {
-            if (x instanceof LazySeq ls) return ls.isRealized();
-            if (x instanceof Atom.Delay d) return d.isRealized();
-            if (x instanceof Atom.Promise p) return p.isRealized();
-            if (x instanceof Atom.FutureObj f) return f.isDone();
-            return true;
-        }));
-        def(ns, "distinct?", Fn.ofVarargs("distinct?", args -> {
-            if (args.length <= 1) return Boolean.TRUE;
-            Set<RT.EquivKey> seen = new HashSet<>(args.length * 2);
-            for (Object a : args) {
-                if (!seen.add(new RT.EquivKey(a))) return Boolean.FALSE;
-            }
-            return Boolean.TRUE;
-        }));
+        def(ns, "string?", new CoreFn1(24, "string?"));
+        def(ns, "char?", new CoreFn1(25, "char?"));
+        def(ns, "symbol?", new CoreFn1(26, "symbol?"));
+        def(ns, "keyword?", new CoreFn1(27, "keyword?"));
+        def(ns, "simple-symbol?", new CoreFn1(28, "simple-symbol?"));
+        def(ns, "qualified-symbol?", new CoreFn1(29, "qualified-symbol?"));
+        def(ns, "simple-keyword?", new CoreFn1(30, "simple-keyword?"));
+        def(ns, "qualified-keyword?", new CoreFn1(31, "qualified-keyword?"));
+        def(ns, "list?", new CoreFn1(32, "list?"));
+        def(ns, "vector?", new CoreFn1(33, "vector?"));
+        def(ns, "map?", new CoreFn1(34, "map?"));
+        def(ns, "set?", new CoreFn1(35, "set?"));
+        def(ns, "seq?", new CoreFn1(36, "seq?"));
+        def(ns, "seqable?", new CoreFn1(37, "seqable?"));
+        def(ns, "coll?", new CoreFn1(38, "coll?"));
+        def(ns, "associative?", new CoreFn1(39, "associative?"));
+        def(ns, "sequential?", new CoreFn1(40, "sequential?"));
+        def(ns, "counted?", new CoreFn1(41, "counted?"));
+        def(ns, "ifn?", new CoreFn1(42, "ifn?"));
+        def(ns, "fn?", new CoreFn1(43, "fn?"));
+        def(ns, "var?", new CoreFn1(44, "var?"));
+        def(ns, "class?", new CoreFn1(45, "class?"));
+        def(ns, "instance?", new CoreFn2(2, "instance?"));
+        def(ns, "isa?", new CoreFn23(3, 0, "isa?"));
+        def(ns, "empty?", new CoreFn1(46, "empty?"));
+        def(ns, "reduced?", new CoreFn1(47, "reduced?"));
+        def(ns, "realized?", new CoreFn1(48, "realized?"));
+        def(ns, "distinct?", new CoreFnV(3, "distinct?"));
     }
 
     // ========================================================================
@@ -314,17 +284,11 @@ public final class Core {
             }
         });
 
-        def(ns, "/", Fn.ofVarargs("/", args -> {
-            if (args.length == 0) throw new IllegalArgumentException("Wrong number of args (0) passed to: /");
-            if (args.length == 1) return Numbers.divide(1L, args[0]);
-            Object acc = args[0];
-            for (int i = 1; i < args.length; i++) acc = Numbers.divide(acc, args[i]);
-            return acc;
-        }));
+        def(ns, "/", new CoreFnV(4, "/"));
 
-        def(ns, "quot", Fn.of2("quot", Numbers::quotient));
-        def(ns, "rem", Fn.of2("rem", Numbers::remainder));
-        def(ns, "mod", Fn.of2("mod", Numbers::mod));
+        def(ns, "quot", new CoreFn2(4, "quot"));
+        def(ns, "rem", new CoreFn2(5, "rem"));
+        def(ns, "mod", new CoreFn2(6, "mod"));
         incFn = new Fn.NamedFn("inc") {
             @Override public Object invoke(Object x) { return Numbers.inc(x); }
         };
@@ -339,88 +303,42 @@ public final class Core {
         def(ns, "dec'", new Fn.NamedFn("dec'") {
             @Override public Object invoke(Object x) { return Numbers.decP(x); }
         });
-        def(ns, "abs", Fn.of1("abs", Numbers::abs));
+        def(ns, "abs", new CoreFn1(49, "abs"));
 
-        def(ns, "<", Fn.ofVarargs("<", args -> {
-            for (int i = 0; i < args.length - 1; i++) if (!Numbers.lt(args[i], args[i + 1])) return Boolean.FALSE;
-            return Boolean.TRUE;
-        }));
-        def(ns, "<=", Fn.ofVarargs("<=", args -> {
-            for (int i = 0; i < args.length - 1; i++) if (!Numbers.lte(args[i], args[i + 1])) return Boolean.FALSE;
-            return Boolean.TRUE;
-        }));
-        def(ns, ">", Fn.ofVarargs(">", args -> {
-            for (int i = 0; i < args.length - 1; i++) if (!Numbers.gt(args[i], args[i + 1])) return Boolean.FALSE;
-            return Boolean.TRUE;
-        }));
-        def(ns, ">=", Fn.ofVarargs(">=", args -> {
-            for (int i = 0; i < args.length - 1; i++) if (!Numbers.gte(args[i], args[i + 1])) return Boolean.FALSE;
-            return Boolean.TRUE;
-        }));
+        def(ns, "<", new CoreFnV(5, "<"));
+        def(ns, "<=", new CoreFnV(6, "<="));
+        def(ns, ">", new CoreFnV(7, ">"));
+        def(ns, ">=", new CoreFnV(8, ">="));
 
-        def(ns, "max", Fn.ofVarargs("max", args -> {
-            Object ret = args[0];
-            for (int i = 1; i < args.length; i++) ret = Numbers.max(ret, args[i]);
-            return ret;
-        }));
-        def(ns, "min", Fn.ofVarargs("min", args -> {
-            Object ret = args[0];
-            for (int i = 1; i < args.length; i++) ret = Numbers.min(ret, args[i]);
-            return ret;
-        }));
+        def(ns, "max", new CoreFnV(9, "max"));
+        def(ns, "min", new CoreFnV(10, "min"));
 
-        def(ns, "rand", Fn.ofVarargs("rand", args -> {
-            double r = ThreadLocalRandom.current().nextDouble();
-            return args.length == 0 ? r : r * Numbers.toDouble(args[0]);
-        }));
-        def(ns, "rand-int", Fn.of1("rand-int", n -> {
-            int bound = (int) Numbers.toLong(n);
-            return bound <= 0 ? 0L : (long) ThreadLocalRandom.current().nextInt(bound);
-        }));
-        def(ns, "rand-nth", Fn.of1("rand-nth", coll -> {
-            int n = RT.count(coll);
-            if (n == 0) throw new IllegalArgumentException("Cannot choose rand-nth of empty collection");
-            return RT.nth(coll, ThreadLocalRandom.current().nextInt(n));
-        }));
+        def(ns, "rand", new CoreFnV(11, "rand"));
+        def(ns, "rand-int", new CoreFn1(50, "rand-int"));
+        def(ns, "rand-nth", new CoreFn1(51, "rand-nth"));
     }
 
     private static void initBitwiseAndCasts(Namespace ns) {
-        def(ns, "bit-and", Fn.ofVarargs("bit-and", args -> {
-            long r = Numbers.toLong(args[0]);
-            for (int i = 1; i < args.length; i++) r &= Numbers.toLong(args[i]);
-            return r;
-        }));
-        def(ns, "bit-or", Fn.ofVarargs("bit-or", args -> {
-            long r = Numbers.toLong(args[0]);
-            for (int i = 1; i < args.length; i++) r |= Numbers.toLong(args[i]);
-            return r;
-        }));
-        def(ns, "bit-xor", Fn.ofVarargs("bit-xor", args -> {
-            long r = Numbers.toLong(args[0]);
-            for (int i = 1; i < args.length; i++) r ^= Numbers.toLong(args[i]);
-            return r;
-        }));
-        def(ns, "bit-not", Fn.of1("bit-not", Numbers::bitNot));
-        def(ns, "bit-and-not", Fn.ofVarargs("bit-and-not", args -> {
-            long r = Numbers.toLong(args[0]);
-            for (int i = 1; i < args.length; i++) r &= ~Numbers.toLong(args[i]);
-            return r;
-        }));
-        def(ns, "bit-shift-left", Fn.of2("bit-shift-left", Numbers::bitShiftLeft));
-        def(ns, "bit-shift-right", Fn.of2("bit-shift-right", Numbers::bitShiftRight));
-        def(ns, "unsigned-bit-shift-right", Fn.of2("unsigned-bit-shift-right", Numbers::unsignedBitShiftRight));
-        def(ns, "bit-test", Fn.of2("bit-test", Numbers::bitTest));
-        def(ns, "bit-set", Fn.of2("bit-set", Numbers::bitSet));
-        def(ns, "bit-clear", Fn.of2("bit-clear", Numbers::bitClear));
-        def(ns, "bit-flip", Fn.of2("bit-flip", Numbers::bitFlip));
+        def(ns, "bit-and", new CoreFnV(12, "bit-and"));
+        def(ns, "bit-or", new CoreFnV(13, "bit-or"));
+        def(ns, "bit-xor", new CoreFnV(14, "bit-xor"));
+        def(ns, "bit-not", new CoreFn1(52, "bit-not"));
+        def(ns, "bit-and-not", new CoreFnV(15, "bit-and-not"));
+        def(ns, "bit-shift-left", new CoreFn2(7, "bit-shift-left"));
+        def(ns, "bit-shift-right", new CoreFn2(8, "bit-shift-right"));
+        def(ns, "unsigned-bit-shift-right", new CoreFn2(9, "unsigned-bit-shift-right"));
+        def(ns, "bit-test", new CoreFn2(10, "bit-test"));
+        def(ns, "bit-set", new CoreFn2(11, "bit-set"));
+        def(ns, "bit-clear", new CoreFn2(12, "bit-clear"));
+        def(ns, "bit-flip", new CoreFn2(13, "bit-flip"));
 
-        def(ns, "int", Fn.of1("int", x -> (long) Numbers.intCast(x)));
-        def(ns, "long", Fn.of1("long", Numbers::longCast));
-        def(ns, "double", Fn.of1("double", Numbers::toDouble));
-        def(ns, "float", Fn.of1("float", x -> (double) ((Number) x).floatValue()));
-        def(ns, "bigint", Fn.of1("bigint", Numbers::toBigInteger));
-        def(ns, "bigdec", Fn.of1("bigdec", Numbers::toBigDecimal));
-        def(ns, "char", Fn.of1("char", Numbers::charCast));
+        def(ns, "int", new CoreFn1(53, "int"));
+        def(ns, "long", new CoreFn1(54, "long"));
+        def(ns, "double", new CoreFn1(55, "double"));
+        def(ns, "float", new CoreFn1(56, "float"));
+        def(ns, "bigint", new CoreFn1(57, "bigint"));
+        def(ns, "bigdec", new CoreFn1(58, "bigdec"));
+        def(ns, "char", new CoreFn1(59, "char"));
     }
 
     // ========================================================================
@@ -428,37 +346,19 @@ public final class Core {
     // ========================================================================
 
     private static void initSequences(Namespace ns) {
-        def(ns, "seq", Fn.of1("seq", RT::seq));
-        def(ns, "first", Fn.of1("first", RT::first));
-        def(ns, "ffirst", Fn.of1("ffirst", x -> RT.first(RT.first(x))));
-        def(ns, "next", Fn.of1("next", RT::next));
-        def(ns, "nfirst", Fn.of1("nfirst", x -> RT.next(RT.first(x))));
-        def(ns, "fnext", Fn.of1("fnext", x -> RT.first(RT.next(x))));
-        def(ns, "nnext", Fn.of1("nnext", x -> RT.next(RT.next(x))));
-        def(ns, "rest", Fn.of1("rest", RT::more));
-        def(ns, "second", Fn.of1("second", RT::second));
-        def(ns, "last", Fn.of1("last", x -> {
-            ISeq s = RT.seq(x);
-            if (s == null) return null;
-            if (s instanceof PersistentVector.VecSeq) {
-                // O(1) via seq? Not directly, walk cleanly
-            }
-            Object ret = s.first();
-            while ((s = s.next()) != null) ret = s.first();
-            return ret;
-        }));
-        def(ns, "butlast", Fn.of1("butlast", x -> {
-            ISeq s = RT.seq(x);
-            if (s == null || s.next() == null) return null;
-            List<Object> items = new ArrayList<>();
-            while (s.next() != null) {
-                items.add(s.first());
-                s = s.next();
-            }
-            return PersistentList.create(items);
-        }));
+        def(ns, "seq", new CoreFn1(60, "seq"));
+        def(ns, "first", new CoreFn1(61, "first"));
+        def(ns, "ffirst", new CoreFn1(62, "ffirst"));
+        def(ns, "next", new CoreFn1(63, "next"));
+        def(ns, "nfirst", new CoreFn1(64, "nfirst"));
+        def(ns, "fnext", new CoreFn1(65, "fnext"));
+        def(ns, "nnext", new CoreFn1(66, "nnext"));
+        def(ns, "rest", new CoreFn1(67, "rest"));
+        def(ns, "second", new CoreFn1(68, "second"));
+        def(ns, "last", new CoreFn1(69, "last"));
+        def(ns, "butlast", new CoreFn1(70, "butlast"));
 
-        def(ns, "cons", Fn.of2("cons", RT::cons));
+        def(ns, "cons", new CoreFn2(14, "cons"));
         def(ns, "conj", new Fn.NamedFn("conj") {
             @Override public Object invoke() { return PersistentVector.EMPTY; }
             @Override public Object invoke(Object coll) { return coll; }
@@ -471,375 +371,100 @@ public final class Core {
             }
         });
 
-        def(ns, "count", Fn.of1("count", o -> (long) RT.count(o)));
-        def(ns, "empty", Fn.of1("empty", o -> {
-            if (o instanceof PersistentVector) return PersistentVector.EMPTY;
-            if (o instanceof PersistentHashMap) return PersistentHashMap.EMPTY;
-            if (o instanceof PersistentHashSet) return PersistentHashSet.EMPTY;
-            if (o instanceof PersistentTreeMap ptm) return ptm.empty();
-            if (o instanceof PersistentTreeSet pts) return pts.empty();
-            if (o instanceof PersistentColl pc) return pc.empty();
-            if (o instanceof ISeq) return PersistentList.EMPTY;
-            if (o instanceof String) return "";
-            return null;
-        }));
-        def(ns, "nth", Fn.of23("nth",
-                (c, i) -> RT.nth(c, (int) Numbers.toLong(i)),
-                (c, i, nf) -> RT.nth(c, (int) Numbers.toLong(i), nf)));
-        def(ns, "nthnext", Fn.of2("nthnext", (coll, n) -> {
-            long k = Numbers.toLong(n);
-            ISeq s = RT.seq(coll);
-            while (s != null && k > 0) {
-                s = s.next();
-                k--;
-            }
-            return s;
-        }));
-        def(ns, "nthrest", Fn.of2("nthrest", (coll, n) -> {
-            long k = Numbers.toLong(n);
-            ISeq s = RT.seq(coll);
-            while (s != null && k > 0) {
-                s = s.next();
-                k--;
-            }
-            return s == null ? PersistentList.EMPTY : s;
-        }));
+        def(ns, "count", new CoreFn1(71, "count"));
+        def(ns, "empty", new CoreFn1(72, "empty"));
+        def(ns, "nth", new CoreFn23(15, 1, "nth"));
+        def(ns, "nthnext", new CoreFn2(16, "nthnext"));
+        def(ns, "nthrest", new CoreFn2(17, "nthrest"));
 
-        def(ns, "range", Fn.ofVarargs("range", args -> switch (args.length) {
-            case 0 -> rangeSeq(0L, Long.MAX_VALUE, 1L);
-            case 1 -> rangeSeq(0L, Numbers.toLong(args[0]), 1L);
-            case 2 -> rangeSeq(Numbers.toLong(args[0]), Numbers.toLong(args[1]), 1L);
-            case 3 -> rangeSeq(Numbers.toLong(args[0]), Numbers.toLong(args[1]), Numbers.toLong(args[2]));
-            default -> throw new IllegalArgumentException("Wrong number of args to range");
-        }));
+        def(ns, "range", new CoreFnV(16, "range"));
 
-        def(ns, "repeat", Fn.of12("repeat",
-                x -> repeatInfSeq(x),
-                (n, x) -> repeatNSeq(Numbers.toLong(n), x)));
-        def(ns, "replicate", Fn.of2("replicate", (n, x) -> repeatNSeq(Numbers.toLong(n), x)));
+        def(ns, "repeat", new CoreFn12(73, 18, "repeat"));
+        def(ns, "replicate", new CoreFn2(19, "replicate"));
 
-        def(ns, "repeatedly", Fn.of12("repeatedly",
-                f -> repeatedlyInfSeq((Fn) f),
-                (n, f) -> repeatedlyNSeq(Numbers.toLong(n), (Fn) f)));
+        def(ns, "repeatedly", new CoreFn12(74, 20, "repeatedly"));
 
-        def(ns, "iterate", Fn.of2("iterate", (f, x) -> iterateSeq((Fn) f, x)));
-        def(ns, "cycle", Fn.of1("cycle", coll -> {
-            ISeq s = RT.seq(coll);
-            return s == null ? PersistentList.EMPTY : cycleSeq(s, s);
-        }));
+        def(ns, "iterate", new CoreFn2(21, "iterate"));
+        def(ns, "cycle", new CoreFn1(75, "cycle"));
 
-        def(ns, "take", Fn.of2("take", (n, coll) -> takeSeq(Numbers.toLong(n), RT.seq(coll))));
-        def(ns, "take-while", Fn.of2("take-while", (pred, coll) -> takeWhileSeq((Fn) pred, RT.seq(coll))));
-        def(ns, "take-nth", Fn.of2("take-nth", (n, coll) -> {
-            long step = Numbers.toLong(n);
-            if (step <= 0) return repeatInfSeq(RT.first(coll));
-            return takeNthSeq(step, RT.seq(coll));
-        }));
-        def(ns, "take-last", Fn.of2("take-last", (n, coll) -> {
-            int k = (int) Numbers.toLong(n);
-            if (k <= 0) return null;
-            ArrayDeque<Object> q = new ArrayDeque<>(k);
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                if (q.size() == k) q.removeFirst();
-                q.addLast(s.first());
-            }
-            return q.isEmpty() ? null : PersistentList.create(new ArrayList<>(q));
-        }));
+        def(ns, "take", new CoreTransducerFn1(3, "take", new CoreFn2(22, "take")));
+        def(ns, "take-while", new CoreTransducerFn1(4, "take-while", new CoreFn2(23, "take-while")));
+        def(ns, "take-nth", new CoreTransducerFn1(5, "take-nth", new CoreFn2(24, "take-nth")));
+        def(ns, "take-last", new CoreFn2(25, "take-last"));
 
-        def(ns, "drop", Fn.of2("drop", (n, coll) -> dropSeq(Numbers.toLong(n), coll)));
-        def(ns, "drop-while", Fn.of2("drop-while", (pred, coll) -> dropWhileSeq((Fn) pred, coll)));
-        def(ns, "drop-last", Fn.of12("drop-last",
-                coll -> dropLastSeq(1, coll),
-                (n, coll) -> dropLastSeq((int) Numbers.toLong(n), coll)));
+        def(ns, "drop", new CoreTransducerFn1(6, "drop", new CoreFn2(26, "drop")));
+        def(ns, "drop-while", new CoreTransducerFn1(7, "drop-while", new CoreFn2(27, "drop-while")));
+        def(ns, "drop-last", new CoreFn12(76, 28, "drop-last"));
 
-        def(ns, "map", Fn.ofVarargs("map", args -> {
-            if (args.length < 2) throw new IllegalArgumentException("map requires at least 2 args");
-            Fn f = (Fn) args[0];
-            if (args.length == 2) return map1Seq(f, RT.seq(args[1]));
-            ISeq[] seqs = new ISeq[args.length - 1];
-            for (int i = 0; i < seqs.length; i++) seqs[i] = RT.seq(args[i + 1]);
-            return mapNSeq(f, seqs);
-        }));
+        def(ns, "map", new CoreTransducerFn1(0, "map", new CoreFnV(17, "map")));
 
-        def(ns, "mapv", Fn.ofVarargs("mapv", args -> {
-            if (args.length < 2) throw new IllegalArgumentException("mapv requires at least 2 args");
-            Fn f = (Fn) args[0];
-            if (args.length == 2) {
-                Object coll = args[1];
-                if (coll instanceof PersistentVector pv) {
-                    return mapvVectorRange(f, pv, 0, pv.cnt);
-                }
-                if (coll instanceof PersistentVector.SubVec sv) {
-                    return mapvVectorRange(f, sv.v, sv.start, sv.end);
-                }
-                if (coll instanceof PersistentList.EmptyList || coll == null) {
-                    return PersistentVector.EMPTY;
-                }
-                PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
-                if (coll instanceof PersistentList pl) {
-                    PersistentList cur = pl;
-                    while (true) {
-                        tv = tv.conj(f.invoke(cur.first));
-                        if (cur.rest instanceof PersistentList nextPl) {
-                            cur = nextPl;
-                        } else {
-                            for (ISeq s = cur.next(); s != null; s = s.next()) tv = tv.conj(f.invoke(s.first()));
-                            return tv.persistent();
-                        }
-                    }
-                }
-                for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                    tv = tv.conj(f.invoke(s.first()));
-                }
-                return tv.persistent();
-            }
-            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
-            ISeq[] seqs = new ISeq[args.length - 1];
-            for (int i = 0; i < seqs.length; i++) seqs[i] = RT.seq(args[i + 1]);
-            Object[] callArgs = new Object[seqs.length];
-            while (true) {
-                for (int i = 0; i < seqs.length; i++) {
-                    if (seqs[i] == null) return tv.persistent();
-                    callArgs[i] = seqs[i].first();
-                    seqs[i] = seqs[i].next();
-                }
-                tv = tv.conj(f.applyTo(callArgs));
-            }
-        }));
+        def(ns, "mapv", new CoreFnV(18, "mapv"));
 
-        def(ns, "mapcat", Fn.ofVarargs("mapcat", args -> {
-            Fn f = (Fn) args[0];
-            if (args.length == 2) return concatSeq(map1Seq(f, RT.seq(args[1])));
-            ISeq[] seqs = new ISeq[args.length - 1];
-            for (int i = 0; i < seqs.length; i++) seqs[i] = RT.seq(args[i + 1]);
-            return concatSeq(mapNSeq(f, seqs));
-        }));
+        def(ns, "mapcat", new CoreTransducerFn1(11, "mapcat", new CoreFnV(19, "mapcat")));
 
-        def(ns, "map-indexed", Fn.of2("map-indexed", (f, coll) -> mapIndexedSeq((Fn) f, 0L, RT.seq(coll))));
+        def(ns, "map-indexed", new CoreTransducerFn1(10, "map-indexed", new CoreFn2(29, "map-indexed")));
 
-        def(ns, "keep", Fn.of2("keep", (f, coll) -> keepSeq((Fn) f, RT.seq(coll))));
-        def(ns, "keep-indexed", Fn.of2("keep-indexed", (f, coll) -> keepIndexedSeq((Fn) f, 0L, RT.seq(coll))));
+        def(ns, "keep", new CoreTransducerFn1(8, "keep", new CoreFn2(30, "keep")));
+        def(ns, "keep-indexed", new CoreTransducerFn1(9, "keep-indexed", new CoreFn2(31, "keep-indexed")));
 
-        def(ns, "filter", Fn.of2("filter", (pred, coll) -> filterSeq((Fn) pred, RT.seq(coll), false)));
-        def(ns, "remove", Fn.of2("remove", (pred, coll) -> filterSeq((Fn) pred, RT.seq(coll), true)));
-        def(ns, "filterv", Fn.of2("filterv", (pred, coll) -> {
-            Fn p = (Fn) pred;
-            if (coll instanceof PersistentVector pv) {
-                return filtervVectorRange(p, pv, 0, pv.cnt);
-            }
-            if (coll instanceof PersistentVector.SubVec sv) {
-                return filtervVectorRange(p, sv.v, sv.start, sv.end);
-            }
-            if (coll instanceof PersistentList.EmptyList || coll == null) {
-                return PersistentVector.EMPTY;
-            }
-            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
-            if (coll instanceof PersistentList pl) {
-                PersistentList cur = pl;
-                while (true) {
-                    Object item = cur.first;
-                    if (RT.truthy(p.invoke(item))) tv = tv.conj(item);
-                    if (cur.rest instanceof PersistentList nextPl) {
-                        cur = nextPl;
-                    } else {
-                        for (ISeq s = cur.next(); s != null; s = s.next()) {
-                            Object it = s.first();
-                            if (RT.truthy(p.invoke(it))) tv = tv.conj(it);
-                        }
-                        return tv.persistent();
-                    }
-                }
-            }
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                Object item = s.first();
-                if (RT.truthy(p.invoke(item))) tv = tv.conj(item);
-            }
-            return tv.persistent();
-        }));
+        def(ns, "filter", new CoreTransducerFn1(1, "filter", new CoreFn2(32, "filter")));
+        def(ns, "remove", new CoreTransducerFn1(2, "remove", new CoreFn2(33, "remove")));
+        def(ns, "filterv", new CoreFn2(34, "filterv"));
 
-        def(ns, "reduce", Fn.of23("reduce",
-                (f, coll) -> reduce2((Fn) f, coll),
-                (f, val, coll) -> reduce3((Fn) f, val, coll)));
+        def(ns, "reduce", new CoreFn23(35, 2, "reduce"));
 
-        def(ns, "reduce-kv", Fn.of3("reduce-kv", (f, init, coll) -> {
-            Fn fn = (Fn) f;
-            if (coll == null) return init;
-            if (coll instanceof PersistentHashMap phm) {
-                return phm.reduceKV(fn, init);
-            }
-            if (coll instanceof PersistentVector pv) {
-                Object acc = init;
-                for (int i = 0; i < pv.cnt; i++) {
-                    acc = fn.invoke(acc, (long) i, pv.nth(i));
-                    if (acc instanceof Reduced r) return r.deref();
-                }
-                return acc;
-            }
-            Object acc = init;
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
-                acc = fn.invoke(acc, e.getKey(), e.getValue());
-                if (acc instanceof Reduced r) return r.deref();
-            }
-            return acc;
-        }));
+        def(ns, "reduce-kv", new CoreFn3(3, "reduce-kv"));
 
-        def(ns, "reductions", Fn.of23("reductions",
-                (f, coll) -> {
-                    ISeq s = RT.seq(coll);
-                    if (s == null) return PersistentList.createFromArray(((Fn) f).invoke());
-                    return reductionsSeq((Fn) f, s.first(), s.next());
-                },
-                (f, init, coll) -> reductionsSeq((Fn) f, init, RT.seq(coll))));
+        def(ns, "reductions", new CoreFn23(36, 4, "reductions"));
 
-        def(ns, "reduced", Fn.of1("reduced", Reduced::new));
-        def(ns, "unreduced", Fn.of1("unreduced", x -> x instanceof Reduced r ? r.deref() : x));
-        def(ns, "ensure-reduced", Fn.of1("ensure-reduced", x -> x instanceof Reduced ? x : new Reduced(x)));
+        def(ns, "reduced", new CoreFn1(77, "reduced"));
+        def(ns, "unreduced", new CoreFn1(78, "unreduced"));
+        def(ns, "ensure-reduced", new CoreFn1(79, "ensure-reduced"));
 
-        def(ns, "some", Fn.of2("some", (pred, coll) -> {
-            Fn p = (Fn) pred;
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                Object res = p.invoke(s.first());
-                if (RT.truthy(res)) return res;
-            }
-            return null;
-        }));
+        def(ns, "some", new CoreFn2(37, "some"));
 
-        def(ns, "every?", Fn.of2("every?", (pred, coll) -> {
-            Fn p = (Fn) pred;
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                if (!RT.truthy(p.invoke(s.first()))) return Boolean.FALSE;
-            }
-            return Boolean.TRUE;
-        }));
+        def(ns, "every?", new CoreFn2(38, "every?"));
 
-        def(ns, "not-every?", Fn.of2("not-every?", (pred, coll) -> {
-            Fn p = (Fn) pred;
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                if (!RT.truthy(p.invoke(s.first()))) return Boolean.TRUE;
-            }
-            return Boolean.FALSE;
-        }));
+        def(ns, "not-every?", new CoreFn2(39, "not-every?"));
 
-        def(ns, "not-any?", Fn.of2("not-any?", (pred, coll) -> {
-            Fn p = (Fn) pred;
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                if (RT.truthy(p.invoke(s.first()))) return Boolean.FALSE;
-            }
-            return Boolean.TRUE;
-        }));
+        def(ns, "not-any?", new CoreFn2(40, "not-any?"));
 
-        def(ns, "concat", Fn.ofVarargs("concat", args -> {
-            if (args.length == 0) return PersistentList.EMPTY;
-            return concatSeq(PersistentList.createFromArray(args));
-        }));
+        def(ns, "concat", new CoreFnV(20, "concat"));
 
-        def(ns, "interleave", Fn.ofVarargs("interleave", args -> {
-            if (args.length == 0) return PersistentList.EMPTY;
-            ISeq[] seqs = new ISeq[args.length];
-            for (int i = 0; i < args.length; i++) seqs[i] = RT.seq(args[i]);
-            return interleaveSeq(seqs);
-        }));
+        def(ns, "interleave", new CoreFnV(21, "interleave"));
 
-        def(ns, "interpose", Fn.of2("interpose", (sep, coll) -> {
-            ISeq s = RT.seq(coll);
-            if (s == null) return PersistentList.EMPTY;
-            return interposeSeq(sep, s, true);
-        }));
+        def(ns, "interpose", new CoreTransducerFn1(12, "interpose", new CoreFn2(41, "interpose")));
 
-        def(ns, "partition", Fn.ofVarargs("partition", args -> switch (args.length) {
-            case 2 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[0]), null, RT.seq(args[1]), false, false);
-            case 3 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), null, RT.seq(args[2]), false, false);
-            case 4 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), RT.seq(args[2]), RT.seq(args[3]), false, false);
-            default -> throw new IllegalArgumentException("Wrong number of args to partition");
-        }));
+        def(ns, "partition", new CoreFnV(22, "partition"));
 
-        def(ns, "partition-all", Fn.of23("partition-all",
-                (n, coll) -> partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(n), null, RT.seq(coll), true, false),
-                (n, step, coll) -> partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(step), null, RT.seq(coll), true, false)));
+        def(ns, "partition-all", new CoreTransducerFn1(13, "partition-all", new CoreFn23(42, 5, "partition-all")));
 
-        def(ns, "partitionv", Fn.ofVarargs("partitionv", args -> switch (args.length) {
-            case 2 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[0]), null, RT.seq(args[1]), false, true);
-            case 3 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), null, RT.seq(args[2]), false, true);
-            case 4 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), RT.seq(args[2]), RT.seq(args[3]), false, true);
-            default -> throw new IllegalArgumentException("Wrong number of args to partitionv");
-        }));
+        def(ns, "partitionv", new CoreFnV(23, "partitionv"));
 
-        def(ns, "partitionv-all", Fn.of23("partitionv-all",
-                (n, coll) -> partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(n), null, RT.seq(coll), true, true),
-                (n, step, coll) -> partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(step), null, RT.seq(coll), true, true)));
+        def(ns, "partitionv-all", new CoreTransducerFn1(14, "partitionv-all", new CoreFn23(43, 6, "partitionv-all")));
 
-        def(ns, "partition-by", Fn.of2("partition-by", (f, coll) -> partitionBySeq((Fn) f, RT.seq(coll))));
+        def(ns, "partition-by", new CoreTransducerFn1(15, "partition-by", new CoreFn2(44, "partition-by")));
 
-        def(ns, "split-at", Fn.of2("split-at", (n, coll) -> {
-            long k = Numbers.toLong(n);
-            return PersistentVector.createOwning(takeSeq(k, RT.seq(coll)), dropSeq(k, coll));
-        }));
+        def(ns, "split-at", new CoreFn2(45, "split-at"));
 
-        def(ns, "splitv-at", Fn.of2("splitv-at", (n, coll) -> {
-            long k = Numbers.toLong(n);
-            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
-            ISeq s = RT.seq(coll);
-            for (long i = 0; i < k && s != null; i++) {
-                tv = tv.conj(s.first());
-                s = s.next();
-            }
-            return PersistentVector.createOwning(tv.persistent(), s == null ? PersistentList.EMPTY : s);
-        }));
+        def(ns, "splitv-at", new CoreFn2(46, "splitv-at"));
 
-        def(ns, "split-with", Fn.of2("split-with", (pred, coll) ->
-                PersistentVector.createOwning(takeWhileSeq((Fn) pred, RT.seq(coll)), dropWhileSeq((Fn) pred, coll))));
+        def(ns, "split-with", new CoreFn2(47, "split-with"));
 
-        def(ns, "group-by", Fn.of2("group-by", (f, coll) -> {
-            Fn fn = (Fn) f;
-            Map<RT.EquivKey, PersistentVector.TransientVector> groups = new LinkedHashMap<>();
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                Object item = s.first();
-                Object k = fn.invoke(item);
-                groups.computeIfAbsent(new RT.EquivKey(k), _k -> PersistentVector.EMPTY.asTransient()).conj(item);
-            }
-            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
-            for (Map.Entry<RT.EquivKey, PersistentVector.TransientVector> e : groups.entrySet()) {
-                ret = ret.assoc(e.getKey().val, e.getValue().persistent());
-            }
-            return ret.persistent();
-        }));
+        def(ns, "group-by", new CoreFn2(48, "group-by"));
 
-        def(ns, "frequencies", Fn.of1("frequencies", coll -> {
-            Map<RT.EquivKey, Long> counts = new HashMap<>();
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                counts.merge(new RT.EquivKey(s.first()), 1L, Long::sum);
-            }
-            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
-            for (Map.Entry<RT.EquivKey, Long> e : counts.entrySet()) {
-                ret = ret.assoc(e.getKey().val, e.getValue());
-            }
-            return ret.persistent();
-        }));
+        def(ns, "frequencies", new CoreFn1(80, "frequencies"));
 
-        def(ns, "distinct", Fn.of1("distinct", coll -> distinctSeq(RT.seq(coll), new HashSet<>())));
-        def(ns, "dedupe", Fn.of1("dedupe", coll -> dedupeSeq(RT.seq(coll), new Object(), true)));
+        def(ns, "distinct", new CoreTransducerFn0(0, "distinct", new CoreFn1(81, "distinct")));
+        def(ns, "dedupe", new CoreTransducerFn0(1, "dedupe", new CoreFn1(82, "dedupe")));
 
-        def(ns, "flatten", Fn.of1("flatten", x -> {
-            List<Object> out = new ArrayList<>();
-            flattenInto(x, out);
-            return PersistentList.create(out);
-        }));
+        def(ns, "flatten", new CoreFn1(83, "flatten"));
 
-        def(ns, "tree-seq", Fn.of3("tree-seq", (branchP, childrenFn, root) ->
-                treeSeqWalk((Fn) branchP, (Fn) childrenFn, root)));
+        def(ns, "tree-seq", new CoreFn3(7, "tree-seq"));
 
-        def(ns, "doall", Fn.of12("doall",
-                coll -> { dorun(RT.seq(coll)); return coll; },
-                (n, coll) -> { dorun((int) Numbers.toLong(n), RT.seq(coll)); return coll; }));
-        def(ns, "dorun", Fn.of12("dorun",
-                coll -> { dorun(RT.seq(coll)); return null; },
-                (n, coll) -> { dorun((int) Numbers.toLong(n), RT.seq(coll)); return null; }));
-        def(ns, "run!", Fn.of2("run!", (proc, coll) -> {
-            Fn f = (Fn) proc;
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) f.invoke(s.first());
-            return null;
-        }));
+        def(ns, "doall", new CoreFn12(84, 49, "doall"));
+        def(ns, "dorun", new CoreFn12(85, 50, "dorun"));
+        def(ns, "run!", new CoreFn2(51, "run!"));
     }
 
     private static void flattenInto(Object x, List<Object> out) {
@@ -1415,41 +1040,21 @@ public final class Core {
     // ========================================================================
 
     private static void initCollections(Namespace ns) {
-        def(ns, "list", Fn.ofVarargs("list", PersistentList::createFromArray));
-        def(ns, "list*", Fn.ofVarargs("list*", args -> {
-            if (args.length == 0) return PersistentList.EMPTY;
-            if (args.length == 1) return RT.seq(args[0]);
-            ISeq tail = RT.seq(args[args.length - 1]);
-            for (int i = args.length - 2; i >= 0; i--) {
-                tail = RT.cons(args[i], tail);
-            }
-            return tail;
-        }));
+        def(ns, "list", new CoreFnV(24, "list"));
+        def(ns, "list*", new CoreFnV(25, "list*"));
 
-        def(ns, "vector", Fn.ofVarargs("vector", PersistentVector::createOwning));
-        def(ns, "vec", Fn.of1("vec", coll -> {
-            if (coll == null) return PersistentVector.EMPTY;
-            if (coll instanceof PersistentVector pv) return pv;
-            return PersistentVector.createFromISeq(RT.seq(coll));
-        }));
+        def(ns, "vector", new CoreFnV(26, "vector"));
+        def(ns, "vec", new CoreFn1(86, "vec"));
 
-        def(ns, "hash-map", Fn.ofVarargs("hash-map", PersistentHashMap::create));
-        def(ns, "array-map", Fn.ofVarargs("array-map", PersistentHashMap::create));
-        def(ns, "hash-set", Fn.ofVarargs("hash-set", PersistentHashSet::create));
-        def(ns, "set", Fn.of1("set", coll -> {
-            if (coll == null) return PersistentHashSet.EMPTY;
-            if (coll instanceof PersistentHashSet ps) return ps;
-            return PersistentHashSet.createFromISeq(RT.seq(coll));
-        }));
+        def(ns, "hash-map", new CoreFnV(27, "hash-map"));
+        def(ns, "array-map", new CoreFnV(28, "array-map"));
+        def(ns, "hash-set", new CoreFnV(29, "hash-set"));
+        def(ns, "set", new CoreFn1(87, "set"));
 
-        def(ns, "into", Fn.of23("into",
-                (to, from) -> intoImpl(to, null, from),
-                (to, xform, from) -> intoImpl(to, (Fn) xform, from)));
+        def(ns, "into", new CoreFn23(52, 8, "into"));
 
-        def(ns, "get", Fn.of23("get", RT::get, RT::get));
-        def(ns, "get-in", Fn.of23("get-in",
-                (m, ks) -> getIn(m, ks, null),
-                Core::getIn));
+        def(ns, "get", new CoreFn23(53, 9, "get"));
+        def(ns, "get-in", new CoreFn23(54, 10, "get-in"));
 
         def(ns, "assoc", new Fn.NamedFn("assoc") {
             @Override public Object invoke(Object coll) { return coll; }
@@ -1465,7 +1070,7 @@ public final class Core {
             }
         });
 
-        def(ns, "assoc-in", Fn.of3("assoc-in", (m, ks, v) -> assocIn(m, RT.seq(ks), v)));
+        def(ns, "assoc-in", new CoreFn3(11, "assoc-in"));
 
         def(ns, "dissoc", new Fn.NamedFn("dissoc") {
             @Override public Object invoke(Object coll) { return coll; }
@@ -1482,239 +1087,47 @@ public final class Core {
             }
         });
 
-        def(ns, "update", Fn.ofVarargs("update", args -> {
-            Object m = args[0];
-            Object k = args[1];
-            Fn f = (Fn) args[2];
-            Object cur = RT.get(m, k);
-            Object newVal = switch (args.length) {
-                case 3 -> f.invoke(cur);
-                case 4 -> f.invoke(cur, args[3]);
-                case 5 -> f.invoke(cur, args[3], args[4]);
-                case 6 -> f.invoke(cur, args[3], args[4], args[5]);
-                default -> {
-                    Object[] callArgs = new Object[args.length - 2];
-                    callArgs[0] = cur;
-                    System.arraycopy(args, 3, callArgs, 1, args.length - 3);
-                    yield f.applyTo(callArgs);
-                }
-            };
-            return RT.assoc(m, k, newVal);
-        }));
+        def(ns, "update", new CoreFnV(30, "update"));
 
-        def(ns, "update-in", Fn.ofVarargs("update-in", args -> {
-            Object m = args[0];
-            ISeq ks = RT.seq(args[1]);
-            Fn f = (Fn) args[2];
-            Object[] extra = new Object[args.length - 3];
-            System.arraycopy(args, 3, extra, 0, extra.length);
-            return updateIn(m, ks, f, extra);
-        }));
+        def(ns, "update-in", new CoreFnV(31, "update-in"));
 
-        def(ns, "find", Fn.of2("find", RT::find));
-        def(ns, "contains?", Fn.of2("contains?", RT::contains));
-        def(ns, "keys", Fn.of1("keys", RT::keys));
-        def(ns, "vals", Fn.of1("vals", RT::vals));
-        def(ns, "key", Fn.of1("key", e -> ((Map.Entry<?, ?>) e).getKey()));
-        def(ns, "val", Fn.of1("val", e -> ((Map.Entry<?, ?>) e).getValue()));
+        def(ns, "find", new CoreFn2(55, "find"));
+        def(ns, "contains?", new CoreFn2(56, "contains?"));
+        def(ns, "keys", new CoreFn1(88, "keys"));
+        def(ns, "vals", new CoreFn1(89, "vals"));
+        def(ns, "key", new CoreFn1(90, "key"));
+        def(ns, "val", new CoreFn1(91, "val"));
 
-        def(ns, "select-keys", Fn.of2("select-keys", (m, keyseq) -> {
-            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
-            for (ISeq s = RT.seq(keyseq); s != null; s = s.next()) {
-                Object k = s.first();
-                Object entry = RT.find(m, k);
-                if (entry instanceof Map.Entry<?, ?> me) {
-                    ret = ret.assoc(me.getKey(), me.getValue());
-                }
-            }
-            return ret.persistent();
-        }));
+        def(ns, "select-keys", new CoreFn2(57, "select-keys"));
 
-        def(ns, "merge", Fn.ofVarargs("merge", args -> {
-            PersistentHashMap ret = PersistentHashMap.EMPTY;
-            boolean allNil = true;
-            for (Object a : args) {
-                if (a != null) {
-                    allNil = false;
-                    for (ISeq s = RT.seq(a); s != null; s = s.next()) {
-                        Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
-                        ret = ret.assoc(e.getKey(), e.getValue());
-                    }
-                }
-            }
-            return allNil ? null : ret;
-        }));
+        def(ns, "merge", new CoreFnV(32, "merge"));
 
-        def(ns, "merge-with", Fn.ofVarargs("merge-with", args -> {
-            Fn f = (Fn) args[0];
-            PersistentHashMap ret = PersistentHashMap.EMPTY;
-            boolean allNil = true;
-            for (int i = 1; i < args.length; i++) {
-                if (args[i] != null) {
-                    allNil = false;
-                    for (ISeq s = RT.seq(args[i]); s != null; s = s.next()) {
-                        Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
-                        Object k = e.getKey();
-                        Object v = e.getValue();
-                        if (ret.containsKey(k)) {
-                            ret = ret.assoc(k, f.invoke(ret.valAt(k), v));
-                        } else {
-                            ret = ret.assoc(k, v);
-                        }
-                    }
-                }
-            }
-            return allNil ? null : ret;
-        }));
+        def(ns, "merge-with", new CoreFnV(33, "merge-with"));
 
-        def(ns, "zipmap", Fn.of2("zipmap", (keys, vals) -> {
-            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
-            ISeq ks = RT.seq(keys);
-            ISeq vs = RT.seq(vals);
-            while (ks != null && vs != null) {
-                ret = ret.assoc(ks.first(), vs.first());
-                ks = ks.next();
-                vs = vs.next();
-            }
-            return ret.persistent();
-        }));
+        def(ns, "zipmap", new CoreFn2(58, "zipmap"));
 
-        def(ns, "peek", Fn.of1("peek", coll -> {
-            if (coll == null) return null;
-            if (coll instanceof PersistentVector pv) return pv.peek();
-            if (coll instanceof PersistentList pl) return pl.peek();
-            if (coll instanceof PersistentList.EmptyList) return null;
-            if (coll instanceof PersistentColl pc) return pc.peek();
-            return RT.first(coll);
-        }));
+        def(ns, "peek", new CoreFn1(92, "peek"));
 
-        def(ns, "pop", Fn.of1("pop", RT::pop));
+        def(ns, "pop", new CoreFn1(93, "pop"));
 
-        def(ns, "subvec", Fn.of23("subvec",
-                (v, start) -> {
-                    int s = (int) Numbers.toLong(start);
-                    if (v instanceof PersistentVector pv) return pv.subVec(s, pv.cnt);
-                    if (v instanceof PersistentVector.SubVec sv) return sv.subVec(s, sv.count());
-                    throw new ClassCastException("subvec expects a vector: " + v);
-                },
-                (v, start, end) -> {
-                    int s = (int) Numbers.toLong(start);
-                    int e = (int) Numbers.toLong(end);
-                    if (v instanceof PersistentVector pv) return pv.subVec(s, e);
-                    if (v instanceof PersistentVector.SubVec sv) return sv.subVec(s, e);
-                    throw new ClassCastException("subvec expects a vector: " + v);
-                }));
+        def(ns, "subvec", new CoreFn23(59, 12, "subvec"));
 
-        def(ns, "disj", Fn.ofVarargs("disj", args -> {
-            Object s = args[0];
-            if (s instanceof PersistentTreeSet pts) {
-                for (int i = 1; i < args.length; i++) pts = pts.disjoin(args[i]);
-                return pts;
-            }
-            if (s instanceof PersistentColl pc) {
-                for (int i = 1; i < args.length; i++) pc = (PersistentColl) pc.without(args[i]);
-                return pc;
-            }
-            PersistentHashSet set = (PersistentHashSet) s;
-            for (int i = 1; i < args.length; i++) set = set.disjoin(args[i]);
-            return set;
-        }));
+        def(ns, "disj", new CoreFnV(34, "disj"));
 
-        def(ns, "reverse", Fn.of1("reverse", coll -> {
-            if (coll instanceof PersistentList pl) {
-                PersistentList ret = new PersistentList(null, pl.first, null, 1);
-                if (pl.rest instanceof PersistentList nextPl) {
-                    PersistentList cur = nextPl;
-                    while (true) {
-                        ret = ret.cons(cur.first);
-                        if (cur.rest instanceof PersistentList n) {
-                            cur = n;
-                        } else {
-                            ISeq rem = cur.next();
-                            if (rem == null) return ret;
-                            ISeq sRet = ret;
-                            for (; rem != null; rem = rem.next()) sRet = sRet.cons(rem.first());
-                            return sRet;
-                        }
-                    }
-                }
-                ISeq sRet = ret;
-                for (ISeq rem = pl.next(); rem != null; rem = rem.next()) sRet = sRet.cons(rem.first());
-                return sRet;
-            }
-            if (coll instanceof PersistentVector pv) {
-                if (pv.cnt == 0) return PersistentList.EMPTY;
-                PersistentList ret = null;
-                int i = 0;
-                while (i < pv.cnt) {
-                    Object[] chunk = pv.arrayFor(i);
-                    int limit = Math.min(chunk.length, pv.cnt - i);
-                    for (int j = 0; j < limit; j++) {
-                        ret = ret == null ? new PersistentList(null, chunk[j], null, 1) : ret.cons(chunk[j]);
-                    }
-                    i += limit;
-                }
-                return ret;
-            }
-            ISeq ret = PersistentList.EMPTY;
-            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-                ret = ret.cons(s.first());
-            }
-            return ret;
-        }));
+        def(ns, "reverse", new CoreFn1(94, "reverse"));
 
-        def(ns, "rseq", Fn.of1("rseq", coll -> {
-            if (coll instanceof Reversible rev) return rev.rseq();
-            return RT.seq(coll);
-        }));
+        def(ns, "rseq", new CoreFn1(95, "rseq"));
 
-        def(ns, "sort", Fn.of12("sort",
-                coll -> {
-                    Object[] arr = RT.toArray(coll);
-                    Arrays.sort(arr, RT::compare);
-                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
-                },
-                (cmp, coll) -> {
-                    Object[] arr = RT.toArray(coll);
-                    Arrays.sort(arr, toComparator(cmp));
-                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
-                }));
+        def(ns, "sort", new CoreFn12(96, 60, "sort"));
 
-        def(ns, "sort-by", Fn.of23("sort-by",
-                (keyfn, coll) -> {
-                    Fn kf = (Fn) keyfn;
-                    Object[] arr = RT.toArray(coll);
-                    Arrays.sort(arr, (a, b) -> RT.compare(kf.invoke(a), kf.invoke(b)));
-                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
-                },
-                (keyfn, cmp, coll) -> {
-                    Fn kf = (Fn) keyfn;
-                    Comparator<Object> c = toComparator(cmp);
-                    Object[] arr = RT.toArray(coll);
-                    Arrays.sort(arr, (a, b) -> c.compare(kf.invoke(a), kf.invoke(b)));
-                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
-                }));
+        def(ns, "sort-by", new CoreFn23(61, 13, "sort-by"));
 
-        def(ns, "shuffle", Fn.of1("shuffle", coll -> {
-            List<Object> list = new ArrayList<>(Arrays.asList(RT.toArray(coll)));
-            Collections.shuffle(list);
-            return PersistentVector.create(list);
-        }));
+        def(ns, "shuffle", new CoreFn1(97, "shuffle"));
 
         // Transients
-        def(ns, "transient", Fn.of1("transient", coll -> {
-            if (coll instanceof PersistentVector pv) return pv.asTransient();
-            if (coll instanceof PersistentHashMap pm) return pm.asTransient();
-            if (coll instanceof PersistentHashSet ps) return ps.asTransient();
-            throw new IllegalArgumentException("Cannot create transient from: " + coll);
-        }));
-        def(ns, "persistent!", Fn.of1("persistent!", t -> {
-            if (t instanceof PersistentVector.TransientVector tv) return tv.persistent();
-            if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.persistent();
-            if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.persistent();
-            throw new IllegalArgumentException("Not a transient: " + t);
-        }));
-        def(ns, "__destructure-map", Fn.of1("__destructure-map", RT::destructureMap));
+        def(ns, "transient", new CoreFn1(98, "transient"));
+        def(ns, "persistent!", new CoreFn1(99, "persistent!"));
+        def(ns, "__destructure-map", new CoreFn1(100, "__destructure-map"));
         def(ns, "conj!", new Fn.NamedFn("conj!") {
             @Override public Object invoke() { return PersistentVector.EMPTY.asTransient(); }
             @Override public Object invoke(Object t) { return t; }
@@ -1771,7 +1184,7 @@ public final class Core {
                 return tm;
             }
         });
-        def(ns, "pop!", Fn.of1("pop!", t -> ((PersistentVector.TransientVector) t).pop()));
+        def(ns, "pop!", new CoreFn1(101, "pop!"));
         def(ns, "disj!", new Fn.NamedFn("disj!") {
             @Override public Object invoke(Object t) { return t; }
             @Override public Object invoke(Object t, Object k) {
@@ -1890,126 +1303,39 @@ public final class Core {
             }
         });
 
-        def(ns, "subs", Fn.of23("subs",
-                (s, start) -> ((String) s).substring((int) Numbers.toLong(start)),
-                (s, start, end) -> ((String) s).substring((int) Numbers.toLong(start), (int) Numbers.toLong(end))));
+        def(ns, "subs", new CoreFn23(62, 14, "subs"));
 
-        def(ns, "format", Fn.ofVarargs("format", args -> {
-            String fmt = (String) args[0];
-            Object[] rest = new Object[args.length - 1];
-            System.arraycopy(args, 1, rest, 0, rest.length);
-            return String.format(fmt, rest);
-        }));
+        def(ns, "format", new CoreFnV(35, "format"));
 
-        def(ns, "name", Fn.of1("name", RT::name));
-        def(ns, "namespace", Fn.of1("namespace", RT::namespace));
-        def(ns, "symbol", Fn.of12("symbol",
-                s -> s instanceof Symbol sym ? sym : Symbol.intern((String) s),
-                (nsName, name) -> Symbol.intern((String) nsName, (String) name)));
-        def(ns, "keyword", Fn.of12("keyword",
-                k -> {
-                    if (k instanceof Keyword kw) return kw;
-                    if (k instanceof Symbol s) return Keyword.intern(s);
-                    if (k instanceof String str) return Keyword.intern(str);
-                    return null;
-                },
-                (nsName, name) -> Keyword.intern((String) nsName, (String) name)));
-        def(ns, "find-keyword", Fn.of12("find-keyword",
-                k -> k instanceof Keyword kw ? kw : Keyword.find(null, k.toString()),
-                (nsName, name) -> Keyword.find((String) nsName, (String) name)));
+        def(ns, "name", new CoreFn1(102, "name"));
+        def(ns, "namespace", new CoreFn1(103, "namespace"));
+        def(ns, "symbol", new CoreFn12(104, 63, "symbol"));
+        def(ns, "keyword", new CoreFn12(105, 64, "keyword"));
+        def(ns, "find-keyword", new CoreFn12(106, 65, "find-keyword"));
 
-        def(ns, "gensym", Fn.ofVarargs("gensym", args -> {
-            String prefix = args.length == 0 ? "G__" : args[0].toString();
-            return Symbol.intern(prefix + RT.nextID());
-        }));
+        def(ns, "gensym", new CoreFnV(36, "gensym"));
 
-        def(ns, "re-pattern", Fn.of1("re-pattern", s -> s instanceof Pattern p ? p : Pattern.compile((String) s)));
-        def(ns, "re-matcher", Fn.of2("re-matcher", (p, s) -> ((Pattern) p).matcher((CharSequence) s)));
-        def(ns, "re-groups", Fn.of1("re-groups", m -> {
-            Matcher mat = (Matcher) m;
-            int gc = mat.groupCount();
-            if (gc == 0) return mat.group();
-            Object[] ret = new Object[gc + 1];
-            for (int i = 0; i <= gc; i++) ret[i] = mat.group(i);
-            return PersistentVector.createOwning(ret);
-        }));
-        def(ns, "re-find", Fn.of12("re-find",
-                m -> {
-                    Matcher mat = (Matcher) m;
-                    if (!mat.find()) return null;
-                    int gc = mat.groupCount();
-                    if (gc == 0) return mat.group();
-                    Object[] ret = new Object[gc + 1];
-                    for (int i = 0; i <= gc; i++) ret[i] = mat.group(i);
-                    return PersistentVector.createOwning(ret);
-                },
-                (p, s) -> {
-                    Matcher mat = ((Pattern) p).matcher((CharSequence) s);
-                    if (!mat.find()) return null;
-                    int gc = mat.groupCount();
-                    if (gc == 0) return mat.group();
-                    Object[] ret = new Object[gc + 1];
-                    for (int i = 0; i <= gc; i++) ret[i] = mat.group(i);
-                    return PersistentVector.createOwning(ret);
-                }));
-        def(ns, "re-matches", Fn.of2("re-matches", (p, s) -> {
-            Matcher mat = ((Pattern) p).matcher((CharSequence) s);
-            if (!mat.matches()) return null;
-            int gc = mat.groupCount();
-            if (gc == 0) return mat.group();
-            Object[] ret = new Object[gc + 1];
-            for (int i = 0; i <= gc; i++) ret[i] = mat.group(i);
-            return PersistentVector.createOwning(ret);
-        }));
-        def(ns, "re-seq", Fn.of2("re-seq", (p, s) -> {
-            Matcher mat = ((Pattern) p).matcher((CharSequence) s);
-            List<Object> results = new ArrayList<>();
-            int gc = mat.groupCount();
-            while (mat.find()) {
-                if (gc == 0) {
-                    results.add(mat.group());
-                } else {
-                    Object[] ret = new Object[gc + 1];
-                    for (int i = 0; i <= gc; i++) ret[i] = mat.group(i);
-                    results.add(PersistentVector.createOwning(ret));
-                }
-            }
-            return results.isEmpty() ? null : PersistentList.create(results);
-        }));
+        def(ns, "re-pattern", new CoreFn1(107, "re-pattern"));
+        def(ns, "re-matcher", new CoreFn2(66, "re-matcher"));
+        def(ns, "re-groups", new CoreFn1(108, "re-groups"));
+        def(ns, "re-find", new CoreFn12(109, 67, "re-find"));
+        def(ns, "re-matches", new CoreFn2(68, "re-matches"));
+        def(ns, "re-seq", new CoreFn2(69, "re-seq"));
 
         // Printing & I/O
-        def(ns, "pr-str", Fn.ofVarargs("pr-str", args -> joinPrint(args, true)));
-        def(ns, "prn-str", Fn.ofVarargs("prn-str", args -> joinPrint(args, true) + System.lineSeparator()));
-        def(ns, "print-str", Fn.ofVarargs("print-str", args -> joinPrint(args, false)));
-        def(ns, "println-str", Fn.ofVarargs("println-str", args -> joinPrint(args, false) + System.lineSeparator()));
+        def(ns, "pr-str", new CoreFnV(37, "pr-str"));
+        def(ns, "prn-str", new CoreFnV(38, "prn-str"));
+        def(ns, "print-str", new CoreFnV(39, "print-str"));
+        def(ns, "println-str", new CoreFnV(40, "println-str"));
 
-        def(ns, "pr", Fn.ofVarargs("pr", args -> { writeOut(joinPrint(args, true), false); return null; }));
-        def(ns, "prn", Fn.ofVarargs("prn", args -> { writeOut(joinPrint(args, true), true); return null; }));
-        def(ns, "print", Fn.ofVarargs("print", args -> { writeOut(joinPrint(args, false), false); return null; }));
-        def(ns, "println", Fn.ofVarargs("println", args -> { writeOut(joinPrint(args, false), true); return null; }));
-        def(ns, "printf", Fn.ofVarargs("printf", args -> {
-            String fmt = (String) args[0];
-            Object[] rest = new Object[args.length - 1];
-            System.arraycopy(args, 1, rest, 0, rest.length);
-            writeOut(String.format(fmt, rest), false);
-            return null;
-        }));
-        def(ns, "newline", Fn.of0("newline", () -> { writeOut("", true); return null; }));
-        def(ns, "flush", Fn.of0("flush", () -> {
-            Object out = RT.OUT.deref();
-            if (out instanceof Flushable f) {
-                try { f.flush(); } catch (IOException e) { throw RT.sneakyThrow(e); }
-            }
-            return null;
-        }));
-        def(ns, "read-line", Fn.of0("read-line", () -> {
-            try {
-                BufferedReader br = (BufferedReader) RT.IN.deref();
-                return br.readLine();
-            } catch (IOException e) {
-                throw RT.sneakyThrow(e);
-            }
-        }));
+        def(ns, "pr", new CoreFnV(41, "pr"));
+        def(ns, "prn", new CoreFnV(42, "prn"));
+        def(ns, "print", new CoreFnV(43, "print"));
+        def(ns, "println", new CoreFnV(44, "println"));
+        def(ns, "printf", new CoreFnV(45, "printf"));
+        def(ns, "newline", new CoreFn0(0, "newline"));
+        def(ns, "flush", new CoreFn0(1, "flush"));
+        def(ns, "read-line", new CoreFn0(2, "read-line"));
         def(ns, "read", new Fn.NamedFn("read") {
             @Override
             public Object invoke() {
@@ -2039,9 +1365,7 @@ public final class Core {
                 return Reader.readFromStream((java.io.Reader) stream, RT.truthy(eofErrorP), eofValue, null);
             }
         });
-        def(ns, "read-string", Fn.of12("read-string",
-                s -> Reader.readString((String) s),
-                (opts, s) -> Reader.readString((Map<?, ?>) opts, (String) s)));
+        def(ns, "read-string", new CoreFn12(110, 70, "read-string"));
         def(ns, "read+string", new Fn.NamedFn("read+string") {
             @Override public Object invoke() {
                 return Reader.readFromStreamWithString((java.io.Reader) RT.IN.deref(), true, null, null);
@@ -2062,26 +1386,8 @@ public final class Core {
                 return Reader.readFromStreamWithString((java.io.Reader) stream, RT.truthy(eofErrorP), eofValue, null);
             }
         });
-        def(ns, "slurp", Fn.ofVarargs("slurp", args -> {
-            if (args.length == 0) throw new IllegalArgumentException("Wrong number of args (0) passed to: slurp");
-            Charset charset = StandardCharsets.UTF_8;
-            Keyword encKw = Keyword.intern("encoding");
-            for (int i = 1; i + 1 < args.length; i += 2) {
-                if (encKw.equals(args[i]) && args[i + 1] != null) {
-                    charset = Charset.forName(args[i + 1].toString());
-                }
-            }
-            return slurpImpl(args[0], charset);
-        }));
-        def(ns, "spit", Fn.of2("spit", (f, content) -> {
-            try {
-                Path p = (f instanceof File file) ? file.toPath() : Path.of(f.toString());
-                Files.writeString(p, String.valueOf(content), StandardCharsets.UTF_8);
-                return null;
-            } catch (IOException e) {
-                throw RT.sneakyThrow(e);
-            }
-        }));
+        def(ns, "slurp", new CoreFnV(46, "slurp"));
+        def(ns, "spit", new CoreFn2(71, "spit"));
     }
 
     private static String slurpImpl(Object f, Charset charset) {
@@ -2193,114 +1499,27 @@ public final class Core {
     // ========================================================================
 
     private static void initFunctional(Namespace ns) {
-        def(ns, "identity", Fn.of1("identity", x -> x));
-        def(ns, "constantly", Fn.of1("constantly", x -> Fn.ofVarargs("constantly", args -> x)));
-        def(ns, "complement", Fn.of1("complement", f -> {
-            Fn fn = (Fn) f;
-            return Fn.ofVarargs("complement", args -> !RT.truthy(fn.applyTo(args)));
-        }));
+        def(ns, "identity", new CoreFn1(111, "identity"));
+        def(ns, "constantly", new CoreFn1(112, "constantly"));
+        def(ns, "complement", new CoreFn1(113, "complement"));
 
-        def(ns, "apply", Fn.ofVarargs("apply", args -> {
-            Fn f = (Fn) args[0];
-            if (args.length == 2) return f.applyTo(RT.toArray(args[1]));
-            List<Object> list = new ArrayList<>();
-            for (int i = 1; i < args.length - 1; i++) list.add(args[i]);
-            for (ISeq s = RT.seq(args[args.length - 1]); s != null; s = s.next()) list.add(s.first());
-            return f.applyTo(list.toArray());
-        }));
+        def(ns, "apply", new CoreFnV(47, "apply"));
 
-        def(ns, "partial", Fn.ofVarargs("partial", pArgs -> {
-            Fn f = (Fn) pArgs[0];
-            Object[] fixed = new Object[pArgs.length - 1];
-            System.arraycopy(pArgs, 1, fixed, 0, fixed.length);
-            return Fn.ofVarargs("partial", callArgs -> {
-                Object[] all = new Object[fixed.length + callArgs.length];
-                System.arraycopy(fixed, 0, all, 0, fixed.length);
-                System.arraycopy(callArgs, 0, all, fixed.length, callArgs.length);
-                return f.applyTo(all);
-            });
-        }));
+        def(ns, "partial", new CoreFnV(48, "partial"));
 
-        def(ns, "comp", Fn.ofVarargs("comp", fns -> {
-            if (fns.length == 0) return Fn.of1("identity", x -> x);
-            if (fns.length == 1) return fns[0];
-            return Fn.ofVarargs("comp", args -> {
-                Object res = ((Fn) fns[fns.length - 1]).applyTo(args);
-                for (int i = fns.length - 2; i >= 0; i--) {
-                    res = ((Fn) fns[i]).invoke(res);
-                }
-                return res;
-            });
-        }));
+        def(ns, "comp", new CoreFnV(49, "comp"));
 
-        def(ns, "juxt", Fn.ofVarargs("juxt", fns -> Fn.ofVarargs("juxt", args -> {
-            Object[] res = new Object[fns.length];
-            for (int i = 0; i < fns.length; i++) {
-                res[i] = ((Fn) fns[i]).applyTo(args);
-            }
-            return PersistentVector.createOwning(res);
-        })));
+        def(ns, "juxt", new CoreFnV(50, "juxt"));
 
-        def(ns, "fnil", Fn.ofVarargs("fnil", fArgs -> {
-            Fn f = (Fn) fArgs[0];
-            Object[] defaults = new Object[fArgs.length - 1];
-            System.arraycopy(fArgs, 1, defaults, 0, defaults.length);
-            return Fn.ofVarargs("fnil", callArgs -> {
-                Object[] patched = callArgs.clone();
-                int limit = Math.min(patched.length, defaults.length);
-                for (int i = 0; i < limit; i++) {
-                    if (patched[i] == null) patched[i] = defaults[i];
-                }
-                return f.applyTo(patched);
-            });
-        }));
+        def(ns, "fnil", new CoreFnV(51, "fnil"));
 
-        def(ns, "memoize", Fn.of1("memoize", f -> {
-            Fn fn = (Fn) f;
-            ConcurrentHashMap<PersistentVector, Object> cache = new ConcurrentHashMap<>();
-            Object NULL_SENTINEL = new Object();
-            return Fn.ofVarargs("memoize", args -> {
-                PersistentVector key = PersistentVector.createOwning(args);
-                Object cached = cache.get(key);
-                if (cached != null) return cached == NULL_SENTINEL ? null : cached;
-                Object val = fn.applyTo(args);
-                cache.putIfAbsent(key, val == null ? NULL_SENTINEL : val);
-                return val;
-            });
-        }));
+        def(ns, "memoize", new CoreFn1(114, "memoize"));
 
-        def(ns, "trampoline", Fn.ofVarargs("trampoline", args -> {
-            Fn f = (Fn) args[0];
-            Object[] rest = new Object[args.length - 1];
-            System.arraycopy(args, 1, rest, 0, rest.length);
-            Object ret = f.applyTo(rest);
-            while (ret instanceof Fn nextFn && !(ret instanceof Keyword || ret instanceof Symbol
-                    || ret instanceof PersistentVector || ret instanceof PersistentHashMap || ret instanceof PersistentHashSet)) {
-                ret = nextFn.invoke();
-            }
-            return ret;
-        }));
+        def(ns, "trampoline", new CoreFnV(52, "trampoline"));
 
-        def(ns, "every-pred", Fn.ofVarargs("every-pred", preds -> Fn.ofVarargs("every-pred", args -> {
-            for (Object p : preds) {
-                Fn pred = (Fn) p;
-                for (Object a : args) {
-                    if (!RT.truthy(pred.invoke(a))) return Boolean.FALSE;
-                }
-            }
-            return Boolean.TRUE;
-        })));
+        def(ns, "every-pred", new CoreFnV(53, "every-pred"));
 
-        def(ns, "some-fn", Fn.ofVarargs("some-fn", preds -> Fn.ofVarargs("some-fn", args -> {
-            for (Object p : preds) {
-                Fn pred = (Fn) p;
-                for (Object a : args) {
-                    Object r = pred.invoke(a);
-                    if (RT.truthy(r)) return r;
-                }
-            }
-            return null;
-        })));
+        def(ns, "some-fn", new CoreFnV(54, "some-fn"));
     }
 
     // ========================================================================
@@ -2308,18 +1527,7 @@ public final class Core {
     // ========================================================================
 
     private static void initConcurrencyAndVars(Namespace ns) {
-        def(ns, "atom", Fn.ofVarargs("atom", args -> {
-            if (args.length == 1) return new Atom(args[0]);
-            PersistentHashMap meta = null;
-            Fn validator = null;
-            for (int i = 1; i < args.length; i += 2) {
-                if (Keyword.intern("meta").equals(args[i])) meta = (PersistentHashMap) args[i + 1];
-                else if (Keyword.intern("validator").equals(args[i])) validator = (Fn) args[i + 1];
-            }
-            Atom a = new Atom(args[0], meta);
-            if (validator != null) a.setValidator(validator);
-            return a;
-        }));
+        def(ns, "atom", new CoreFnV(55, "atom"));
 
         def(ns, "deref", new Fn.NamedFn("deref") {
             @Override public Object invoke(Object ref) {
@@ -2335,15 +1543,9 @@ public final class Core {
             }
         });
 
-        def(ns, "reset!", Fn.of2("reset!", (a, v) -> ((Atom) a).reset(v)));
-        def(ns, "reset-vals!", Fn.of2("reset-vals!", (a, v) -> {
-            Atom atom = (Atom) a;
-            for (;;) {
-                Object oldv = atom.deref();
-                if (atom.compareAndSet(oldv, v)) return PersistentVector.createOwning(oldv, v);
-            }
-        }));
-        def(ns, "compare-and-set!", Fn.of3("compare-and-set!", (a, o, n) -> ((Atom) a).compareAndSet(o, n)));
+        def(ns, "reset!", new CoreFn2(72, "reset!"));
+        def(ns, "reset-vals!", new CoreFn2(73, "reset-vals!"));
+        def(ns, "compare-and-set!", new CoreFn3(15, "compare-and-set!"));
 
         def(ns, "swap!", new Fn.NamedFn("swap!") {
             @Override public Object invoke(Object a, Object f) {
@@ -2372,124 +1574,41 @@ public final class Core {
             }
         });
 
-        def(ns, "swap-vals!", Fn.ofVarargs("swap-vals!", args -> {
-            Atom a = (Atom) args[0];
-            Fn f = (Fn) args[1];
-            for (;;) {
-                Object oldv = a.deref();
-                Object[] callArgs = new Object[args.length - 1];
-                callArgs[0] = oldv;
-                System.arraycopy(args, 2, callArgs, 1, args.length - 2);
-                Object newv = f.applyTo(callArgs);
-                if (a.compareAndSet(oldv, newv)) return PersistentVector.createOwning(oldv, newv);
-            }
-        }));
+        def(ns, "swap-vals!", new CoreFnV(56, "swap-vals!"));
 
-        def(ns, "volatile!", Fn.of1("volatile!", Atom.Volatile::new));
-        def(ns, "vreset!", Fn.of2("vreset!", (v, val) -> ((Atom.Volatile) v).reset(val)));
-        defMacro(ns, "vswap!", Fn.ofVarargs("vswap!", args -> {
-            if (args.length < 2) throw new IllegalArgumentException("vswap! requires at least 2 arguments");
-            Symbol volSym = Symbol.intern("vol__" + RT.nextID());
-            List<Object> call = new ArrayList<>(args.length);
-            call.add(args[1]);
-            call.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "deref"), volSym));
-            for (int i = 2; i < args.length; i++) call.add(args[i]);
-            return PersistentList.createFromArray(
-                    Symbol.intern("let*"),
-                    PersistentVector.createOwning(volSym, args[0]),
-                    PersistentList.createFromArray(
-                            Symbol.intern("clojure.core", "vreset!"),
-                            volSym,
-                            PersistentList.create(call)));
-        }));
-        def(ns, "volatile?", Fn.of1("volatile?", x -> x instanceof Atom.Volatile));
+        def(ns, "volatile!", new CoreFn1(115, "volatile!"));
+        def(ns, "vreset!", new CoreFn2(74, "vreset!"));
+        defMacro(ns, "vswap!", new CoreFnV(57, "vswap!"));
+        def(ns, "volatile?", new CoreFn1(116, "volatile?"));
 
-        def(ns, "delay?", Fn.of1("delay?", x -> x instanceof Atom.Delay));
-        def(ns, "force", Fn.of1("force", x -> x instanceof Atom.Delay d ? d.deref() : x));
-        def(ns, "promise", Fn.of0("promise", Atom.Promise::new));
-        def(ns, "deliver", Fn.of2("deliver", (p, v) -> ((Atom.Promise) p).deliver(v)));
+        def(ns, "delay?", new CoreFn1(117, "delay?"));
+        def(ns, "force", new CoreFn1(118, "force"));
+        def(ns, "promise", new CoreFn0(3, "promise"));
+        def(ns, "deliver", new CoreFn2(75, "deliver"));
 
-        def(ns, "future-call", Fn.of1("future-call", f -> new Atom.FutureObj((Fn) f)));
-        def(ns, "future?", Fn.of1("future?", x -> x instanceof Atom.FutureObj));
-        def(ns, "future-done?", Fn.of1("future-done?", x -> ((Atom.FutureObj) x).isDone()));
-        def(ns, "future-cancel", Fn.of1("future-cancel", x -> ((Atom.FutureObj) x).cancel(true)));
-        def(ns, "future-cancelled?", Fn.of1("future-cancelled?", x -> ((Atom.FutureObj) x).isCancelled()));
+        def(ns, "future-call", new CoreFn1(119, "future-call"));
+        def(ns, "future?", new CoreFn1(120, "future?"));
+        def(ns, "future-done?", new CoreFn1(121, "future-done?"));
+        def(ns, "future-cancel", new CoreFn1(122, "future-cancel"));
+        def(ns, "future-cancelled?", new CoreFn1(123, "future-cancelled?"));
 
-        def(ns, "pmap", Fn.ofVarargs("pmap", args -> {
-            Fn f = (Fn) args[0];
-            ISeq rets;
-            if (args.length == 2) {
-                rets = pmapFutures1(f, RT.seq(args[1]));
-            } else {
-                ISeq[] seqs = new ISeq[args.length - 1];
-                for (int i = 0; i < seqs.length; i++) seqs[i] = RT.seq(args[i + 1]);
-                rets = pmapFuturesN(f, seqs);
-            }
-            int procs = Runtime.getRuntime().availableProcessors() + 2;
-            ISeq ahead = rets;
-            for (int i = 0; i < procs && ahead != null; i++) {
-                ahead = RT.next(ahead);
-            }
-            return pmapStep(rets, ahead);
-        }));
+        def(ns, "pmap", new CoreFnV(58, "pmap"));
 
-        def(ns, "add-watch", Fn.of3("add-watch", (ref, key, fn) -> {
-            if (ref instanceof Atom a) a.addWatch(key, (Fn) fn);
-            else if (ref instanceof Var v) v.addWatch(key, (Fn) fn);
-            else if (ref instanceof Agent ag) ag.addWatch(key, (Fn) fn);
-            else if (ref instanceof Ref r) r.addWatch(key, (Fn) fn);
-            return ref;
-        }));
-        def(ns, "remove-watch", Fn.of2("remove-watch", (ref, key) -> {
-            if (ref instanceof Atom a) a.removeWatch(key);
-            else if (ref instanceof Var v) v.removeWatch(key);
-            else if (ref instanceof Agent ag) ag.removeWatch(key);
-            else if (ref instanceof Ref r) r.removeWatch(key);
-            return ref;
-        }));
-        def(ns, "set-validator!", Fn.of2("set-validator!", (ref, fn) -> {
-            if (ref instanceof Atom a) a.setValidator((Fn) fn);
-            else if (ref instanceof Agent ag) ag.setValidator((Fn) fn);
-            else if (ref instanceof Ref r) r.setValidator((Fn) fn);
-            return null;
-        }));
-        def(ns, "get-validator", Fn.of1("get-validator", ref -> {
-            if (ref instanceof Atom a) return a.getValidator();
-            if (ref instanceof Agent ag) return ag.getValidator();
-            if (ref instanceof Ref r) return r.getValidator();
-            return null;
-        }));
+        def(ns, "add-watch", new CoreFn3(16, "add-watch"));
+        def(ns, "remove-watch", new CoreFn2(76, "remove-watch"));
+        def(ns, "set-validator!", new CoreFn2(77, "set-validator!"));
+        def(ns, "get-validator", new CoreFn1(124, "get-validator"));
 
         // Metadata & Vars
-        def(ns, "meta", Fn.of1("meta", x -> x instanceof IMeta m ? m.meta() : null));
-        def(ns, "with-meta", Fn.of2("with-meta", (x, m) -> ((IObj) x).withMeta((PersistentHashMap) m)));
-        def(ns, "vary-meta", Fn.ofVarargs("vary-meta", args -> {
-            IObj obj = (IObj) args[0];
-            Fn f = (Fn) args[1];
-            Object[] callArgs = new Object[args.length - 1];
-            callArgs[0] = obj.meta();
-            System.arraycopy(args, 2, callArgs, 1, args.length - 2);
-            return obj.withMeta((PersistentHashMap) f.applyTo(callArgs));
-        }));
+        def(ns, "meta", new CoreFn1(125, "meta"));
+        def(ns, "with-meta", new CoreFn2(78, "with-meta"));
+        def(ns, "vary-meta", new CoreFnV(59, "vary-meta"));
 
-        def(ns, "var-get", Fn.of1("var-get", v -> ((Var) v).deref()));
-        def(ns, "var-set", Fn.of2("var-set", (v, val) -> ((Var) v).set(val)));
-        def(ns, "alter-var-root", Fn.ofVarargs("alter-var-root", args -> {
-            Var v = (Var) args[0];
-            Fn f = (Fn) args[1];
-            Object[] rest = new Object[args.length - 2];
-            System.arraycopy(args, 2, rest, 0, rest.length);
-            return v.alterRoot(f, rest);
-        }));
-        def(ns, "bound?", Fn.ofVarargs("bound?", args -> {
-            for (Object o : args) if (!((Var) o).isBound()) return Boolean.FALSE;
-            return Boolean.TRUE;
-        }));
-        def(ns, "find-var", Fn.of1("find-var", sym -> {
-            Symbol s = (Symbol) sym;
-            Namespace targetNs = Namespace.find(s.ns);
-            return targetNs != null ? targetNs.findInternedVar(Symbol.intern(s.name)) : null;
-        }));
+        def(ns, "var-get", new CoreFn1(126, "var-get"));
+        def(ns, "var-set", new CoreFn2(79, "var-set"));
+        def(ns, "alter-var-root", new CoreFnV(60, "alter-var-root"));
+        def(ns, "bound?", new CoreFnV(61, "bound?"));
+        def(ns, "find-var", new CoreFn1(127, "find-var"));
     }
 
     // ========================================================================
@@ -2497,132 +1616,42 @@ public final class Core {
     // ========================================================================
 
     private static void initNamespacesAndEval(Namespace ns) {
-        def(ns, "in-ns", Fn.of1("in-ns", name -> {
-            Namespace target = Namespace.findOrCreate((Symbol) name);
-            RT.CURRENT_NS.bindRoot(target);
-            return target;
-        }));
-        def(ns, "find-ns", Fn.of1("find-ns", name -> Namespace.find((Symbol) name)));
-        def(ns, "create-ns", Fn.of1("create-ns", name -> Namespace.findOrCreate((Symbol) name)));
-        def(ns, "remove-ns", Fn.of1("remove-ns", name -> Namespace.remove((Symbol) name)));
-        def(ns, "all-ns", Fn.of0("all-ns", () -> PersistentList.create(new ArrayList<>(Namespace.all()))));
-        def(ns, "ns-name", Fn.of1("ns-name", x -> x instanceof Namespace n ? n.name : Namespace.find((Symbol) x).name));
-        def(ns, "ns-map", Fn.of1("ns-map", x -> {
-            Namespace target = x instanceof Namespace n ? n : Namespace.find((Symbol) x);
-            return PersistentHashMap.createFromMap(target.getMappings());
-        }));
-        def(ns, "ns-publics", Fn.of1("ns-publics", x -> {
-            Namespace target = x instanceof Namespace n ? n : Namespace.find((Symbol) x);
-            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
-            for (Map.Entry<Symbol, Object> e : target.getMappings().entrySet()) {
-                if (e.getValue() instanceof Var v && v.ns == target && !RT.truthy(v.meta().valAt(Keyword.intern("private")))) {
-                    ret = ret.assoc(e.getKey(), v);
-                }
-            }
-            return ret.persistent();
-        }));
-        def(ns, "ns-aliases", Fn.of1("ns-aliases", x -> {
-            Namespace target = x instanceof Namespace n ? n : Namespace.find((Symbol) x);
-            return PersistentHashMap.createFromMap(target.getAliases());
-        }));
-        def(ns, "alias", Fn.of2("alias", (alias, targetNsSym) -> {
-            Namespace target = Namespace.find((Symbol) targetNsSym);
-            if (target == null) throw new RuntimeException("No namespace: " + targetNsSym);
-            RT.currentNS().addAlias((Symbol) alias, target);
-            return null;
-        }));
-        def(ns, "resolve", Fn.of1("resolve", sym -> {
-            Symbol s = (Symbol) sym;
-            Var v = Compiler.lookupVar(RT.currentNS(), s, false);
-            if (v != null) return v;
-            return Interop.resolveClass(RT.currentNS(), s.toString());
-        }));
-        def(ns, "refer", Fn.ofVarargs("refer", args -> {
-            Namespace target = Namespace.find((Symbol) args[0]);
-            if (target == null) throw new RuntimeException("No namespace: " + args[0]);
-            Set<Symbol> exclude = new HashSet<>();
-            Set<Symbol> only = null;
-            Map<Symbol, Symbol> rename = new HashMap<>();
-            for (int i = 1; i + 1 < args.length; i += 2) {
-                Object opt = args[i];
-                Object val = args[i + 1];
-                if (Keyword.intern("exclude").equals(opt)) {
-                    for (ISeq s = RT.seq(val); s != null; s = s.next()) exclude.add(((Symbol) s.first()).withMeta(null));
-                } else if (Keyword.intern("only").equals(opt)) {
-                    only = new HashSet<>();
-                    for (ISeq s = RT.seq(val); s != null; s = s.next()) only.add(((Symbol) s.first()).withMeta(null));
-                } else if (Keyword.intern("rename").equals(opt)) {
-                    for (ISeq s = RT.seq(val); s != null; s = s.next()) {
-                        Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
-                        rename.put(((Symbol) e.getKey()).withMeta(null), ((Symbol) e.getValue()).withMeta(null));
-                    }
-                }
-            }
-            referWithFilters(RT.currentNS(), target, exclude, only, rename);
-            return null;
-        }));
-        def(ns, "import", Fn.ofVarargs("import", args -> {
-            Namespace cur = RT.currentNS();
-            for (Object spec : args) {
-                if (spec instanceof Symbol s) {
-                    Class<?> c = Interop.findClass(s.name);
-                    if (c == null) throw new RuntimeException("Class not found: " + s);
-                    cur.importClass(c);
-                } else if (spec instanceof ISeq || spec instanceof PersistentVector) {
-                    ISeq seq = RT.seq(spec);
-                    if (seq != null) {
-                        String pkg = seq.first().toString();
-                        for (ISeq s = seq.next(); s != null; s = s.next()) {
-                            String clsName = pkg + "." + s.first();
-                            Class<?> c = Interop.findClass(clsName);
-                            if (c == null) throw new RuntimeException("Class not found: " + clsName);
-                            cur.importClass(c);
-                        }
-                    }
-                }
-            }
-            return null;
-        }));
+        def(ns, "in-ns", new CoreFn1(128, "in-ns"));
+        def(ns, "find-ns", new CoreFn1(129, "find-ns"));
+        def(ns, "create-ns", new CoreFn1(130, "create-ns"));
+        def(ns, "remove-ns", new CoreFn1(131, "remove-ns"));
+        def(ns, "all-ns", new CoreFn0(4, "all-ns"));
+        def(ns, "ns-name", new CoreFn1(132, "ns-name"));
+        def(ns, "ns-map", new CoreFn1(133, "ns-map"));
+        def(ns, "ns-publics", new CoreFn1(134, "ns-publics"));
+        def(ns, "ns-aliases", new CoreFn1(135, "ns-aliases"));
+        def(ns, "alias", new CoreFn2(80, "alias"));
+        def(ns, "resolve", new CoreFn1(136, "resolve"));
+        def(ns, "refer", new CoreFnV(62, "refer"));
+        def(ns, "import", new CoreFnV(63, "import"));
 
-        def(ns, "require", Fn.ofVarargs("require", args -> {
-            for (Object spec : args) processLibSpec(spec, false);
-            return null;
-        }));
-        def(ns, "use", Fn.ofVarargs("use", args -> {
-            for (Object spec : args) processLibSpec(spec, true);
-            return null;
-        }));
+        def(ns, "require", new CoreFnV(64, "require"));
+        def(ns, "use", new CoreFnV(65, "use"));
 
-        def(ns, "eval", Fn.of1("eval", Compiler::eval));
-        def(ns, "load-string", Fn.of1("load-string", s -> Compiler.load((String) s, "<load-string>")));
-        def(ns, "load-file", Fn.of1("load-file", path -> {
-            try {
-                String src = Files.readString(Path.of(path.toString()), StandardCharsets.UTF_8);
-                return Compiler.load(src, path.toString());
-            } catch (IOException e) {
-                throw RT.sneakyThrow(e);
-            }
-        }));
+        def(ns, "eval", new CoreFn1(137, "eval"));
+        def(ns, "load-string", new CoreFn1(138, "load-string"));
+        def(ns, "load-file", new CoreFn1(139, "load-file"));
 
-        def(ns, "macroexpand-1", Fn.of1("macroexpand-1", Compiler::macroexpand1));
-        def(ns, "macroexpand", Fn.of1("macroexpand", Compiler::macroexpand));
-        def(ns, "special-symbol?", Fn.of1("special-symbol?", x -> x instanceof Symbol sym && sym.ns == null && Compiler.isSpecial(sym)));
-        def(ns, "destructure", Fn.of1("destructure", b -> Compiler.destructure((PersistentVector) b)));
-        def(ns, "seq-to-map-for-destructuring", Fn.of1("seq-to-map-for-destructuring", RT::destructureMap));
-        def(ns, "add-classpath", Fn.of1("add-classpath", RT::addClasspath));
-        def(ns, "unquote", Fn.ofVarargs("unquote", args -> {
-            throw new IllegalStateException("unquote used outside syntax-quote");
-        }));
-        def(ns, "unquote-splicing", Fn.ofVarargs("unquote-splicing", args -> {
-            throw new IllegalStateException("unquote-splicing used outside syntax-quote");
-        }));
+        def(ns, "macroexpand-1", new CoreFn1(140, "macroexpand-1"));
+        def(ns, "macroexpand", new CoreFn1(141, "macroexpand"));
+        def(ns, "special-symbol?", new CoreFn1(142, "special-symbol?"));
+        def(ns, "destructure", new CoreFn1(143, "destructure"));
+        def(ns, "seq-to-map-for-destructuring", new CoreFn1(144, "seq-to-map-for-destructuring"));
+        def(ns, "add-classpath", new CoreFn1(145, "add-classpath"));
+        def(ns, "unquote", new CoreFnV(66, "unquote"));
+        def(ns, "unquote-splicing", new CoreFnV(67, "unquote-splicing"));
 
         // Multimethods
-        def(ns, "methods", Fn.of1("methods", mf -> ((MultiFn) mf).getMethodTable()));
-        def(ns, "get-method", Fn.of2("get-method", (mf, val) -> ((MultiFn) mf).getMethod(val)));
-        def(ns, "remove-method", Fn.of2("remove-method", (mf, val) -> ((MultiFn) mf).removeMethod(val)));
+        def(ns, "methods", new CoreFn1(146, "methods"));
+        def(ns, "get-method", new CoreFn2(81, "get-method"));
+        def(ns, "remove-method", new CoreFn2(82, "remove-method"));
 
-        Var printDocVar = ns.intern("print-doc", Fn.of1("print-doc", Core::printDocValue));
+        Var printDocVar = ns.intern("print-doc", new CoreFn1(147, "print-doc"));
         printDocVar.setMeta(PersistentHashMap.EMPTY
                 .assoc(Keyword.intern("ns"), ns)
                 .assoc(Keyword.intern("name"), Symbol.intern("print-doc"))
@@ -2811,90 +1840,25 @@ public final class Core {
     // ========================================================================
 
     private static void initArraysAndExceptions(Namespace ns) {
-        def(ns, "to-array", Fn.of1("to-array", RT::toArray));
-        def(ns, "object-array", Fn.of1("object-array", x ->
-                x instanceof Number n ? new Object[n.intValue()] : RT.toArray(x)));
-        def(ns, "int-array", Fn.of1("int-array", x -> {
-            if (x instanceof Number n) return new int[n.intValue()];
-            Object[] arr = RT.toArray(x);
-            int[] out = new int[arr.length];
-            for (int i = 0; i < arr.length; i++) out[i] = ((Number) arr[i]).intValue();
-            return out;
-        }));
-        def(ns, "long-array", Fn.of1("long-array", x -> {
-            if (x instanceof Number n) return new long[n.intValue()];
-            Object[] arr = RT.toArray(x);
-            long[] out = new long[arr.length];
-            for (int i = 0; i < arr.length; i++) out[i] = ((Number) arr[i]).longValue();
-            return out;
-        }));
-        def(ns, "double-array", Fn.of1("double-array", x -> {
-            if (x instanceof Number n) return new double[n.intValue()];
-            Object[] arr = RT.toArray(x);
-            double[] out = new double[arr.length];
-            for (int i = 0; i < arr.length; i++) out[i] = ((Number) arr[i]).doubleValue();
-            return out;
-        }));
-        def(ns, "byte-array", Fn.of1("byte-array", x -> {
-            if (x instanceof Number n) return new byte[n.intValue()];
-            Object[] arr = RT.toArray(x);
-            byte[] out = new byte[arr.length];
-            for (int i = 0; i < arr.length; i++) out[i] = ((Number) arr[i]).byteValue();
-            return out;
-        }));
-        def(ns, "char-array", Fn.of1("char-array", x -> {
-            if (x instanceof Number n) return new char[n.intValue()];
-            if (x instanceof String s) return s.toCharArray();
-            Object[] arr = RT.toArray(x);
-            char[] out = new char[arr.length];
-            for (int i = 0; i < arr.length; i++) out[i] = (Character) arr[i];
-            return out;
-        }));
-        def(ns, "boolean-array", Fn.of1("boolean-array", x -> {
-            if (x instanceof Number n) return new boolean[n.intValue()];
-            Object[] arr = RT.toArray(x);
-            boolean[] out = new boolean[arr.length];
-            for (int i = 0; i < arr.length; i++) out[i] = RT.truthy(arr[i]);
-            return out;
-        }));
-        def(ns, "alength", Fn.of1("alength", a -> (long) RT.alength(a)));
-        def(ns, "aget", Fn.ofVarargs("aget", args -> {
-            if (args.length < 2) throw new IllegalArgumentException("aget requires array and at least one index");
-            Object cur = RT.aget(args[0], (int) Numbers.toLong(args[1]));
-            for (int i = 2; i < args.length; i++) {
-                cur = RT.aget(cur, (int) Numbers.toLong(args[i]));
-            }
-            return cur;
-        }));
-        def(ns, "aset", Fn.ofVarargs("aset", args -> {
-            if (args.length < 3) throw new IllegalArgumentException("aset requires array, index(es), and value");
-            Object cur = args[0];
-            for (int i = 1; i < args.length - 2; i++) {
-                cur = RT.aget(cur, (int) Numbers.toLong(args[i]));
-            }
-            return RT.aset(cur, (int) Numbers.toLong(args[args.length - 2]), args[args.length - 1]);
-        }));
-        def(ns, "aclone", Fn.of1("aclone", a -> {
-            int len = Array.getLength(a);
-            Object copy = Array.newInstance(a.getClass().getComponentType(), len);
-            System.arraycopy(a, 0, copy, 0, len);
-            return copy;
-        }));
+        def(ns, "to-array", new CoreFn1(148, "to-array"));
+        def(ns, "object-array", new CoreFn1(149, "object-array"));
+        def(ns, "int-array", new CoreFn1(150, "int-array"));
+        def(ns, "long-array", new CoreFn1(151, "long-array"));
+        def(ns, "double-array", new CoreFn1(152, "double-array"));
+        def(ns, "byte-array", new CoreFn1(153, "byte-array"));
+        def(ns, "char-array", new CoreFn1(154, "char-array"));
+        def(ns, "boolean-array", new CoreFn1(155, "boolean-array"));
+        def(ns, "alength", new CoreFn1(156, "alength"));
+        def(ns, "aget", new CoreFnV(68, "aget"));
+        def(ns, "aset", new CoreFnV(69, "aset"));
+        def(ns, "aclone", new CoreFn1(157, "aclone"));
 
-        def(ns, "class", Fn.of1("class", x -> x == null ? null : x.getClass()));
-        def(ns, "type", Fn.of1("type", x -> {
-            if (x instanceof IMeta m && m.meta() != null) {
-                Object t = m.meta().valAt(Keyword.intern("type"));
-                if (t != null) return t;
-            }
-            return x == null ? null : x.getClass();
-        }));
-        def(ns, "ex-info", Fn.of23("ex-info",
-                (msg, data) -> new ExceptionInfo((String) msg, (PersistentHashMap) data, null),
-                (msg, data, cause) -> new ExceptionInfo((String) msg, (PersistentHashMap) data, (Throwable) cause)));
-        def(ns, "ex-data", Fn.of1("ex-data", ex -> ex instanceof ExceptionInfo ei ? ei.data : null));
-        def(ns, "ex-message", Fn.of1("ex-message", ex -> ((Throwable) ex).getMessage()));
-        def(ns, "ex-cause", Fn.of1("ex-cause", ex -> ((Throwable) ex).getCause()));
+        def(ns, "class", new CoreFn1(158, "class"));
+        def(ns, "type", new CoreFn1(159, "type"));
+        def(ns, "ex-info", new CoreFn23(83, 17, "ex-info"));
+        def(ns, "ex-data", new CoreFn1(160, "ex-data"));
+        def(ns, "ex-message", new CoreFn1(161, "ex-message"));
+        def(ns, "ex-cause", new CoreFn1(162, "ex-cause"));
     }
 
     public static final class ExceptionInfo extends RuntimeException {
@@ -2918,29 +1882,19 @@ public final class Core {
     // Core Macros (Compiled directly in Java for instant startup)
     // ========================================================================
 
+    private static final Symbol fnStar = Symbol.intern("fn*");
+    private static final Symbol defSym = Symbol.intern("def");
+    private static final Symbol letStar = Symbol.intern("let*");
+    private static final Symbol loopStar = Symbol.intern("loop*");
+    private static final Symbol ifSym = Symbol.intern("if");
+    private static final Symbol doSym = Symbol.intern("do");
+    private static final Symbol quoteSym = Symbol.intern("quote");
+
     private static void initMacros(Namespace ns) {
-        Symbol fnStar = Symbol.intern("fn*");
-        Symbol defSym = Symbol.intern("def");
-        Symbol letStar = Symbol.intern("let*");
-        Symbol loopStar = Symbol.intern("loop*");
-        Symbol ifSym = Symbol.intern("if");
-        Symbol doSym = Symbol.intern("do");
-        Symbol quoteSym = Symbol.intern("quote");
-
         // (defn name doc? attr-map? [params] body...)
-        defMacro(ns, "defn", Fn.ofVarargs("defn", Core::expandDefn));
+        defMacro(ns, "defn", new CoreFnV(70, "defn"));
 
-        Var docVar = ns.internMacro("doc", Fn.ofVarargs("doc", args -> {
-            if (args.length != 1) {
-                throw new IllegalArgumentException("doc requires 1 argument");
-            }
-            Object target = args[0];
-            Object argExpr = (target instanceof ISeq s
-                    && (Symbol.intern("var").equals(s.first()) || quoteSym.equals(s.first())))
-                    ? target
-                    : PersistentList.createFromArray(quoteSym, target);
-            return PersistentList.createFromArray(Symbol.intern("clojure.core", "print-doc"), argExpr);
-        }));
+        Var docVar = ns.internMacro("doc", new CoreFnV(71, "doc"));
         docVar.setMeta(docVar.meta()
                 .assoc(Keyword.intern("ns"), ns)
                 .assoc(Keyword.intern("name"), Symbol.intern("doc"))
@@ -2948,799 +1902,123 @@ public final class Core {
                         PersistentVector.createOwning(Symbol.intern("name"))))
                 .assoc(Keyword.intern("doc"), "Prints documentation for a var or special form given its name"));
 
-        defMacro(ns, "defn-", Fn.ofVarargs("defn-", args -> {
-            Symbol name = (Symbol) args[0];
-            PersistentHashMap meta = (name.meta() != null ? name.meta() : PersistentHashMap.EMPTY)
-                    .assoc(Keyword.intern("private"), Boolean.TRUE);
-            Object[] patched = args.clone();
-            patched[0] = name.withMeta(meta);
-            return expandDefn(patched);
-        }));
+        defMacro(ns, "defn-", new CoreFnV(72, "defn-"));
 
-        defMacro(ns, "fn", Fn.ofVarargs("fn", args -> {
-            List<Object> list = new ArrayList<>(args.length + 1);
-            list.add(fnStar);
-            Collections.addAll(list, args);
-            return PersistentList.create(list);
-        }));
+        defMacro(ns, "fn", new CoreFnV(73, "fn"));
 
-        defMacro(ns, "defonce", Fn.of2("defonce", (name, expr) ->
-                PersistentList.createFromArray(
-                        Symbol.intern("when-not"),
-                        PersistentList.createFromArray(Symbol.intern("clojure.core", "bound?"),
-                                PersistentList.createFromArray(Symbol.intern("var"), name)),
-                        PersistentList.createFromArray(defSym, name, expr))));
+        defMacro(ns, "defonce", new CoreFn2(84, "defonce"));
 
-        defMacro(ns, "declare", Fn.ofVarargs("declare", args -> {
-            List<Object> forms = new ArrayList<>();
-            forms.add(doSym);
-            for (Object s : args) forms.add(PersistentList.createFromArray(defSym, s));
-            return PersistentList.create(forms);
-        }));
+        defMacro(ns, "declare", new CoreFnV(74, "declare"));
 
-        defMacro(ns, "let", Fn.ofVarargs("let", args -> {
-            List<Object> list = new ArrayList<>(args.length + 1);
-            list.add(letStar);
-            Collections.addAll(list, args);
-            return PersistentList.create(list);
-        }));
+        defMacro(ns, "let", new CoreFnV(75, "let"));
 
-        defMacro(ns, "loop", Fn.ofVarargs("loop", args -> {
-            List<Object> list = new ArrayList<>(args.length + 1);
-            list.add(loopStar);
-            Collections.addAll(list, args);
-            return PersistentList.create(list);
-        }));
+        defMacro(ns, "loop", new CoreFnV(76, "loop"));
 
-        defMacro(ns, "when", Fn.ofVarargs("when", args -> {
-            List<Object> body = new ArrayList<>();
-            body.add(doSym);
-            for (int i = 1; i < args.length; i++) body.add(args[i]);
-            return PersistentList.createFromArray(ifSym, args[0], PersistentList.create(body));
-        }));
+        defMacro(ns, "when", new CoreFnV(77, "when"));
 
-        defMacro(ns, "when-not", Fn.ofVarargs("when-not", args -> {
-            List<Object> body = new ArrayList<>();
-            body.add(doSym);
-            for (int i = 1; i < args.length; i++) body.add(args[i]);
-            return PersistentList.createFromArray(ifSym, args[0], null, PersistentList.create(body));
-        }));
+        defMacro(ns, "when-not", new CoreFnV(78, "when-not"));
 
-        defMacro(ns, "if-not", Fn.ofVarargs("if-not", args -> {
-            Object test = args[0];
-            Object thenForm = args[1];
-            Object elseForm = args.length > 2 ? args[2] : null;
-            return PersistentList.createFromArray(ifSym,
-                    PersistentList.createFromArray(Symbol.intern("clojure.core", "not"), test),
-                    thenForm, elseForm);
-        }));
+        defMacro(ns, "if-not", new CoreFnV(79, "if-not"));
 
-        defMacro(ns, "when-let", Fn.ofVarargs("when-let", args -> {
-            PersistentVector bindings = (PersistentVector) args[0];
-            Object form = bindings.nth(0);
-            Object tst = bindings.nth(1);
-            Symbol temp = Symbol.intern("temp__" + RT.nextID());
-            List<Object> body = new ArrayList<>();
-            body.add(Symbol.intern("when"));
-            body.add(temp);
-            List<Object> innerLet = new ArrayList<>();
-            innerLet.add(letStar);
-            innerLet.add(PersistentVector.createOwning(form, temp));
-            for (int i = 1; i < args.length; i++) innerLet.add(args[i]);
-            body.add(PersistentList.create(innerLet));
-            return PersistentList.createFromArray(letStar, PersistentVector.createOwning(temp, tst), PersistentList.create(body));
-        }));
+        defMacro(ns, "when-let", new CoreFnV(80, "when-let"));
 
-        defMacro(ns, "if-let", Fn.ofVarargs("if-let", args -> {
-            PersistentVector bindings = (PersistentVector) args[0];
-            Object form = bindings.nth(0);
-            Object tst = bindings.nth(1);
-            Object thenF = args[1];
-            Object elseF = args.length > 2 ? args[2] : null;
-            Symbol temp = Symbol.intern("temp__" + RT.nextID());
-            return PersistentList.createFromArray(letStar,
-                    PersistentVector.createOwning(temp, tst),
-                    PersistentList.createFromArray(ifSym, temp,
-                            PersistentList.createFromArray(letStar, PersistentVector.createOwning(form, temp), thenF),
-                            elseF));
-        }));
+        defMacro(ns, "if-let", new CoreFnV(81, "if-let"));
 
-        defMacro(ns, "when-some", Fn.ofVarargs("when-some", args -> {
-            PersistentVector bindings = (PersistentVector) args[0];
-            Object form = bindings.nth(0);
-            Object tst = bindings.nth(1);
-            Symbol temp = Symbol.intern("temp__" + RT.nextID());
-            List<Object> innerLet = new ArrayList<>();
-            innerLet.add(letStar);
-            innerLet.add(PersistentVector.createOwning(form, temp));
-            for (int i = 1; i < args.length; i++) innerLet.add(args[i]);
-            return PersistentList.createFromArray(letStar,
-                    PersistentVector.createOwning(temp, tst),
-                    PersistentList.createFromArray(ifSym,
-                            PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), temp),
-                            null,
-                            PersistentList.create(innerLet)));
-        }));
+        defMacro(ns, "when-some", new CoreFnV(82, "when-some"));
 
-        defMacro(ns, "if-some", Fn.ofVarargs("if-some", args -> {
-            PersistentVector bindings = (PersistentVector) args[0];
-            Object form = bindings.nth(0);
-            Object tst = bindings.nth(1);
-            Object thenF = args[1];
-            Object elseF = args.length > 2 ? args[2] : null;
-            Symbol temp = Symbol.intern("temp__" + RT.nextID());
-            return PersistentList.createFromArray(letStar,
-                    PersistentVector.createOwning(temp, tst),
-                    PersistentList.createFromArray(ifSym,
-                            PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), temp),
-                            elseF,
-                            PersistentList.createFromArray(letStar, PersistentVector.createOwning(form, temp), thenF)));
-        }));
+        defMacro(ns, "if-some", new CoreFnV(83, "if-some"));
 
-        defMacro(ns, "when-first", Fn.ofVarargs("when-first", args -> {
-            PersistentVector bindings = (PersistentVector) args[0];
-            Object x = bindings.nth(0);
-            Object xs = bindings.nth(1);
-            Symbol s = Symbol.intern("s__" + RT.nextID());
-            List<Object> body = new ArrayList<>();
-            body.add(letStar);
-            body.add(PersistentVector.createOwning(x, PersistentList.createFromArray(Symbol.intern("clojure.core", "first"), s)));
-            for (int i = 1; i < args.length; i++) body.add(args[i]);
-            return PersistentList.createFromArray(Symbol.intern("when-let"),
-                    PersistentVector.createOwning(s, PersistentList.createFromArray(Symbol.intern("clojure.core", "seq"), xs)),
-                    PersistentList.create(body));
-        }));
+        defMacro(ns, "when-first", new CoreFnV(84, "when-first"));
 
-        defMacro(ns, "and", Fn.ofVarargs("and", args -> {
-            if (args.length == 0) return Boolean.TRUE;
-            if (args.length == 1) return args[0];
-            Object acc = args[args.length - 1];
-            for (int i = args.length - 2; i >= 0; i--) {
-                Symbol temp = Symbol.intern("and__" + RT.nextID());
-                acc = PersistentList.createFromArray(letStar,
-                        PersistentVector.createOwning(temp, args[i]),
-                        PersistentList.createFromArray(ifSym, temp, acc, temp));
-            }
-            return acc;
-        }));
+        defMacro(ns, "and", new CoreFnV(85, "and"));
 
-        defMacro(ns, "or", Fn.ofVarargs("or", args -> {
-            if (args.length == 0) return null;
-            if (args.length == 1) return args[0];
-            Object acc = args[args.length - 1];
-            for (int i = args.length - 2; i >= 0; i--) {
-                Symbol temp = Symbol.intern("or__" + RT.nextID());
-                acc = PersistentList.createFromArray(letStar,
-                        PersistentVector.createOwning(temp, args[i]),
-                        PersistentList.createFromArray(ifSym, temp, temp, acc));
-            }
-            return acc;
-        }));
+        defMacro(ns, "or", new CoreFnV(86, "or"));
 
-        defMacro(ns, "cond", Fn.ofVarargs("cond", args -> {
-            if (args.length == 0) return null;
-            if ((args.length & 1) != 0) throw new IllegalArgumentException("cond requires an even number of forms");
-            Object acc = null;
-            for (int i = args.length - 2; i >= 0; i -= 2) {
-                Object test = args[i];
-                Object expr = args[i + 1];
-                if (Keyword.intern("else").equals(test) || Boolean.TRUE.equals(test)) {
-                    acc = expr;
-                } else {
-                    acc = PersistentList.createFromArray(ifSym, test, expr, acc);
-                }
-            }
-            return acc;
-        }));
+        defMacro(ns, "cond", new CoreFnV(87, "cond"));
 
-        defMacro(ns, "condp", Fn.ofVarargs("condp", args -> {
-            if (args.length < 2) {
-                throw new IllegalArgumentException("condp requires at least a predicate and expression");
-            }
-            Object pred = args[0];
-            Object expr = args[1];
-            Symbol gpred = Symbol.intern("pred__" + RT.nextID());
-            Symbol gexpr = Symbol.intern("expr__" + RT.nextID());
-            Keyword arrowKw = Keyword.intern(">>");
+        defMacro(ns, "condp", new CoreFnV(88, "condp"));
 
-            List<Object[]> clauses = new ArrayList<>();
-            boolean hasDefault = false;
-            Object defaultExpr = null;
-            int idx = 2;
-            while (idx < args.length) {
-                if (idx == args.length - 1) {
-                    hasDefault = true;
-                    defaultExpr = args[idx];
-                    break;
-                }
-                if (idx + 2 < args.length && arrowKw.equals(args[idx + 1])) {
-                    clauses.add(new Object[]{args[idx], args[idx + 2], Boolean.TRUE});
-                    idx += 3;
-                } else {
-                    clauses.add(new Object[]{args[idx], args[idx + 1], Boolean.FALSE});
-                    idx += 2;
-                }
-            }
+        defMacro(ns, "case", new CoreFnV(89, "case"));
 
-            Object acc = hasDefault ? defaultExpr
-                    : PersistentList.createFromArray(Symbol.intern("throw"),
-                            PersistentList.createFromArray(Symbol.intern("IllegalArgumentException."),
-                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "str"), "No matching clause: ", gexpr)));
-            for (int i = clauses.size() - 1; i >= 0; i--) {
-                Object[] c = clauses.get(i);
-                Object testVal = c[0];
-                Object resForm = c[1];
-                boolean isArrow = (Boolean) c[2];
-                Object predCall = PersistentList.createFromArray(gpred, testVal, gexpr);
-                if (isArrow) {
-                    Symbol resSym = Symbol.intern("condp__" + RT.nextID());
-                    acc = PersistentList.createFromArray(letStar,
-                            PersistentVector.createOwning(resSym, predCall),
-                            PersistentList.createFromArray(ifSym,
-                                    resSym,
-                                    PersistentList.createFromArray(resForm, resSym),
-                                    acc));
-                } else {
-                    acc = PersistentList.createFromArray(ifSym, predCall, resForm, acc);
-                }
-            }
-            return PersistentList.createFromArray(letStar, PersistentVector.createOwning(gpred, pred, gexpr, expr), acc);
-        }));
+        defMacro(ns, "->", new CoreFnV(90, "->"));
 
-        defMacro(ns, "case", Fn.ofVarargs("case", args -> {
-            Object expr = args[0];
-            boolean hasDefault = ((args.length - 1) & 1) != 0;
-            int end = hasDefault ? args.length - 1 : args.length;
-            List<Object> pairs = new ArrayList<>();
-            for (int i = 1; i < end; i++) pairs.add(args[i]);
-            PersistentVector pvec = PersistentVector.create(pairs);
-            if (hasDefault) {
-                return PersistentList.createFromArray(Symbol.intern("case*"), expr, pvec, args[args.length - 1]);
-            }
-            return PersistentList.createFromArray(Symbol.intern("case*"), expr, pvec);
-        }));
+        defMacro(ns, "->>", new CoreFnV(91, "->>"));
 
-        defMacro(ns, "->", Fn.ofVarargs("->", args -> {
-            Object acc = args[0];
-            for (int i = 1; i < args.length; i++) {
-                Object form = args[i];
-                if (form instanceof ISeq s) {
-                    acc = RT.cons(s.first(), RT.cons(acc, s.next()));
-                } else {
-                    acc = PersistentList.createFromArray(form, acc);
-                }
-            }
-            return acc;
-        }));
+        defMacro(ns, "as->", new CoreFnV(92, "as->"));
 
-        defMacro(ns, "->>", Fn.ofVarargs("->>", args -> {
-            Object acc = args[0];
-            for (int i = 1; i < args.length; i++) {
-                Object form = args[i];
-                if (form instanceof ISeq s) {
-                    List<Object> items = new ArrayList<>();
-                    for (ISeq p = s.seq(); p != null; p = p.next()) items.add(p.first());
-                    items.add(acc);
-                    acc = PersistentList.create(items);
-                } else {
-                    acc = PersistentList.createFromArray(form, acc);
-                }
-            }
-            return acc;
-        }));
+        defMacro(ns, "some->", new CoreFnV(93, "some->"));
 
-        defMacro(ns, "as->", Fn.ofVarargs("as->", args -> {
-            Object expr = args[0];
-            Symbol name = (Symbol) args[1];
-            List<Object> bindings = new ArrayList<>();
-            bindings.add(name);
-            bindings.add(expr);
-            for (int i = 2; i < args.length; i++) {
-                bindings.add(name);
-                bindings.add(args[i]);
-            }
-            return PersistentList.createFromArray(letStar, PersistentVector.create(bindings), name);
-        }));
+        defMacro(ns, "some->>", new CoreFnV(94, "some->>"));
 
-        defMacro(ns, "some->", Fn.ofVarargs("some->", args -> {
-            Symbol g = Symbol.intern("some__" + RT.nextID());
-            List<Object> steps = new ArrayList<>();
-            steps.add(g);
-            steps.add(args[0]);
-            for (int i = 1; i < args.length; i++) {
-                Object form = args[i];
-                Object step = (form instanceof ISeq s)
-                        ? RT.cons(s.first(), RT.cons(g, s.next()))
-                        : PersistentList.createFromArray(form, g);
-                steps.add(g);
-                steps.add(PersistentList.createFromArray(ifSym,
-                        PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), g),
-                        null, step));
-            }
-            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
-        }));
+        defMacro(ns, "cond->", new CoreFnV(95, "cond->"));
 
-        defMacro(ns, "some->>", Fn.ofVarargs("some->>", args -> {
-            Symbol g = Symbol.intern("some__" + RT.nextID());
-            List<Object> steps = new ArrayList<>();
-            steps.add(g);
-            steps.add(args[0]);
-            for (int i = 1; i < args.length; i++) {
-                Object form = args[i];
-                Object step;
-                if (form instanceof ISeq s) {
-                    List<Object> items = new ArrayList<>();
-                    for (ISeq p = s.seq(); p != null; p = p.next()) items.add(p.first());
-                    items.add(g);
-                    step = PersistentList.create(items);
-                } else {
-                    step = PersistentList.createFromArray(form, g);
-                }
-                steps.add(g);
-                steps.add(PersistentList.createFromArray(ifSym,
-                        PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), g),
-                        null, step));
-            }
-            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
-        }));
+        defMacro(ns, "cond->>", new CoreFnV(96, "cond->>"));
 
-        defMacro(ns, "cond->", Fn.ofVarargs("cond->", args -> {
-            Symbol g = Symbol.intern("cond__" + RT.nextID());
-            List<Object> steps = new ArrayList<>();
-            steps.add(g);
-            steps.add(args[0]);
-            for (int i = 1; i < args.length; i += 2) {
-                Object test = args[i];
-                Object form = args[i + 1];
-                Object step = (form instanceof ISeq s)
-                        ? RT.cons(s.first(), RT.cons(g, s.next()))
-                        : PersistentList.createFromArray(form, g);
-                steps.add(g);
-                steps.add(PersistentList.createFromArray(ifSym, test, step, g));
-            }
-            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
-        }));
+        defMacro(ns, "doto", new CoreFnV(97, "doto"));
 
-        defMacro(ns, "cond->>", Fn.ofVarargs("cond->>", args -> {
-            Symbol g = Symbol.intern("cond__" + RT.nextID());
-            List<Object> steps = new ArrayList<>();
-            steps.add(g);
-            steps.add(args[0]);
-            for (int i = 1; i < args.length; i += 2) {
-                Object test = args[i];
-                Object form = args[i + 1];
-                Object step;
-                if (form instanceof ISeq s) {
-                    List<Object> items = new ArrayList<>();
-                    for (ISeq p = s.seq(); p != null; p = p.next()) items.add(p.first());
-                    items.add(g);
-                    step = PersistentList.create(items);
-                } else {
-                    step = PersistentList.createFromArray(form, g);
-                }
-                steps.add(g);
-                steps.add(PersistentList.createFromArray(ifSym, test, step, g));
-            }
-            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
-        }));
-
-        defMacro(ns, "doto", Fn.ofVarargs("doto", args -> {
-            Symbol gx = Symbol.intern("doto__" + RT.nextID());
-            List<Object> body = new ArrayList<>();
-            body.add(letStar);
-            body.add(PersistentVector.createOwning(gx, args[0]));
-            for (int i = 1; i < args.length; i++) {
-                Object form = args[i];
-                if (form instanceof ISeq s) {
-                    body.add(RT.cons(s.first(), RT.cons(gx, s.next())));
-                } else {
-                    body.add(PersistentList.createFromArray(form, gx));
-                }
-            }
-            body.add(gx);
-            return PersistentList.create(body);
-        }));
-
-        defMacro(ns, "..", Fn.ofVarargs("..", args -> {
-            Object acc = PersistentList.createFromArray(Symbol.intern("."), args[0], args[1]);
-            for (int i = 2; i < args.length; i++) {
-                acc = PersistentList.createFromArray(Symbol.intern("."), acc, args[i]);
-            }
-            return acc;
-        }));
+        defMacro(ns, "..", new CoreFnV(98, ".."));
 
         // Lazy-seq, delay, future
-        def(ns, "lazy-seq*", Fn.of1("lazy-seq*", f -> new LazySeq((Fn) f)));
-        defMacro(ns, "lazy-seq", Fn.ofVarargs("lazy-seq", args -> {
-            List<Object> body = new ArrayList<>();
-            body.add(fnStar);
-            body.add(PersistentVector.EMPTY);
-            Collections.addAll(body, args);
-            return PersistentList.createFromArray(Symbol.intern("clojure.core", "lazy-seq*"), PersistentList.create(body));
-        }));
+        def(ns, "lazy-seq*", new CoreFn1(163, "lazy-seq*"));
+        defMacro(ns, "lazy-seq", new CoreFnV(99, "lazy-seq"));
 
-        def(ns, "delay*", Fn.of1("delay*", f -> new Atom.Delay((Fn) f)));
-        defMacro(ns, "delay", Fn.ofVarargs("delay", args -> {
-            List<Object> body = new ArrayList<>();
-            body.add(fnStar);
-            body.add(PersistentVector.EMPTY);
-            Collections.addAll(body, args);
-            return PersistentList.createFromArray(Symbol.intern("clojure.core", "delay*"), PersistentList.create(body));
-        }));
+        def(ns, "delay*", new CoreFn1(164, "delay*"));
+        defMacro(ns, "delay", new CoreFnV(100, "delay"));
 
-        defMacro(ns, "future", Fn.ofVarargs("future", args -> {
-            List<Object> body = new ArrayList<>();
-            body.add(fnStar);
-            body.add(PersistentVector.EMPTY);
-            Collections.addAll(body, args);
-            return PersistentList.createFromArray(Symbol.intern("clojure.core", "future-call"), PersistentList.create(body));
-        }));
+        defMacro(ns, "future", new CoreFnV(101, "future"));
 
-        defMacro(ns, "comment", Fn.ofVarargs("comment", args -> null));
+        defMacro(ns, "comment", new CoreFnV(102, "comment"));
 
         // Loops & comprehensions: dotimes, while, doseq, for
-        defMacro(ns, "dotimes", Fn.ofVarargs("dotimes", args -> {
-            PersistentVector bindings = (PersistentVector) args[0];
-            Object sym = bindings.nth(0);
-            Object limit = bindings.nth(1);
-            Symbol nSym = Symbol.intern("n__" + RT.nextID());
-            List<Object> body = new ArrayList<>();
-            for (int i = 1; i < args.length; i++) body.add(args[i]);
-            body.add(PersistentList.createFromArray(Symbol.intern("recur"),
-                    PersistentList.createFromArray(Symbol.intern("clojure.core", "unchecked-inc-long"), sym)));
-            // Use standard inc for safety
-            body.set(body.size() - 1, PersistentList.createFromArray(Symbol.intern("recur"),
-                    PersistentList.createFromArray(Symbol.intern("clojure.core", "inc"), sym)));
-            List<Object> loopBody = new ArrayList<>();
-            loopBody.add(loopStar);
-            loopBody.add(PersistentVector.createOwning(sym, 0L));
-            List<Object> whenForm = new ArrayList<>();
-            whenForm.add(Symbol.intern("when"));
-            whenForm.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "<"), sym, nSym));
-            whenForm.addAll(body);
-            loopBody.add(PersistentList.create(whenForm));
-            return PersistentList.createFromArray(letStar,
-                    PersistentVector.createOwning(nSym, PersistentList.createFromArray(Symbol.intern("clojure.core", "long"), limit)),
-                    PersistentList.create(loopBody));
-        }));
+        defMacro(ns, "dotimes", new CoreFnV(103, "dotimes"));
 
-        defMacro(ns, "while", Fn.ofVarargs("while", args -> {
-            Object test = args[0];
-            List<Object> body = new ArrayList<>();
-            body.add(Symbol.intern("when"));
-            body.add(test);
-            for (int i = 1; i < args.length; i++) body.add(args[i]);
-            body.add(PersistentList.createFromArray(Symbol.intern("recur")));
-            return PersistentList.createFromArray(loopStar, PersistentVector.EMPTY, PersistentList.create(body));
-        }));
+        defMacro(ns, "while", new CoreFnV(104, "while"));
 
-        defMacro(ns, "doseq", Fn.ofVarargs("doseq", args -> {
-            PersistentVector seqExprs = (PersistentVector) args[0];
-            List<Object> body = new ArrayList<>();
-            body.add(doSym);
-            for (int i = 1; i < args.length; i++) body.add(args[i]);
-            Object inner = PersistentList.create(body);
-            return expandDoseq(seqExprs, 0, inner);
-        }));
+        defMacro(ns, "doseq", new CoreFnV(105, "doseq"));
 
-        defMacro(ns, "for", Fn.ofVarargs("for", args -> {
-            PersistentVector seqExprs = (PersistentVector) args[0];
-            Object bodyExpr = args[1];
-            return expandFor(seqExprs, 0, bodyExpr);
-        }));
+        defMacro(ns, "for", new CoreFnV(106, "for"));
 
         // Binding & With-Open & With-Out-Str & Time & Assert
-        def(ns, "push-thread-bindings", Fn.of1("push-thread-bindings", m -> {
-            Map<Var, Object> map = new HashMap<>();
-            for (ISeq s = RT.seq(m); s != null; s = s.next()) {
-                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
-                map.put((Var) e.getKey(), e.getValue());
-            }
-            Var.pushThreadBindings(map);
-            return null;
-        }));
-        def(ns, "pop-thread-bindings", Fn.of0("pop-thread-bindings", () -> {
-            Var.popThreadBindings();
-            return null;
-        }));
+        def(ns, "push-thread-bindings", new CoreFn1(165, "push-thread-bindings"));
+        def(ns, "pop-thread-bindings", new CoreFn0(5, "pop-thread-bindings"));
 
-        defMacro(ns, "defmacro", Fn.ofVarargs("defmacro", args -> {
-            List<Object> out = new ArrayList<>(args.length + 1);
-            out.add(Symbol.intern("defmacro*"));
-            Collections.addAll(out, args);
-            return PersistentList.create(out);
-        }));
+        defMacro(ns, "defmacro", new CoreFnV(107, "defmacro"));
 
-        defMacro(ns, "refer-clojure", Fn.ofVarargs("refer-clojure", args -> {
-            List<Object> out = new ArrayList<>(args.length + 2);
-            out.add(Symbol.intern("clojure.core", "refer"));
-            out.add(PersistentList.createFromArray(Symbol.intern("quote"), Symbol.intern("clojure.core")));
-            Collections.addAll(out, args);
-            return PersistentList.create(out);
-        }));
+        defMacro(ns, "refer-clojure", new CoreFnV(108, "refer-clojure"));
 
-        def(ns, "with-bindings*", Fn.ofVarargs("with-bindings*", args -> {
-            Object bmap = args[0];
-            Fn f = (Fn) args[1];
-            Object[] fargs = args.length > 2 ? Arrays.copyOfRange(args, 2, args.length) : Fn.EMPTY_ARGS;
-            Map<Var, Object> map = new HashMap<>();
-            for (ISeq s = RT.seq(bmap); s != null; s = s.next()) {
-                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
-                map.put((Var) e.getKey(), e.getValue());
-            }
-            Var.pushThreadBindings(map);
-            try {
-                return f.applyTo(fargs);
-            } finally {
-                Var.popThreadBindings();
-            }
-        }));
+        def(ns, "with-bindings*", new CoreFnV(109, "with-bindings*"));
 
-        defMacro(ns, "with-bindings", Fn.ofVarargs("with-bindings", args -> {
-            List<Object> fnBody = new ArrayList<>();
-            fnBody.add(doSym);
-            for (int i = 1; i < args.length; i++) fnBody.add(args[i]);
-            return PersistentList.createFromArray(
-                    Symbol.intern("clojure.core", "with-bindings*"),
-                    args[0],
-                    PersistentList.createFromArray(Symbol.intern("fn*"), PersistentVector.EMPTY, PersistentList.create(fnBody)));
-        }));
+        defMacro(ns, "with-bindings", new CoreFnV(110, "with-bindings"));
 
-        def(ns, "with-loading-context*", Fn.of1("with-loading-context*", fnObj -> {
-            ClassLoader savedCl = Thread.currentThread().getContextClassLoader();
-            Var.pushThreadBindings(Collections.emptyMap());
-            try {
-                return ((Fn) fnObj).invoke();
-            } finally {
-                Var.popThreadBindings();
-                Thread.currentThread().setContextClassLoader(savedCl);
-            }
-        }));
+        def(ns, "with-loading-context*", new CoreFn1(166, "with-loading-context*"));
 
-        defMacro(ns, "with-loading-context", Fn.ofVarargs("with-loading-context", args -> {
-            List<Object> body = new ArrayList<>();
-            body.add(doSym);
-            Collections.addAll(body, args);
-            return PersistentList.createFromArray(
-                    Symbol.intern("clojure.core", "with-loading-context*"),
-                    PersistentList.createFromArray(Symbol.intern("fn*"), PersistentVector.EMPTY, PersistentList.create(body)));
-        }));
+        defMacro(ns, "with-loading-context", new CoreFnV(111, "with-loading-context"));
 
-        defMacro(ns, "binding", Fn.ofVarargs("binding", args -> {
-            PersistentVector vec = (PersistentVector) args[0];
-            List<Object> kvs = new ArrayList<>();
-            kvs.add(Symbol.intern("clojure.core", "hash-map"));
-            for (int i = 0; i < vec.count(); i += 2) {
-                kvs.add(PersistentList.createFromArray(Symbol.intern("var"), vec.nth(i)));
-                kvs.add(vec.nth(i + 1));
-            }
-            List<Object> body = new ArrayList<>();
-            body.add(doSym);
-            for (int i = 1; i < args.length; i++) body.add(args[i]);
-            return PersistentList.createFromArray(doSym,
-                    PersistentList.createFromArray(Symbol.intern("clojure.core", "push-thread-bindings"), PersistentList.create(kvs)),
-                    PersistentList.createFromArray(Symbol.intern("try"),
-                            PersistentList.create(body),
-                            PersistentList.createFromArray(Symbol.intern("finally"),
-                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "pop-thread-bindings")))));
-        }));
+        defMacro(ns, "binding", new CoreFnV(112, "binding"));
 
-        defMacro(ns, "with-out-str", Fn.ofVarargs("with-out-str", args -> {
-            Symbol sw = Symbol.intern("sw__" + RT.nextID());
-            List<Object> body = new ArrayList<>();
-            body.add(Symbol.intern("binding"));
-            body.add(PersistentVector.createOwning(
-                    Symbol.intern("clojure.core", "*out*"),
-                    PersistentList.createFromArray(Symbol.intern("java.io.PrintWriter."), sw)));
-            for (Object a : args) body.add(a);
-            return PersistentList.createFromArray(letStar,
-                    PersistentVector.createOwning(sw, PersistentList.createFromArray(Symbol.intern("java.io.StringWriter."))),
-                    PersistentList.create(body),
-                    PersistentList.createFromArray(Symbol.intern("clojure.core", "str"), sw));
-        }));
+        defMacro(ns, "with-out-str", new CoreFnV(113, "with-out-str"));
 
-        defMacro(ns, "with-in-str", Fn.ofVarargs("with-in-str", args -> {
-            List<Object> body = new ArrayList<>();
-            body.add(Symbol.intern("binding"));
-            body.add(PersistentVector.createOwning(
-                    Symbol.intern("clojure.core", "*in*"),
-                    PersistentList.createFromArray(Symbol.intern("java.io.BufferedReader."),
-                            PersistentList.createFromArray(Symbol.intern("java.io.StringReader."), args[0]))));
-            for (int i = 1; i < args.length; i++) body.add(args[i]);
-            return PersistentList.create(body);
-        }));
+        defMacro(ns, "with-in-str", new CoreFnV(114, "with-in-str"));
 
-        defMacro(ns, "with-open", Fn.ofVarargs("with-open", args -> {
-            PersistentVector bindings = (PersistentVector) args[0];
-            if (bindings.count() == 0) {
-                List<Object> body = new ArrayList<>();
-                body.add(doSym);
-                for (int i = 1; i < args.length; i++) body.add(args[i]);
-                return PersistentList.create(body);
-            }
-            Object sym = bindings.nth(0);
-            Object init = bindings.nth(1);
-            List<Object> restBindings = new ArrayList<>();
-            for (int i = 2; i < bindings.count(); i++) restBindings.add(bindings.nth(i));
-            List<Object> inner = new ArrayList<>();
-            inner.add(Symbol.intern("with-open"));
-            inner.add(PersistentVector.create(restBindings));
-            for (int i = 1; i < args.length; i++) inner.add(args[i]);
-            return PersistentList.createFromArray(letStar,
-                    PersistentVector.createOwning(sym, init),
-                    PersistentList.createFromArray(Symbol.intern("try"),
-                            PersistentList.create(inner),
-                            PersistentList.createFromArray(Symbol.intern("finally"),
-                                    PersistentList.createFromArray(Symbol.intern(".close"), sym))));
-        }));
+        defMacro(ns, "with-open", new CoreFnV(115, "with-open"));
 
-        defMacro(ns, "time", Fn.of1("time", expr -> {
-            Symbol start = Symbol.intern("start__" + RT.nextID());
-            Symbol ret = Symbol.intern("ret__" + RT.nextID());
-            return PersistentList.createFromArray(letStar,
-                    PersistentVector.createOwning(
-                            start, PersistentList.createFromArray(Symbol.intern("System/nanoTime")),
-                            ret, expr),
-                    PersistentList.createFromArray(Symbol.intern("clojure.core", "println"),
-                            PersistentList.createFromArray(Symbol.intern("clojure.core", "str"),
-                                    "Elapsed time: ",
-                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "/"),
-                                            PersistentList.createFromArray(Symbol.intern("clojure.core", "double"),
-                                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "-"),
-                                                            PersistentList.createFromArray(Symbol.intern("System/nanoTime")),
-                                                            start)),
-                                            1000000.0),
-                                    " msecs")),
-                    ret);
-        }));
+        defMacro(ns, "time", new CoreFn1(167, "time"));
 
-        defMacro(ns, "assert", Fn.ofVarargs("assert", args -> {
-            if (!RT.truthy(RT.ASSERT.deref())) return null;
-            Object x = args[0];
-            Object msg = args.length > 1 ? args[1] : RT.printString(x);
-            return PersistentList.createFromArray(Symbol.intern("when-not"), x,
-                    PersistentList.createFromArray(Symbol.intern("throw"),
-                            PersistentList.createFromArray(Symbol.intern("AssertionError."),
-                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "str"), "Assert failed: ", msg))));
-        }));
+        defMacro(ns, "assert", new CoreFnV(116, "assert"));
 
         // (ns foo.bar docstring? attr-map? (:refer-clojure ...) (:require ...) (:import ...))
-        defMacro(ns, "ns", Fn.ofVarargs("ns", args -> {
-            Symbol nsSym = (Symbol) args[0];
-            int idx = 1;
-            String doc = (idx < args.length && args[idx] instanceof String s) ? (String) args[idx++] : null;
-            PersistentHashMap attrMap = (idx < args.length && args[idx] instanceof PersistentHashMap m)
-                    ? (PersistentHashMap) args[idx++] : null;
-            PersistentHashMap mergedMeta = nsSym.meta() != null ? nsSym.meta() : PersistentHashMap.EMPTY;
-            if (doc != null) mergedMeta = mergedMeta.assoc(Keyword.intern("doc"), doc);
-            if (attrMap != null) {
-                for (ISeq s = attrMap.seq(); s != null; s = s.next()) {
-                    Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
-                    mergedMeta = mergedMeta.assoc(e.getKey(), e.getValue());
-                }
-            }
-
-            List<Object> referClojureOpts = null;
-            List<Object> clauseForms = new ArrayList<>();
-            for (int i = idx; i < args.length; i++) {
-                if (args[i] instanceof ISeq clause) {
-                    Object head = clause.first();
-                    if (Keyword.intern("refer-clojure").equals(head)) {
-                        referClojureOpts = new ArrayList<>();
-                        referClojureOpts.add(Symbol.intern("clojure.core", "refer"));
-                        referClojureOpts.add(PersistentList.createFromArray(quoteSym, Symbol.intern("clojure.core")));
-                        for (ISeq s = clause.next(); s != null; s = s.next()) {
-                            referClojureOpts.add(PersistentList.createFromArray(quoteSym, s.first()));
-                        }
-                    } else if (Keyword.intern("require").equals(head)) {
-                        List<Object> req = new ArrayList<>();
-                        req.add(Symbol.intern("clojure.core", "require"));
-                        for (ISeq s = clause.next(); s != null; s = s.next()) {
-                            req.add(PersistentList.createFromArray(quoteSym, s.first()));
-                        }
-                        clauseForms.add(PersistentList.create(req));
-                    } else if (Keyword.intern("use").equals(head)) {
-                        List<Object> use = new ArrayList<>();
-                        use.add(Symbol.intern("clojure.core", "use"));
-                        for (ISeq s = clause.next(); s != null; s = s.next()) {
-                            use.add(PersistentList.createFromArray(quoteSym, s.first()));
-                        }
-                        clauseForms.add(PersistentList.create(use));
-                    } else if (Keyword.intern("import").equals(head)) {
-                        List<Object> imp = new ArrayList<>();
-                        imp.add(Symbol.intern("clojure.core", "import"));
-                        for (ISeq s = clause.next(); s != null; s = s.next()) {
-                            imp.add(PersistentList.createFromArray(quoteSym, s.first()));
-                        }
-                        clauseForms.add(PersistentList.create(imp));
-                    }
-                }
-            }
-
-            List<Object> forms = new ArrayList<>();
-            forms.add(doSym);
-            forms.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "in-ns"),
-                    PersistentList.createFromArray(quoteSym, nsSym)));
-            if (mergedMeta.count() > 0) {
-                forms.add(PersistentList.createFromArray(
-                        Symbol.intern("clojure.core", "alter-meta!"),
-                        PersistentList.createFromArray(Symbol.intern("clojure.core", "the-ns"),
-                                PersistentList.createFromArray(quoteSym, nsSym)),
-                        Symbol.intern("clojure.core", "merge"),
-                        PersistentList.createFromArray(quoteSym, mergedMeta)));
-            }
-            if (referClojureOpts != null) {
-                forms.add(PersistentList.create(referClojureOpts));
-            } else {
-                forms.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "refer"),
-                        PersistentList.createFromArray(quoteSym, Symbol.intern("clojure.core"))));
-            }
-            forms.addAll(clauseForms);
-            return PersistentList.create(forms);
-        }));
+        defMacro(ns, "ns", new CoreFnV(117, "ns"));
 
         // Multimethod macros: defmulti, defmethod
-        def(ns, "create-multi", Fn.of3("create-multi", (name, dispatchFn, defaultVal) ->
-                new MultiFn(name.toString(), (Fn) dispatchFn, defaultVal)));
-        def(ns, "add-method!", Fn.of3("add-method!", (mf, dispatchVal, methodFn) ->
-                ((MultiFn) mf).addMethod(dispatchVal, (Fn) methodFn)));
+        def(ns, "create-multi", new CoreFn3(18, "create-multi"));
+        def(ns, "add-method!", new CoreFn3(19, "add-method!"));
 
-        defMacro(ns, "defmulti", Fn.ofVarargs("defmulti", args -> {
-            Symbol name = (Symbol) args[0];
-            int idx = 1;
-            if (idx < args.length && args[idx] instanceof String) idx++;
-            if (idx < args.length && args[idx] instanceof PersistentHashMap) idx++;
-            Object dispatchFn = args[idx++];
-            Object defaultVal = Keyword.intern("default");
-            for (int i = idx; i < args.length; i += 2) {
-                if (Keyword.intern("default").equals(args[i])) defaultVal = args[i + 1];
-            }
-            return PersistentList.createFromArray(defSym, name,
-                    PersistentList.createFromArray(Symbol.intern("clojure.core", "create-multi"),
-                            name.name, dispatchFn, defaultVal));
-        }));
+        defMacro(ns, "defmulti", new CoreFnV(118, "defmulti"));
 
-        defMacro(ns, "defmethod", Fn.ofVarargs("defmethod", args -> {
-            Symbol mfName = (Symbol) args[0];
-            Object dispatchVal = args[1];
-            List<Object> fnBody = new ArrayList<>();
-            fnBody.add(fnStar);
-            for (int i = 2; i < args.length; i++) fnBody.add(args[i]);
-            return PersistentList.createFromArray(Symbol.intern("clojure.core", "add-method!"),
-                    mfName, dispatchVal, PersistentList.create(fnBody));
-        }));
+        defMacro(ns, "defmethod", new CoreFnV(119, "defmethod"));
 
         // letfn macro
-        defMacro(ns, "letfn", Fn.ofVarargs("letfn", args -> {
-            PersistentVector fnspecs = (PersistentVector) args[0];
-            // Expand using atom indirection so mutual recursion works cleanly
-            List<Object> bindings = new ArrayList<>();
-            List<Object> resets = new ArrayList<>();
-            List<Object> innerLets = new ArrayList<>();
-            for (int i = 0; i < fnspecs.count(); i++) {
-                ISeq spec = (ISeq) fnspecs.nth(i);
-                Symbol fnName = (Symbol) spec.first();
-                Symbol boxSym = Symbol.intern("box__" + fnName.name + "__" + RT.nextID());
-                bindings.add(boxSym);
-                bindings.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "atom"), null));
-                innerLets.add(fnName);
-                innerLets.add(PersistentList.createFromArray(fnStar,
-                        PersistentVector.createOwning(Symbol.intern("&"), Symbol.intern("args__")),
-                        PersistentList.createFromArray(Symbol.intern("clojure.core", "apply"),
-                                PersistentList.createFromArray(Symbol.intern("clojure.core", "deref"), boxSym),
-                                Symbol.intern("args__"))));
-                resets.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "reset!"),
-                        boxSym,
-                        RT.cons(fnStar, spec)));
-            }
-            List<Object> body = new ArrayList<>();
-            body.add(doSym);
-            body.addAll(resets);
-            for (int i = 1; i < args.length; i++) body.add(args[i]);
-            return PersistentList.createFromArray(letStar, PersistentVector.create(bindings),
-                    PersistentList.createFromArray(letStar, PersistentVector.create(innerLets),
-                            PersistentList.create(body)));
-        }));
+        defMacro(ns, "letfn", new CoreFnV(120, "letfn"));
     }
 
     private static Object expandDoseq(PersistentVector seqExprs, int idx, Object body) {
@@ -3977,5 +2255,2672 @@ public final class Core {
             Atom.FutureObj fut = (Atom.FutureObj) r.first();
             return new Cons(fut.deref(), pmapDerefMap(r.next()));
         }));
+    }
+
+    // ========================================================================
+    // Compact Tableswitch Function Dispatchers (Zero LambdaMetafactory Overhead)
+    // ========================================================================
+
+    private static final class CoreFn0 extends Fn.NamedFn {
+        private final int id;
+        CoreFn0(int id, String name) { super(name); this.id = id; }
+        @Override public Object invoke() { return call0(id); }
+    }
+
+    private static final class CoreFn1 extends Fn.NamedFn {
+        private final int id;
+        CoreFn1(int id, String name) { super(name); this.id = id; }
+        @Override public Object invoke(Object a) { return call1(id, a); }
+    }
+
+    private static final class CoreFn2 extends Fn.NamedFn {
+        private final int id;
+        CoreFn2(int id, String name) { super(name); this.id = id; }
+        @Override public Object invoke(Object a, Object b) { return call2(id, a, b); }
+    }
+
+    private static final class CoreFn3 extends Fn.NamedFn {
+        private final int id;
+        CoreFn3(int id, String name) { super(name); this.id = id; }
+        @Override public Object invoke(Object a, Object b, Object c) { return call3(id, a, b, c); }
+    }
+
+    private static final class CoreFn12 extends Fn.NamedFn {
+        private final int id1, id2;
+        CoreFn12(int id1, int id2, String name) { super(name); this.id1 = id1; this.id2 = id2; }
+        @Override public Object invoke(Object a) { return call1(id1, a); }
+        @Override public Object invoke(Object a, Object b) { return call2(id2, a, b); }
+    }
+
+    private static final class CoreFn23 extends Fn.NamedFn {
+        private final int id2, id3;
+        CoreFn23(int id2, int id3, String name) { super(name); this.id2 = id2; this.id3 = id3; }
+        @Override public Object invoke(Object a, Object b) { return call2(id2, a, b); }
+        @Override public Object invoke(Object a, Object b, Object c) { return call3(id3, a, b, c); }
+    }
+
+    private static final class CoreFnV extends Fn.NamedFn {
+        private final int id;
+        CoreFnV(int id, String name) { super(name); this.id = id; }
+        @Override public Object invokeVarargs(Object[] args) { return callV(id, args); }
+    }
+
+    private static final class CoreTransducerFn0 extends Fn.NamedFn {
+        private final int xfId;
+        private final Fn base;
+        CoreTransducerFn0(int xfId, String name, Fn base) { super(name); this.xfId = xfId; this.base = base; }
+        @Override public Object invoke() { return CoreExtras.createTransducer0(xfId, getName()); }
+        @Override public Object invoke(Object a) { return base.invoke(a); }
+        @Override public Object invokeVarargs(Object[] args) { return base.applyTo(args); }
+    }
+
+    private static final class CoreTransducerFn1 extends Fn.NamedFn {
+        private final int xfId;
+        private final Fn base;
+        CoreTransducerFn1(int xfId, String name, Fn base) { super(name); this.xfId = xfId; this.base = base; }
+        @Override public Object invoke(Object a) { return CoreExtras.createTransducer1(xfId, getName(), a); }
+        @Override public Object invoke(Object a, Object b) { return base.invoke(a, b); }
+        @Override public Object invoke(Object a, Object b, Object c) { return base.invoke(a, b, c); }
+        @Override public Object invoke(Object a, Object b, Object c, Object d) { return base.invoke(a, b, c, d); }
+        @Override public Object invokeVarargs(Object[] args) { return base.applyTo(args); }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call0(int _id) {
+        switch (_id) {
+            case 0: {
+                 writeOut("", true); return null; 
+            }
+            case 1: {
+                
+            Object out = RT.OUT.deref();
+            if (out instanceof Flushable f) {
+                try { f.flush(); } catch (IOException e) { throw RT.sneakyThrow(e); }
+            }
+            return null;
+        
+            }
+            case 2: {
+                
+            try {
+                BufferedReader br = (BufferedReader) RT.IN.deref();
+                return br.readLine();
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        
+            }
+            case 3: return new Atom.Promise();
+            case 4: return (PersistentList.create(new ArrayList<>(Namespace.all())));
+            case 5: {
+                
+            Var.popThreadBindings();
+            return null;
+        
+            }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    private static Object call1(int _id, Object _a) {
+        return switch (_id >>> 5) {
+            case 0 -> call1_0(_id, _a);
+            case 1 -> call1_1(_id, _a);
+            case 2 -> call1_2(_id, _a);
+            case 3 -> call1_3(_id, _a);
+            case 4 -> call1_4(_id, _a);
+            case 5 -> call1_5(_id, _a);
+            default -> throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call1_0(int _id, Object _a) {
+        switch (_id) {
+            case 0: { Object x = _a; return (x == null); }
+            case 1: { Object x = _a; return (x != null); }
+            case 2: { Object x = _a; return (x == Boolean.TRUE); }
+            case 3: { Object x = _a; return (x == Boolean.FALSE); }
+            case 4: { Object x = _a; return (x instanceof Boolean); }
+            case 5: return RT.truthy(_a);
+            case 6: { Object x = _a; return (!RT.truthy(x)); }
+            case 7: { Object x = _a; return ((long) RT.hash(x)); }
+            case 8: return Numbers.isNumber(_a);
+            case 9: return Numbers.isInteger(_a);
+            case 10: return Numbers.isInteger(_a);
+            case 11: { Object x = _a; return (Numbers.isInteger(x) && Numbers.isPos(x)); }
+            case 12: { Object x = _a; return (Numbers.isInteger(x) && !Numbers.isNeg(x)); }
+            case 13: { Object x = _a; return (Numbers.isInteger(x) && Numbers.isNeg(x)); }
+            case 14: { Object x = _a; return (x instanceof Double || x instanceof Float); }
+            case 15: { Object x = _a; return (x instanceof Double); }
+            case 16: { Object x = _a; return (x instanceof Ratio); }
+            case 17: { Object x = _a; return (x instanceof BigDecimal); }
+            case 18: { Object x = _a; return (Numbers.isInteger(x) || x instanceof Ratio || x instanceof BigDecimal); }
+            case 19: return Numbers.isZero(_a);
+            case 20: return Numbers.isPos(_a);
+            case 21: return Numbers.isNeg(_a);
+            case 22: {
+                Object x = _a;
+            if (!Numbers.isInteger(x)) throw new IllegalArgumentException("Argument must be an integer: " + x);
+            return (Numbers.toLong(x) & 1L) == 0L;
+        
+            }
+            case 23: {
+                Object x = _a;
+            if (!Numbers.isInteger(x)) throw new IllegalArgumentException("Argument must be an integer: " + x);
+            return (Numbers.toLong(x) & 1L) != 0L;
+        
+            }
+            case 24: { Object x = _a; return (x instanceof String); }
+            case 25: { Object x = _a; return (x instanceof Character); }
+            case 26: { Object x = _a; return (x instanceof Symbol); }
+            case 27: { Object x = _a; return (x instanceof Keyword); }
+            case 28: { Object x = _a; return (x instanceof Symbol s && s.ns == null); }
+            case 29: { Object x = _a; return (x instanceof Symbol s && s.ns != null); }
+            case 30: { Object x = _a; return (x instanceof Keyword k && k.getNamespace() == null); }
+            case 31: { Object x = _a; return (x instanceof Keyword k && k.getNamespace() != null); }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call1_1(int _id, Object _a) {
+        switch (_id) {
+            case 32: { Object x = _a; return (x instanceof PersistentList || x instanceof PersistentList.EmptyList); }
+            case 33: { Object x = _a; return (x instanceof PersistentVector || x instanceof PersistentVector.SubVec || x instanceof PersistentHashMap.MapEntry); }
+            case 34: { Object x = _a; return (x instanceof PersistentHashMap || x instanceof Map<?, ?>); }
+            case 35: { Object x = _a; return (x instanceof PersistentHashSet || x instanceof Set<?>); }
+            case 36: { Object x = _a; return (x instanceof ISeq); }
+            case 37: { Object x = _a; return (x == null || x instanceof Seqable || x instanceof Iterable<?>
+                || x instanceof Map<?, ?> || x instanceof CharSequence || x.getClass().isArray()); }
+            case 38: { Object x = _a; return (x instanceof PersistentVector || x instanceof PersistentHashMap
+                || x instanceof PersistentHashSet || x instanceof PersistentTreeMap || x instanceof PersistentTreeSet
+                || x instanceof PersistentRecord || x instanceof PersistentColl
+                || x instanceof ISeq || x instanceof Collection<?>); }
+            case 39: { Object x = _a; return (x instanceof Associative); }
+            case 40: { Object x = _a; return (x instanceof ISeq || x instanceof PersistentVector || x instanceof List<?>); }
+            case 41: { Object x = _a; return (x instanceof Counted); }
+            case 42: { Object x = _a; return (x instanceof Fn); }
+            case 43: { Object x = _a; return (x instanceof Fn && !(x instanceof Keyword || x instanceof Symbol
+                || x instanceof PersistentVector || x instanceof PersistentHashMap || x instanceof PersistentHashSet
+                || x instanceof PersistentTreeMap || x instanceof PersistentTreeSet || x instanceof PersistentColl)); }
+            case 44: { Object x = _a; return (x instanceof Var); }
+            case 45: { Object x = _a; return (x instanceof Class<?>); }
+            case 46: { Object x = _a; return (RT.seq(x) == null); }
+            case 47: { Object x = _a; return (x instanceof Reduced); }
+            case 48: {
+                Object x = _a;
+            if (x instanceof LazySeq ls) return ls.isRealized();
+            if (x instanceof Atom.Delay d) return d.isRealized();
+            if (x instanceof Atom.Promise p) return p.isRealized();
+            if (x instanceof Atom.FutureObj f) return f.isDone();
+            return true;
+        
+            }
+            case 49: return Numbers.abs(_a);
+            case 50: {
+                Object n = _a;
+            int bound = (int) Numbers.toLong(n);
+            return bound <= 0 ? 0L : (long) ThreadLocalRandom.current().nextInt(bound);
+        
+            }
+            case 51: {
+                Object coll = _a;
+            int n = RT.count(coll);
+            if (n == 0) throw new IllegalArgumentException("Cannot choose rand-nth of empty collection");
+            return RT.nth(coll, ThreadLocalRandom.current().nextInt(n));
+        
+            }
+            case 52: return Numbers.bitNot(_a);
+            case 53: { Object x = _a; return ((long) Numbers.intCast(x)); }
+            case 54: return Numbers.longCast(_a);
+            case 55: return Numbers.toDouble(_a);
+            case 56: { Object x = _a; return ((double) ((Number) x).floatValue()); }
+            case 57: return Numbers.toBigInteger(_a);
+            case 58: return Numbers.toBigDecimal(_a);
+            case 59: return Numbers.charCast(_a);
+            case 60: return RT.seq(_a);
+            case 61: return RT.first(_a);
+            case 62: { Object x = _a; return (RT.first(RT.first(x))); }
+            case 63: return RT.next(_a);
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call1_2(int _id, Object _a) {
+        switch (_id) {
+            case 64: { Object x = _a; return (RT.next(RT.first(x))); }
+            case 65: { Object x = _a; return (RT.first(RT.next(x))); }
+            case 66: { Object x = _a; return (RT.next(RT.next(x))); }
+            case 67: return RT.more(_a);
+            case 68: return RT.second(_a);
+            case 69: {
+                Object x = _a;
+            ISeq s = RT.seq(x);
+            if (s == null) return null;
+            if (s instanceof PersistentVector.VecSeq) {
+                // O(1) via seq? Not directly, walk cleanly
+            }
+            Object ret = s.first();
+            while ((s = s.next()) != null) ret = s.first();
+            return ret;
+        
+            }
+            case 70: {
+                Object x = _a;
+            ISeq s = RT.seq(x);
+            if (s == null || s.next() == null) return null;
+            List<Object> items = new ArrayList<>();
+            while (s.next() != null) {
+                items.add(s.first());
+                s = s.next();
+            }
+            return PersistentList.create(items);
+        
+            }
+            case 71: { Object o = _a; return ((long) RT.count(o)); }
+            case 72: {
+                Object o = _a;
+            if (o instanceof PersistentVector) return PersistentVector.EMPTY;
+            if (o instanceof PersistentHashMap) return PersistentHashMap.EMPTY;
+            if (o instanceof PersistentHashSet) return PersistentHashSet.EMPTY;
+            if (o instanceof PersistentTreeMap ptm) return ptm.empty();
+            if (o instanceof PersistentTreeSet pts) return pts.empty();
+            if (o instanceof PersistentColl pc) return pc.empty();
+            if (o instanceof ISeq) return PersistentList.EMPTY;
+            if (o instanceof String) return "";
+            return null;
+        
+            }
+            case 73: { Object x = _a; return (repeatInfSeq(x)); }
+            case 74: { Object f = _a; return (repeatedlyInfSeq((Fn) f)); }
+            case 75: {
+                Object coll = _a;
+            ISeq s = RT.seq(coll);
+            return s == null ? PersistentList.EMPTY : cycleSeq(s, s);
+        
+            }
+            case 76: { Object coll = _a; return (dropLastSeq(1, coll)); }
+            case 77: return new Reduced(_a);
+            case 78: { Object x = _a; return (x instanceof Reduced r ? r.deref() : x); }
+            case 79: { Object x = _a; return (x instanceof Reduced ? x : new Reduced(x)); }
+            case 80: {
+                Object coll = _a;
+            Map<RT.EquivKey, Long> counts = new HashMap<>();
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                counts.merge(new RT.EquivKey(s.first()), 1L, Long::sum);
+            }
+            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
+            for (Map.Entry<RT.EquivKey, Long> e : counts.entrySet()) {
+                ret = ret.assoc(e.getKey().val, e.getValue());
+            }
+            return ret.persistent();
+        
+            }
+            case 81: { Object coll = _a; return (distinctSeq(RT.seq(coll), new HashSet<>())); }
+            case 82: { Object coll = _a; return (dedupeSeq(RT.seq(coll), new Object(), true)); }
+            case 83: {
+                Object x = _a;
+            List<Object> out = new ArrayList<>();
+            flattenInto(x, out);
+            return PersistentList.create(out);
+        
+            }
+            case 84: {
+                Object coll = _a; dorun(RT.seq(coll)); return coll; 
+            }
+            case 85: {
+                Object coll = _a; dorun(RT.seq(coll)); return null; 
+            }
+            case 86: {
+                Object coll = _a;
+            if (coll == null) return PersistentVector.EMPTY;
+            if (coll instanceof PersistentVector pv) return pv;
+            return PersistentVector.createFromISeq(RT.seq(coll));
+        
+            }
+            case 87: {
+                Object coll = _a;
+            if (coll == null) return PersistentHashSet.EMPTY;
+            if (coll instanceof PersistentHashSet ps) return ps;
+            return PersistentHashSet.createFromISeq(RT.seq(coll));
+        
+            }
+            case 88: return RT.keys(_a);
+            case 89: return RT.vals(_a);
+            case 90: { Object e = _a; return (((Map.Entry<?, ?>) e).getKey()); }
+            case 91: { Object e = _a; return (((Map.Entry<?, ?>) e).getValue()); }
+            case 92: {
+                Object coll = _a;
+            if (coll == null) return null;
+            if (coll instanceof PersistentVector pv) return pv.peek();
+            if (coll instanceof PersistentList pl) return pl.peek();
+            if (coll instanceof PersistentList.EmptyList) return null;
+            if (coll instanceof PersistentColl pc) return pc.peek();
+            return RT.first(coll);
+        
+            }
+            case 93: return RT.pop(_a);
+            case 94: {
+                Object coll = _a;
+            if (coll instanceof PersistentList pl) {
+                PersistentList ret = new PersistentList(null, pl.first, null, 1);
+                if (pl.rest instanceof PersistentList nextPl) {
+                    PersistentList cur = nextPl;
+                    while (true) {
+                        ret = ret.cons(cur.first);
+                        if (cur.rest instanceof PersistentList n) {
+                            cur = n;
+                        } else {
+                            ISeq rem = cur.next();
+                            if (rem == null) return ret;
+                            ISeq sRet = ret;
+                            for (; rem != null; rem = rem.next()) sRet = sRet.cons(rem.first());
+                            return sRet;
+                        }
+                    }
+                }
+                ISeq sRet = ret;
+                for (ISeq rem = pl.next(); rem != null; rem = rem.next()) sRet = sRet.cons(rem.first());
+                return sRet;
+            }
+            if (coll instanceof PersistentVector pv) {
+                if (pv.cnt == 0) return PersistentList.EMPTY;
+                PersistentList ret = null;
+                int i = 0;
+                while (i < pv.cnt) {
+                    Object[] chunk = pv.arrayFor(i);
+                    int limit = Math.min(chunk.length, pv.cnt - i);
+                    for (int j = 0; j < limit; j++) {
+                        ret = ret == null ? new PersistentList(null, chunk[j], null, 1) : ret.cons(chunk[j]);
+                    }
+                    i += limit;
+                }
+                return ret;
+            }
+            ISeq ret = PersistentList.EMPTY;
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                ret = ret.cons(s.first());
+            }
+            return ret;
+        
+            }
+            case 95: {
+                Object coll = _a;
+            if (coll instanceof Reversible rev) return rev.rseq();
+            return RT.seq(coll);
+        
+            }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call1_3(int _id, Object _a) {
+        switch (_id) {
+            case 96: {
+                Object coll = _a;
+                    Object[] arr = RT.toArray(coll);
+                    Arrays.sort(arr, RT::compare);
+                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
+                
+            }
+            case 97: {
+                Object coll = _a;
+            List<Object> list = new ArrayList<>(Arrays.asList(RT.toArray(coll)));
+            Collections.shuffle(list);
+            return PersistentVector.create(list);
+        
+            }
+            case 98: {
+                Object coll = _a;
+            if (coll instanceof PersistentVector pv) return pv.asTransient();
+            if (coll instanceof PersistentHashMap pm) return pm.asTransient();
+            if (coll instanceof PersistentHashSet ps) return ps.asTransient();
+            throw new IllegalArgumentException("Cannot create transient from: " + coll);
+        
+            }
+            case 99: {
+                Object t = _a;
+            if (t instanceof PersistentVector.TransientVector tv) return tv.persistent();
+            if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.persistent();
+            if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.persistent();
+            throw new IllegalArgumentException("Not a transient: " + t);
+        
+            }
+            case 100: return RT.destructureMap(_a);
+            case 101: { Object t = _a; return (((PersistentVector.TransientVector) t).pop()); }
+            case 102: return RT.name(_a);
+            case 103: return RT.namespace(_a);
+            case 104: { Object s = _a; return (s instanceof Symbol sym ? sym : Symbol.intern((String) s)); }
+            case 105: {
+                Object k = _a;
+                    if (k instanceof Keyword kw) return kw;
+                    if (k instanceof Symbol s) return Keyword.intern(s);
+                    if (k instanceof String str) return Keyword.intern(str);
+                    return null;
+                
+            }
+            case 106: { Object k = _a; return (k instanceof Keyword kw ? kw : Keyword.find(null, k.toString())); }
+            case 107: { Object s = _a; return (s instanceof Pattern p ? p : Pattern.compile((String) s)); }
+            case 108: {
+                Object m = _a;
+            Matcher mat = (Matcher) m;
+            int gc = mat.groupCount();
+            if (gc == 0) return mat.group();
+            Object[] ret = new Object[gc + 1];
+            for (int i = 0; i <= gc; i++) ret[i] = mat.group(i);
+            return PersistentVector.createOwning(ret);
+        
+            }
+            case 109: {
+                Object m = _a;
+                    Matcher mat = (Matcher) m;
+                    if (!mat.find()) return null;
+                    int gc = mat.groupCount();
+                    if (gc == 0) return mat.group();
+                    Object[] ret = new Object[gc + 1];
+                    for (int i = 0; i <= gc; i++) ret[i] = mat.group(i);
+                    return PersistentVector.createOwning(ret);
+                
+            }
+            case 110: { Object s = _a; return (Reader.readString((String) s)); }
+            case 111: { Object x = _a; return (x); }
+            case 112: { Object x = _a; return (Fn.ofVarargs("constantly", args -> x)); }
+            case 113: {
+                Object f = _a;
+            Fn fn = (Fn) f;
+            return Fn.ofVarargs("complement", args -> !RT.truthy(fn.applyTo(args)));
+        
+            }
+            case 114: {
+                Object f = _a;
+            Fn fn = (Fn) f;
+            ConcurrentHashMap<PersistentVector, Object> cache = new ConcurrentHashMap<>();
+            Object NULL_SENTINEL = new Object();
+            return Fn.ofVarargs("memoize", args -> {
+                PersistentVector key = PersistentVector.createOwning(args);
+                Object cached = cache.get(key);
+                if (cached != null) return cached == NULL_SENTINEL ? null : cached;
+                Object val = fn.applyTo(args);
+                cache.putIfAbsent(key, val == null ? NULL_SENTINEL : val);
+                return val;
+            });
+        
+            }
+            case 115: return new Atom.Volatile(_a);
+            case 116: { Object x = _a; return (x instanceof Atom.Volatile); }
+            case 117: { Object x = _a; return (x instanceof Atom.Delay); }
+            case 118: { Object x = _a; return (x instanceof Atom.Delay d ? d.deref() : x); }
+            case 119: { Object f = _a; return (new Atom.FutureObj((Fn) f)); }
+            case 120: { Object x = _a; return (x instanceof Atom.FutureObj); }
+            case 121: { Object x = _a; return (((Atom.FutureObj) x).isDone()); }
+            case 122: { Object x = _a; return (((Atom.FutureObj) x).cancel(true)); }
+            case 123: { Object x = _a; return (((Atom.FutureObj) x).isCancelled()); }
+            case 124: {
+                Object ref = _a;
+            if (ref instanceof Atom a) return a.getValidator();
+            if (ref instanceof Agent ag) return ag.getValidator();
+            if (ref instanceof Ref r) return r.getValidator();
+            return null;
+        
+            }
+            case 125: { Object x = _a; return (x instanceof IMeta m ? m.meta() : null); }
+            case 126: { Object v = _a; return (((Var) v).deref()); }
+            case 127: {
+                Object sym = _a;
+            Symbol s = (Symbol) sym;
+            Namespace targetNs = Namespace.find(s.ns);
+            return targetNs != null ? targetNs.findInternedVar(Symbol.intern(s.name)) : null;
+        
+            }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call1_4(int _id, Object _a) {
+        switch (_id) {
+            case 128: {
+                Object name = _a;
+            Namespace target = Namespace.findOrCreate((Symbol) name);
+            RT.CURRENT_NS.bindRoot(target);
+            return target;
+        
+            }
+            case 129: { Object name = _a; return (Namespace.find((Symbol) name)); }
+            case 130: { Object name = _a; return (Namespace.findOrCreate((Symbol) name)); }
+            case 131: { Object name = _a; return (Namespace.remove((Symbol) name)); }
+            case 132: { Object x = _a; return (x instanceof Namespace n ? n.name : Namespace.find((Symbol) x).name); }
+            case 133: {
+                Object x = _a;
+            Namespace target = x instanceof Namespace n ? n : Namespace.find((Symbol) x);
+            return PersistentHashMap.createFromMap(target.getMappings());
+        
+            }
+            case 134: {
+                Object x = _a;
+            Namespace target = x instanceof Namespace n ? n : Namespace.find((Symbol) x);
+            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
+            for (Map.Entry<Symbol, Object> e : target.getMappings().entrySet()) {
+                if (e.getValue() instanceof Var v && v.ns == target && !RT.truthy(v.meta().valAt(Keyword.intern("private")))) {
+                    ret = ret.assoc(e.getKey(), v);
+                }
+            }
+            return ret.persistent();
+        
+            }
+            case 135: {
+                Object x = _a;
+            Namespace target = x instanceof Namespace n ? n : Namespace.find((Symbol) x);
+            return PersistentHashMap.createFromMap(target.getAliases());
+        
+            }
+            case 136: {
+                Object sym = _a;
+            Symbol s = (Symbol) sym;
+            Var v = Compiler.lookupVar(RT.currentNS(), s, false);
+            if (v != null) return v;
+            return Interop.resolveClass(RT.currentNS(), s.toString());
+        
+            }
+            case 137: return Compiler.eval(_a);
+            case 138: { Object s = _a; return (Compiler.load((String) s, "<load-string>")); }
+            case 139: {
+                Object path = _a;
+            try {
+                String src = Files.readString(Path.of(path.toString()), StandardCharsets.UTF_8);
+                return Compiler.load(src, path.toString());
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        
+            }
+            case 140: return Compiler.macroexpand1(_a);
+            case 141: return Compiler.macroexpand(_a);
+            case 142: { Object x = _a; return (x instanceof Symbol sym && sym.ns == null && Compiler.isSpecial(sym)); }
+            case 143: { Object b = _a; return (Compiler.destructure((PersistentVector) b)); }
+            case 144: return RT.destructureMap(_a);
+            case 145: return RT.addClasspath(_a);
+            case 146: { Object mf = _a; return (((MultiFn) mf).getMethodTable()); }
+            case 147: return Core.printDocValue(_a);
+            case 148: return RT.toArray(_a);
+            case 149: { Object x = _a; return (x instanceof Number n ? new Object[n.intValue()] : RT.toArray(x)); }
+            case 150: {
+                Object x = _a;
+            if (x instanceof Number n) return new int[n.intValue()];
+            Object[] arr = RT.toArray(x);
+            int[] out = new int[arr.length];
+            for (int i = 0; i < arr.length; i++) out[i] = ((Number) arr[i]).intValue();
+            return out;
+        
+            }
+            case 151: {
+                Object x = _a;
+            if (x instanceof Number n) return new long[n.intValue()];
+            Object[] arr = RT.toArray(x);
+            long[] out = new long[arr.length];
+            for (int i = 0; i < arr.length; i++) out[i] = ((Number) arr[i]).longValue();
+            return out;
+        
+            }
+            case 152: {
+                Object x = _a;
+            if (x instanceof Number n) return new double[n.intValue()];
+            Object[] arr = RT.toArray(x);
+            double[] out = new double[arr.length];
+            for (int i = 0; i < arr.length; i++) out[i] = ((Number) arr[i]).doubleValue();
+            return out;
+        
+            }
+            case 153: {
+                Object x = _a;
+            if (x instanceof Number n) return new byte[n.intValue()];
+            Object[] arr = RT.toArray(x);
+            byte[] out = new byte[arr.length];
+            for (int i = 0; i < arr.length; i++) out[i] = ((Number) arr[i]).byteValue();
+            return out;
+        
+            }
+            case 154: {
+                Object x = _a;
+            if (x instanceof Number n) return new char[n.intValue()];
+            if (x instanceof String s) return s.toCharArray();
+            Object[] arr = RT.toArray(x);
+            char[] out = new char[arr.length];
+            for (int i = 0; i < arr.length; i++) out[i] = (Character) arr[i];
+            return out;
+        
+            }
+            case 155: {
+                Object x = _a;
+            if (x instanceof Number n) return new boolean[n.intValue()];
+            Object[] arr = RT.toArray(x);
+            boolean[] out = new boolean[arr.length];
+            for (int i = 0; i < arr.length; i++) out[i] = RT.truthy(arr[i]);
+            return out;
+        
+            }
+            case 156: { Object a = _a; return ((long) RT.alength(a)); }
+            case 157: {
+                Object a = _a;
+            int len = Array.getLength(a);
+            Object copy = Array.newInstance(a.getClass().getComponentType(), len);
+            System.arraycopy(a, 0, copy, 0, len);
+            return copy;
+        
+            }
+            case 158: { Object x = _a; return (x == null ? null : x.getClass()); }
+            case 159: {
+                Object x = _a;
+            if (x instanceof IMeta m && m.meta() != null) {
+                Object t = m.meta().valAt(Keyword.intern("type"));
+                if (t != null) return t;
+            }
+            return x == null ? null : x.getClass();
+        
+            }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call1_5(int _id, Object _a) {
+        switch (_id) {
+            case 160: { Object ex = _a; return (ex instanceof ExceptionInfo ei ? ei.data : null); }
+            case 161: { Object ex = _a; return (((Throwable) ex).getMessage()); }
+            case 162: { Object ex = _a; return (((Throwable) ex).getCause()); }
+            case 163: { Object f = _a; return (new LazySeq((Fn) f)); }
+            case 164: { Object f = _a; return (new Atom.Delay((Fn) f)); }
+            case 165: {
+                Object m = _a;
+            Map<Var, Object> map = new HashMap<>();
+            for (ISeq s = RT.seq(m); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                map.put((Var) e.getKey(), e.getValue());
+            }
+            Var.pushThreadBindings(map);
+            return null;
+        
+            }
+            case 166: {
+                Object fnObj = _a;
+            ClassLoader savedCl = Thread.currentThread().getContextClassLoader();
+            Var.pushThreadBindings(Collections.emptyMap());
+            try {
+                return ((Fn) fnObj).invoke();
+            } finally {
+                Var.popThreadBindings();
+                Thread.currentThread().setContextClassLoader(savedCl);
+            }
+        
+            }
+            case 167: {
+                Object expr = _a;
+            Symbol start = Symbol.intern("start__" + RT.nextID());
+            Symbol ret = Symbol.intern("ret__" + RT.nextID());
+            return PersistentList.createFromArray(letStar,
+                    PersistentVector.createOwning(
+                            start, PersistentList.createFromArray(Symbol.intern("System/nanoTime")),
+                            ret, expr),
+                    PersistentList.createFromArray(Symbol.intern("clojure.core", "println"),
+                            PersistentList.createFromArray(Symbol.intern("clojure.core", "str"),
+                                    "Elapsed time: ",
+                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "/"),
+                                            PersistentList.createFromArray(Symbol.intern("clojure.core", "double"),
+                                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "-"),
+                                                            PersistentList.createFromArray(Symbol.intern("System/nanoTime")),
+                                                            start)),
+                                            1000000.0),
+                                    " msecs")),
+                    ret);
+        
+            }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    private static Object call2(int _id, Object _a, Object _b) {
+        return switch (_id >>> 5) {
+            case 0 -> call2_0(_id, _a, _b);
+            case 1 -> call2_1(_id, _a, _b);
+            case 2 -> call2_2(_id, _a, _b);
+            default -> throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call2_0(int _id, Object _a, Object _b) {
+        switch (_id) {
+            case 0: { Object a = _a; Object b = _b; return (a == b); }
+            case 1: { Object a = _a; Object b = _b; return ((long) RT.compare(a, b)); }
+            case 2: { Object c = _a; Object x = _b; return (((Class<?>) c).isInstance(x)); }
+            case 3: return CoreExtras.isa(_a, _b);
+            case 4: return Numbers.quotient(_a, _b);
+            case 5: return Numbers.remainder(_a, _b);
+            case 6: return Numbers.mod(_a, _b);
+            case 7: return Numbers.bitShiftLeft(_a, _b);
+            case 8: return Numbers.bitShiftRight(_a, _b);
+            case 9: return Numbers.unsignedBitShiftRight(_a, _b);
+            case 10: return Numbers.bitTest(_a, _b);
+            case 11: return Numbers.bitSet(_a, _b);
+            case 12: return Numbers.bitClear(_a, _b);
+            case 13: return Numbers.bitFlip(_a, _b);
+            case 14: return RT.cons(_a, _b);
+            case 15: { Object c = _a; Object i = _b; return (RT.nth(c, (int) Numbers.toLong(i))); }
+            case 16: {
+                Object coll = _a; Object n = _b;
+            long k = Numbers.toLong(n);
+            ISeq s = RT.seq(coll);
+            while (s != null && k > 0) {
+                s = s.next();
+                k--;
+            }
+            return s;
+        
+            }
+            case 17: {
+                Object coll = _a; Object n = _b;
+            long k = Numbers.toLong(n);
+            ISeq s = RT.seq(coll);
+            while (s != null && k > 0) {
+                s = s.next();
+                k--;
+            }
+            return s == null ? PersistentList.EMPTY : s;
+        
+            }
+            case 18: { Object n = _a; Object x = _b; return (repeatNSeq(Numbers.toLong(n), x)); }
+            case 19: { Object n = _a; Object x = _b; return (repeatNSeq(Numbers.toLong(n), x)); }
+            case 20: { Object n = _a; Object f = _b; return (repeatedlyNSeq(Numbers.toLong(n), (Fn) f)); }
+            case 21: { Object f = _a; Object x = _b; return (iterateSeq((Fn) f, x)); }
+            case 22: { Object n = _a; Object coll = _b; return (takeSeq(Numbers.toLong(n), RT.seq(coll))); }
+            case 23: { Object pred = _a; Object coll = _b; return (takeWhileSeq((Fn) pred, RT.seq(coll))); }
+            case 24: {
+                Object n = _a; Object coll = _b;
+            long step = Numbers.toLong(n);
+            if (step <= 0) return repeatInfSeq(RT.first(coll));
+            return takeNthSeq(step, RT.seq(coll));
+        
+            }
+            case 25: {
+                Object n = _a; Object coll = _b;
+            int k = (int) Numbers.toLong(n);
+            if (k <= 0) return null;
+            ArrayDeque<Object> q = new ArrayDeque<>(k);
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                if (q.size() == k) q.removeFirst();
+                q.addLast(s.first());
+            }
+            return q.isEmpty() ? null : PersistentList.create(new ArrayList<>(q));
+        
+            }
+            case 26: { Object n = _a; Object coll = _b; return (dropSeq(Numbers.toLong(n), coll)); }
+            case 27: { Object pred = _a; Object coll = _b; return (dropWhileSeq((Fn) pred, coll)); }
+            case 28: { Object n = _a; Object coll = _b; return (dropLastSeq((int) Numbers.toLong(n), coll)); }
+            case 29: { Object f = _a; Object coll = _b; return (mapIndexedSeq((Fn) f, 0L, RT.seq(coll))); }
+            case 30: { Object f = _a; Object coll = _b; return (keepSeq((Fn) f, RT.seq(coll))); }
+            case 31: { Object f = _a; Object coll = _b; return (keepIndexedSeq((Fn) f, 0L, RT.seq(coll))); }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call2_1(int _id, Object _a, Object _b) {
+        switch (_id) {
+            case 32: { Object pred = _a; Object coll = _b; return (filterSeq((Fn) pred, RT.seq(coll), false)); }
+            case 33: { Object pred = _a; Object coll = _b; return (filterSeq((Fn) pred, RT.seq(coll), true)); }
+            case 34: {
+                Object pred = _a; Object coll = _b;
+            Fn p = (Fn) pred;
+            if (coll instanceof PersistentVector pv) {
+                return filtervVectorRange(p, pv, 0, pv.cnt);
+            }
+            if (coll instanceof PersistentVector.SubVec sv) {
+                return filtervVectorRange(p, sv.v, sv.start, sv.end);
+            }
+            if (coll instanceof PersistentList.EmptyList || coll == null) {
+                return PersistentVector.EMPTY;
+            }
+            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
+            if (coll instanceof PersistentList pl) {
+                PersistentList cur = pl;
+                while (true) {
+                    Object item = cur.first;
+                    if (RT.truthy(p.invoke(item))) tv = tv.conj(item);
+                    if (cur.rest instanceof PersistentList nextPl) {
+                        cur = nextPl;
+                    } else {
+                        for (ISeq s = cur.next(); s != null; s = s.next()) {
+                            Object it = s.first();
+                            if (RT.truthy(p.invoke(it))) tv = tv.conj(it);
+                        }
+                        return tv.persistent();
+                    }
+                }
+            }
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                Object item = s.first();
+                if (RT.truthy(p.invoke(item))) tv = tv.conj(item);
+            }
+            return tv.persistent();
+        
+            }
+            case 35: { Object f = _a; Object coll = _b; return (reduce2((Fn) f, coll)); }
+            case 36: {
+                Object f = _a; Object coll = _b;
+                    ISeq s = RT.seq(coll);
+                    if (s == null) return PersistentList.createFromArray(((Fn) f).invoke());
+                    return reductionsSeq((Fn) f, s.first(), s.next());
+                
+            }
+            case 37: {
+                Object pred = _a; Object coll = _b;
+            Fn p = (Fn) pred;
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                Object res = p.invoke(s.first());
+                if (RT.truthy(res)) return res;
+            }
+            return null;
+        
+            }
+            case 38: {
+                Object pred = _a; Object coll = _b;
+            Fn p = (Fn) pred;
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                if (!RT.truthy(p.invoke(s.first()))) return Boolean.FALSE;
+            }
+            return Boolean.TRUE;
+        
+            }
+            case 39: {
+                Object pred = _a; Object coll = _b;
+            Fn p = (Fn) pred;
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                if (!RT.truthy(p.invoke(s.first()))) return Boolean.TRUE;
+            }
+            return Boolean.FALSE;
+        
+            }
+            case 40: {
+                Object pred = _a; Object coll = _b;
+            Fn p = (Fn) pred;
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                if (RT.truthy(p.invoke(s.first()))) return Boolean.FALSE;
+            }
+            return Boolean.TRUE;
+        
+            }
+            case 41: {
+                Object sep = _a; Object coll = _b;
+            ISeq s = RT.seq(coll);
+            if (s == null) return PersistentList.EMPTY;
+            return interposeSeq(sep, s, true);
+        
+            }
+            case 42: { Object n = _a; Object coll = _b; return (partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(n), null, RT.seq(coll), true, false)); }
+            case 43: { Object n = _a; Object coll = _b; return (partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(n), null, RT.seq(coll), true, true)); }
+            case 44: { Object f = _a; Object coll = _b; return (partitionBySeq((Fn) f, RT.seq(coll))); }
+            case 45: {
+                Object n = _a; Object coll = _b;
+            long k = Numbers.toLong(n);
+            return PersistentVector.createOwning(takeSeq(k, RT.seq(coll)), dropSeq(k, coll));
+        
+            }
+            case 46: {
+                Object n = _a; Object coll = _b;
+            long k = Numbers.toLong(n);
+            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
+            ISeq s = RT.seq(coll);
+            for (long i = 0; i < k && s != null; i++) {
+                tv = tv.conj(s.first());
+                s = s.next();
+            }
+            return PersistentVector.createOwning(tv.persistent(), s == null ? PersistentList.EMPTY : s);
+        
+            }
+            case 47: { Object pred = _a; Object coll = _b; return (PersistentVector.createOwning(takeWhileSeq((Fn) pred, RT.seq(coll)), dropWhileSeq((Fn) pred, coll))); }
+            case 48: {
+                Object f = _a; Object coll = _b;
+            Fn fn = (Fn) f;
+            Map<RT.EquivKey, PersistentVector.TransientVector> groups = new LinkedHashMap<>();
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                Object item = s.first();
+                Object k = fn.invoke(item);
+                groups.computeIfAbsent(new RT.EquivKey(k), _k -> PersistentVector.EMPTY.asTransient()).conj(item);
+            }
+            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
+            for (Map.Entry<RT.EquivKey, PersistentVector.TransientVector> e : groups.entrySet()) {
+                ret = ret.assoc(e.getKey().val, e.getValue().persistent());
+            }
+            return ret.persistent();
+        
+            }
+            case 49: {
+                Object n = _a; Object coll = _b; dorun((int) Numbers.toLong(n), RT.seq(coll)); return coll; 
+            }
+            case 50: {
+                Object n = _a; Object coll = _b; dorun((int) Numbers.toLong(n), RT.seq(coll)); return null; 
+            }
+            case 51: {
+                Object proc = _a; Object coll = _b;
+            Fn f = (Fn) proc;
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) f.invoke(s.first());
+            return null;
+        
+            }
+            case 52: { Object to = _a; Object from = _b; return (intoImpl(to, null, from)); }
+            case 53: return RT.get(_a, _b);
+            case 54: { Object m = _a; Object ks = _b; return (getIn(m, ks, null)); }
+            case 55: return RT.find(_a, _b);
+            case 56: return RT.contains(_a, _b);
+            case 57: {
+                Object m = _a; Object keyseq = _b;
+            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
+            for (ISeq s = RT.seq(keyseq); s != null; s = s.next()) {
+                Object k = s.first();
+                Object entry = RT.find(m, k);
+                if (entry instanceof Map.Entry<?, ?> me) {
+                    ret = ret.assoc(me.getKey(), me.getValue());
+                }
+            }
+            return ret.persistent();
+        
+            }
+            case 58: {
+                Object keys = _a; Object vals = _b;
+            PersistentHashMap.TransientHashMap ret = PersistentHashMap.EMPTY.asTransient();
+            ISeq ks = RT.seq(keys);
+            ISeq vs = RT.seq(vals);
+            while (ks != null && vs != null) {
+                ret = ret.assoc(ks.first(), vs.first());
+                ks = ks.next();
+                vs = vs.next();
+            }
+            return ret.persistent();
+        
+            }
+            case 59: {
+                Object v = _a; Object start = _b;
+                    int s = (int) Numbers.toLong(start);
+                    if (v instanceof PersistentVector pv) return pv.subVec(s, pv.cnt);
+                    if (v instanceof PersistentVector.SubVec sv) return sv.subVec(s, sv.count());
+                    throw new ClassCastException("subvec expects a vector: " + v);
+                
+            }
+            case 60: {
+                Object cmp = _a; Object coll = _b;
+                    Object[] arr = RT.toArray(coll);
+                    Arrays.sort(arr, toComparator(cmp));
+                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
+                
+            }
+            case 61: {
+                Object keyfn = _a; Object coll = _b;
+                    Fn kf = (Fn) keyfn;
+                    Object[] arr = RT.toArray(coll);
+                    Arrays.sort(arr, (a, b) -> RT.compare(kf.invoke(a), kf.invoke(b)));
+                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
+                
+            }
+            case 62: { Object s = _a; Object start = _b; return (((String) s).substring((int) Numbers.toLong(start))); }
+            case 63: { Object nsName = _a; Object name = _b; return (Symbol.intern((String) nsName, (String) name)); }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call2_2(int _id, Object _a, Object _b) {
+        switch (_id) {
+            case 64: { Object nsName = _a; Object name = _b; return (Keyword.intern((String) nsName, (String) name)); }
+            case 65: { Object nsName = _a; Object name = _b; return (Keyword.find((String) nsName, (String) name)); }
+            case 66: { Object p = _a; Object s = _b; return (((Pattern) p).matcher((CharSequence) s)); }
+            case 67: {
+                Object p = _a; Object s = _b;
+                    Matcher mat = ((Pattern) p).matcher((CharSequence) s);
+                    if (!mat.find()) return null;
+                    int gc = mat.groupCount();
+                    if (gc == 0) return mat.group();
+                    Object[] ret = new Object[gc + 1];
+                    for (int i = 0; i <= gc; i++) ret[i] = mat.group(i);
+                    return PersistentVector.createOwning(ret);
+                
+            }
+            case 68: {
+                Object p = _a; Object s = _b;
+            Matcher mat = ((Pattern) p).matcher((CharSequence) s);
+            if (!mat.matches()) return null;
+            int gc = mat.groupCount();
+            if (gc == 0) return mat.group();
+            Object[] ret = new Object[gc + 1];
+            for (int i = 0; i <= gc; i++) ret[i] = mat.group(i);
+            return PersistentVector.createOwning(ret);
+        
+            }
+            case 69: {
+                Object p = _a; Object s = _b;
+            Matcher mat = ((Pattern) p).matcher((CharSequence) s);
+            List<Object> results = new ArrayList<>();
+            int gc = mat.groupCount();
+            while (mat.find()) {
+                if (gc == 0) {
+                    results.add(mat.group());
+                } else {
+                    Object[] ret = new Object[gc + 1];
+                    for (int i = 0; i <= gc; i++) ret[i] = mat.group(i);
+                    results.add(PersistentVector.createOwning(ret));
+                }
+            }
+            return results.isEmpty() ? null : PersistentList.create(results);
+        
+            }
+            case 70: { Object opts = _a; Object s = _b; return (Reader.readString((Map<?, ?>) opts, (String) s)); }
+            case 71: {
+                Object f = _a; Object content = _b;
+            try {
+                Path p = (f instanceof File file) ? file.toPath() : Path.of(f.toString());
+                Files.writeString(p, String.valueOf(content), StandardCharsets.UTF_8);
+                return null;
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        
+            }
+            case 72: { Object a = _a; Object v = _b; return (((Atom) a).reset(v)); }
+            case 73: {
+                Object a = _a; Object v = _b;
+            Atom atom = (Atom) a;
+            for (;;) {
+                Object oldv = atom.deref();
+                if (atom.compareAndSet(oldv, v)) return PersistentVector.createOwning(oldv, v);
+            }
+        
+            }
+            case 74: { Object v = _a; Object val = _b; return (((Atom.Volatile) v).reset(val)); }
+            case 75: { Object p = _a; Object v = _b; return (((Atom.Promise) p).deliver(v)); }
+            case 76: {
+                Object ref = _a; Object key = _b;
+            if (ref instanceof Atom a) a.removeWatch(key);
+            else if (ref instanceof Var v) v.removeWatch(key);
+            else if (ref instanceof Agent ag) ag.removeWatch(key);
+            else if (ref instanceof Ref r) r.removeWatch(key);
+            return ref;
+        
+            }
+            case 77: {
+                Object ref = _a; Object fn = _b;
+            if (ref instanceof Atom a) a.setValidator((Fn) fn);
+            else if (ref instanceof Agent ag) ag.setValidator((Fn) fn);
+            else if (ref instanceof Ref r) r.setValidator((Fn) fn);
+            return null;
+        
+            }
+            case 78: { Object x = _a; Object m = _b; return (((IObj) x).withMeta((PersistentHashMap) m)); }
+            case 79: { Object v = _a; Object val = _b; return (((Var) v).set(val)); }
+            case 80: {
+                Object alias = _a; Object targetNsSym = _b;
+            Namespace target = Namespace.find((Symbol) targetNsSym);
+            if (target == null) throw new RuntimeException("No namespace: " + targetNsSym);
+            RT.currentNS().addAlias((Symbol) alias, target);
+            return null;
+        
+            }
+            case 81: { Object mf = _a; Object val = _b; return (((MultiFn) mf).getMethod(val)); }
+            case 82: { Object mf = _a; Object val = _b; return (((MultiFn) mf).removeMethod(val)); }
+            case 83: { Object msg = _a; Object data = _b; return (new ExceptionInfo((String) msg, (PersistentHashMap) data, null)); }
+            case 84: { Object name = _a; Object expr = _b; return (PersistentList.createFromArray(
+                        Symbol.intern("when-not"),
+                        PersistentList.createFromArray(Symbol.intern("clojure.core", "bound?"),
+                                PersistentList.createFromArray(Symbol.intern("var"), name)),
+                        PersistentList.createFromArray(defSym, name, expr))); }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object call3(int _id, Object _a, Object _b, Object _c) {
+        switch (_id) {
+            case 0: return CoreExtras.isa(_a, _b, _c);
+            case 1: { Object c = _a; Object i = _b; Object nf = _c; return (RT.nth(c, (int) Numbers.toLong(i), nf)); }
+            case 2: { Object f = _a; Object val = _b; Object coll = _c; return (reduce3((Fn) f, val, coll)); }
+            case 3: {
+                Object f = _a; Object init = _b; Object coll = _c;
+            Fn fn = (Fn) f;
+            if (coll == null) return init;
+            if (coll instanceof PersistentHashMap phm) {
+                return phm.reduceKV(fn, init);
+            }
+            if (coll instanceof PersistentVector pv) {
+                Object acc = init;
+                for (int i = 0; i < pv.cnt; i++) {
+                    acc = fn.invoke(acc, (long) i, pv.nth(i));
+                    if (acc instanceof Reduced r) return r.deref();
+                }
+                return acc;
+            }
+            Object acc = init;
+            for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                acc = fn.invoke(acc, e.getKey(), e.getValue());
+                if (acc instanceof Reduced r) return r.deref();
+            }
+            return acc;
+        
+            }
+            case 4: { Object f = _a; Object init = _b; Object coll = _c; return (reductionsSeq((Fn) f, init, RT.seq(coll))); }
+            case 5: { Object n = _a; Object step = _b; Object coll = _c; return (partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(step), null, RT.seq(coll), true, false)); }
+            case 6: { Object n = _a; Object step = _b; Object coll = _c; return (partitionSeq((int) Numbers.toLong(n), (int) Numbers.toLong(step), null, RT.seq(coll), true, true)); }
+            case 7: { Object branchP = _a; Object childrenFn = _b; Object root = _c; return (treeSeqWalk((Fn) branchP, (Fn) childrenFn, root)); }
+            case 8: { Object to = _a; Object xform = _b; Object from = _c; return (intoImpl(to, (Fn) xform, from)); }
+            case 9: return RT.get(_a, _b, _c);
+            case 10: return Core.getIn(_a, _b, _c);
+            case 11: { Object m = _a; Object ks = _b; Object v = _c; return (assocIn(m, RT.seq(ks), v)); }
+            case 12: {
+                Object v = _a; Object start = _b; Object end = _c;
+                    int s = (int) Numbers.toLong(start);
+                    int e = (int) Numbers.toLong(end);
+                    if (v instanceof PersistentVector pv) return pv.subVec(s, e);
+                    if (v instanceof PersistentVector.SubVec sv) return sv.subVec(s, e);
+                    throw new ClassCastException("subvec expects a vector: " + v);
+                
+            }
+            case 13: {
+                Object keyfn = _a; Object cmp = _b; Object coll = _c;
+                    Fn kf = (Fn) keyfn;
+                    Comparator<Object> c = toComparator(cmp);
+                    Object[] arr = RT.toArray(coll);
+                    Arrays.sort(arr, (a, b) -> c.compare(kf.invoke(a), kf.invoke(b)));
+                    return arr.length == 0 ? PersistentList.EMPTY : PersistentList.createFromArray(arr);
+                
+            }
+            case 14: { Object s = _a; Object start = _b; Object end = _c; return (((String) s).substring((int) Numbers.toLong(start), (int) Numbers.toLong(end))); }
+            case 15: { Object a = _a; Object o = _b; Object n = _c; return (((Atom) a).compareAndSet(o, n)); }
+            case 16: {
+                Object ref = _a; Object key = _b; Object fn = _c;
+            if (ref instanceof Atom a) a.addWatch(key, (Fn) fn);
+            else if (ref instanceof Var v) v.addWatch(key, (Fn) fn);
+            else if (ref instanceof Agent ag) ag.addWatch(key, (Fn) fn);
+            else if (ref instanceof Ref r) r.addWatch(key, (Fn) fn);
+            return ref;
+        
+            }
+            case 17: { Object msg = _a; Object data = _b; Object cause = _c; return (new ExceptionInfo((String) msg, (PersistentHashMap) data, (Throwable) cause)); }
+            case 18: { Object name = _a; Object dispatchFn = _b; Object defaultVal = _c; return (new MultiFn(name.toString(), (Fn) dispatchFn, defaultVal)); }
+            case 19: { Object mf = _a; Object dispatchVal = _b; Object methodFn = _c; return (((MultiFn) mf).addMethod(dispatchVal, (Fn) methodFn)); }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    private static Object callV(int _id, Object[] _args) {
+        return switch (_id >>> 5) {
+            case 0 -> callV_0(_id, _args);
+            case 1 -> callV_1(_id, _args);
+            case 2 -> callV_2(_id, _args);
+            case 3 -> callV_3(_id, _args);
+            default -> throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object callV_0(int _id, Object[] _args) {
+        switch (_id) {
+            case 0: {
+                Object[] args = _args;
+            if (args.length <= 1) return Boolean.TRUE;
+            Object first = args[0];
+            for (int i = 1; i < args.length; i++) {
+                if (!RT.equiv(first, args[i])) return Boolean.FALSE;
+            }
+            return Boolean.TRUE;
+        
+            }
+            case 1: {
+                Object[] args = _args;
+            if (args.length <= 1) return Boolean.FALSE;
+            Object first = args[0];
+            for (int i = 1; i < args.length; i++) {
+                if (!RT.equiv(first, args[i])) return Boolean.TRUE;
+            }
+            return Boolean.FALSE;
+        
+            }
+            case 2: {
+                Object[] args = _args;
+            if (args.length <= 1) return Boolean.TRUE;
+            for (int i = 0; i < args.length - 1; i++) {
+                if (!Numbers.equal(args[i], args[i + 1])) return Boolean.FALSE;
+            }
+            return Boolean.TRUE;
+        
+            }
+            case 3: {
+                Object[] args = _args;
+            if (args.length <= 1) return Boolean.TRUE;
+            Set<RT.EquivKey> seen = new HashSet<>(args.length * 2);
+            for (Object a : args) {
+                if (!seen.add(new RT.EquivKey(a))) return Boolean.FALSE;
+            }
+            return Boolean.TRUE;
+        
+            }
+            case 4: {
+                Object[] args = _args;
+            if (args.length == 0) throw new IllegalArgumentException("Wrong number of args (0) passed to: /");
+            if (args.length == 1) return Numbers.divide(1L, args[0]);
+            Object acc = args[0];
+            for (int i = 1; i < args.length; i++) acc = Numbers.divide(acc, args[i]);
+            return acc;
+        
+            }
+            case 5: {
+                Object[] args = _args;
+            for (int i = 0; i < args.length - 1; i++) if (!Numbers.lt(args[i], args[i + 1])) return Boolean.FALSE;
+            return Boolean.TRUE;
+        
+            }
+            case 6: {
+                Object[] args = _args;
+            for (int i = 0; i < args.length - 1; i++) if (!Numbers.lte(args[i], args[i + 1])) return Boolean.FALSE;
+            return Boolean.TRUE;
+        
+            }
+            case 7: {
+                Object[] args = _args;
+            for (int i = 0; i < args.length - 1; i++) if (!Numbers.gt(args[i], args[i + 1])) return Boolean.FALSE;
+            return Boolean.TRUE;
+        
+            }
+            case 8: {
+                Object[] args = _args;
+            for (int i = 0; i < args.length - 1; i++) if (!Numbers.gte(args[i], args[i + 1])) return Boolean.FALSE;
+            return Boolean.TRUE;
+        
+            }
+            case 9: {
+                Object[] args = _args;
+            Object ret = args[0];
+            for (int i = 1; i < args.length; i++) ret = Numbers.max(ret, args[i]);
+            return ret;
+        
+            }
+            case 10: {
+                Object[] args = _args;
+            Object ret = args[0];
+            for (int i = 1; i < args.length; i++) ret = Numbers.min(ret, args[i]);
+            return ret;
+        
+            }
+            case 11: {
+                Object[] args = _args;
+            double r = ThreadLocalRandom.current().nextDouble();
+            return args.length == 0 ? r : r * Numbers.toDouble(args[0]);
+        
+            }
+            case 12: {
+                Object[] args = _args;
+            long r = Numbers.toLong(args[0]);
+            for (int i = 1; i < args.length; i++) r &= Numbers.toLong(args[i]);
+            return r;
+        
+            }
+            case 13: {
+                Object[] args = _args;
+            long r = Numbers.toLong(args[0]);
+            for (int i = 1; i < args.length; i++) r |= Numbers.toLong(args[i]);
+            return r;
+        
+            }
+            case 14: {
+                Object[] args = _args;
+            long r = Numbers.toLong(args[0]);
+            for (int i = 1; i < args.length; i++) r ^= Numbers.toLong(args[i]);
+            return r;
+        
+            }
+            case 15: {
+                Object[] args = _args;
+            long r = Numbers.toLong(args[0]);
+            for (int i = 1; i < args.length; i++) r &= ~Numbers.toLong(args[i]);
+            return r;
+        
+            }
+            case 16: { Object[] args = _args; return (switch (args.length) {
+            case 0 -> rangeSeq(0L, Long.MAX_VALUE, 1L);
+            case 1 -> rangeSeq(0L, Numbers.toLong(args[0]), 1L);
+            case 2 -> rangeSeq(Numbers.toLong(args[0]), Numbers.toLong(args[1]), 1L);
+            case 3 -> rangeSeq(Numbers.toLong(args[0]), Numbers.toLong(args[1]), Numbers.toLong(args[2]));
+            default -> throw new IllegalArgumentException("Wrong number of args to range");
+        }); }
+            case 17: {
+                Object[] args = _args;
+            if (args.length < 2) throw new IllegalArgumentException("map requires at least 2 args");
+            Fn f = (Fn) args[0];
+            if (args.length == 2) return map1Seq(f, RT.seq(args[1]));
+            ISeq[] seqs = new ISeq[args.length - 1];
+            for (int i = 0; i < seqs.length; i++) seqs[i] = RT.seq(args[i + 1]);
+            return mapNSeq(f, seqs);
+        
+            }
+            case 18: {
+                Object[] args = _args;
+            if (args.length < 2) throw new IllegalArgumentException("mapv requires at least 2 args");
+            Fn f = (Fn) args[0];
+            if (args.length == 2) {
+                Object coll = args[1];
+                if (coll instanceof PersistentVector pv) {
+                    return mapvVectorRange(f, pv, 0, pv.cnt);
+                }
+                if (coll instanceof PersistentVector.SubVec sv) {
+                    return mapvVectorRange(f, sv.v, sv.start, sv.end);
+                }
+                if (coll instanceof PersistentList.EmptyList || coll == null) {
+                    return PersistentVector.EMPTY;
+                }
+                PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
+                if (coll instanceof PersistentList pl) {
+                    PersistentList cur = pl;
+                    while (true) {
+                        tv = tv.conj(f.invoke(cur.first));
+                        if (cur.rest instanceof PersistentList nextPl) {
+                            cur = nextPl;
+                        } else {
+                            for (ISeq s = cur.next(); s != null; s = s.next()) tv = tv.conj(f.invoke(s.first()));
+                            return tv.persistent();
+                        }
+                    }
+                }
+                for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
+                    tv = tv.conj(f.invoke(s.first()));
+                }
+                return tv.persistent();
+            }
+            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
+            ISeq[] seqs = new ISeq[args.length - 1];
+            for (int i = 0; i < seqs.length; i++) seqs[i] = RT.seq(args[i + 1]);
+            Object[] callArgs = new Object[seqs.length];
+            while (true) {
+                for (int i = 0; i < seqs.length; i++) {
+                    if (seqs[i] == null) return tv.persistent();
+                    callArgs[i] = seqs[i].first();
+                    seqs[i] = seqs[i].next();
+                }
+                tv = tv.conj(f.applyTo(callArgs));
+            }
+        
+            }
+            case 19: {
+                Object[] args = _args;
+            Fn f = (Fn) args[0];
+            if (args.length == 2) return concatSeq(map1Seq(f, RT.seq(args[1])));
+            ISeq[] seqs = new ISeq[args.length - 1];
+            for (int i = 0; i < seqs.length; i++) seqs[i] = RT.seq(args[i + 1]);
+            return concatSeq(mapNSeq(f, seqs));
+        
+            }
+            case 20: {
+                Object[] args = _args;
+            if (args.length == 0) return PersistentList.EMPTY;
+            return concatSeq(PersistentList.createFromArray(args));
+        
+            }
+            case 21: {
+                Object[] args = _args;
+            if (args.length == 0) return PersistentList.EMPTY;
+            ISeq[] seqs = new ISeq[args.length];
+            for (int i = 0; i < args.length; i++) seqs[i] = RT.seq(args[i]);
+            return interleaveSeq(seqs);
+        
+            }
+            case 22: { Object[] args = _args; return (switch (args.length) {
+            case 2 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[0]), null, RT.seq(args[1]), false, false);
+            case 3 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), null, RT.seq(args[2]), false, false);
+            case 4 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), RT.seq(args[2]), RT.seq(args[3]), false, false);
+            default -> throw new IllegalArgumentException("Wrong number of args to partition");
+        }); }
+            case 23: { Object[] args = _args; return (switch (args.length) {
+            case 2 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[0]), null, RT.seq(args[1]), false, true);
+            case 3 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), null, RT.seq(args[2]), false, true);
+            case 4 -> partitionSeq((int) Numbers.toLong(args[0]), (int) Numbers.toLong(args[1]), RT.seq(args[2]), RT.seq(args[3]), false, true);
+            default -> throw new IllegalArgumentException("Wrong number of args to partitionv");
+        }); }
+            case 24: return PersistentList.createFromArray(_args);
+            case 25: {
+                Object[] args = _args;
+            if (args.length == 0) return PersistentList.EMPTY;
+            if (args.length == 1) return RT.seq(args[0]);
+            ISeq tail = RT.seq(args[args.length - 1]);
+            for (int i = args.length - 2; i >= 0; i--) {
+                tail = RT.cons(args[i], tail);
+            }
+            return tail;
+        
+            }
+            case 26: return PersistentVector.createOwning(_args);
+            case 27: return PersistentHashMap.create(_args);
+            case 28: return PersistentHashMap.create(_args);
+            case 29: return PersistentHashSet.create(_args);
+            case 30: {
+                Object[] args = _args;
+            Object m = args[0];
+            Object k = args[1];
+            Fn f = (Fn) args[2];
+            Object cur = RT.get(m, k);
+            Object newVal = switch (args.length) {
+                case 3 -> f.invoke(cur);
+                case 4 -> f.invoke(cur, args[3]);
+                case 5 -> f.invoke(cur, args[3], args[4]);
+                case 6 -> f.invoke(cur, args[3], args[4], args[5]);
+                default -> {
+                    Object[] callArgs = new Object[args.length - 2];
+                    callArgs[0] = cur;
+                    System.arraycopy(args, 3, callArgs, 1, args.length - 3);
+                    yield f.applyTo(callArgs);
+                }
+            };
+            return RT.assoc(m, k, newVal);
+        
+            }
+            case 31: {
+                Object[] args = _args;
+            Object m = args[0];
+            ISeq ks = RT.seq(args[1]);
+            Fn f = (Fn) args[2];
+            Object[] extra = new Object[args.length - 3];
+            System.arraycopy(args, 3, extra, 0, extra.length);
+            return updateIn(m, ks, f, extra);
+        
+            }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object callV_1(int _id, Object[] _args) {
+        switch (_id) {
+            case 32: {
+                Object[] args = _args;
+            PersistentHashMap ret = PersistentHashMap.EMPTY;
+            boolean allNil = true;
+            for (Object a : args) {
+                if (a != null) {
+                    allNil = false;
+                    for (ISeq s = RT.seq(a); s != null; s = s.next()) {
+                        Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                        ret = ret.assoc(e.getKey(), e.getValue());
+                    }
+                }
+            }
+            return allNil ? null : ret;
+        
+            }
+            case 33: {
+                Object[] args = _args;
+            Fn f = (Fn) args[0];
+            PersistentHashMap ret = PersistentHashMap.EMPTY;
+            boolean allNil = true;
+            for (int i = 1; i < args.length; i++) {
+                if (args[i] != null) {
+                    allNil = false;
+                    for (ISeq s = RT.seq(args[i]); s != null; s = s.next()) {
+                        Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                        Object k = e.getKey();
+                        Object v = e.getValue();
+                        if (ret.containsKey(k)) {
+                            ret = ret.assoc(k, f.invoke(ret.valAt(k), v));
+                        } else {
+                            ret = ret.assoc(k, v);
+                        }
+                    }
+                }
+            }
+            return allNil ? null : ret;
+        
+            }
+            case 34: {
+                Object[] args = _args;
+            Object s = args[0];
+            if (s instanceof PersistentTreeSet pts) {
+                for (int i = 1; i < args.length; i++) pts = pts.disjoin(args[i]);
+                return pts;
+            }
+            if (s instanceof PersistentColl pc) {
+                for (int i = 1; i < args.length; i++) pc = (PersistentColl) pc.without(args[i]);
+                return pc;
+            }
+            PersistentHashSet set = (PersistentHashSet) s;
+            for (int i = 1; i < args.length; i++) set = set.disjoin(args[i]);
+            return set;
+        
+            }
+            case 35: {
+                Object[] args = _args;
+            String fmt = (String) args[0];
+            Object[] rest = new Object[args.length - 1];
+            System.arraycopy(args, 1, rest, 0, rest.length);
+            return String.format(fmt, rest);
+        
+            }
+            case 36: {
+                Object[] args = _args;
+            String prefix = args.length == 0 ? "G__" : args[0].toString();
+            return Symbol.intern(prefix + RT.nextID());
+        
+            }
+            case 37: { Object[] args = _args; return (joinPrint(args, true)); }
+            case 38: { Object[] args = _args; return (joinPrint(args, true) + System.lineSeparator()); }
+            case 39: { Object[] args = _args; return (joinPrint(args, false)); }
+            case 40: { Object[] args = _args; return (joinPrint(args, false) + System.lineSeparator()); }
+            case 41: {
+                Object[] args = _args; writeOut(joinPrint(args, true), false); return null; 
+            }
+            case 42: {
+                Object[] args = _args; writeOut(joinPrint(args, true), true); return null; 
+            }
+            case 43: {
+                Object[] args = _args; writeOut(joinPrint(args, false), false); return null; 
+            }
+            case 44: {
+                Object[] args = _args; writeOut(joinPrint(args, false), true); return null; 
+            }
+            case 45: {
+                Object[] args = _args;
+            String fmt = (String) args[0];
+            Object[] rest = new Object[args.length - 1];
+            System.arraycopy(args, 1, rest, 0, rest.length);
+            writeOut(String.format(fmt, rest), false);
+            return null;
+        
+            }
+            case 46: {
+                Object[] args = _args;
+            if (args.length == 0) throw new IllegalArgumentException("Wrong number of args (0) passed to: slurp");
+            Charset charset = StandardCharsets.UTF_8;
+            Keyword encKw = Keyword.intern("encoding");
+            for (int i = 1; i + 1 < args.length; i += 2) {
+                if (encKw.equals(args[i]) && args[i + 1] != null) {
+                    charset = Charset.forName(args[i + 1].toString());
+                }
+            }
+            return slurpImpl(args[0], charset);
+        
+            }
+            case 47: {
+                Object[] args = _args;
+            Fn f = (Fn) args[0];
+            if (args.length == 2) return f.applyTo(RT.toArray(args[1]));
+            List<Object> list = new ArrayList<>();
+            for (int i = 1; i < args.length - 1; i++) list.add(args[i]);
+            for (ISeq s = RT.seq(args[args.length - 1]); s != null; s = s.next()) list.add(s.first());
+            return f.applyTo(list.toArray());
+        
+            }
+            case 48: {
+                Object[] pArgs = _args;
+            Fn f = (Fn) pArgs[0];
+            Object[] fixed = new Object[pArgs.length - 1];
+            System.arraycopy(pArgs, 1, fixed, 0, fixed.length);
+            return Fn.ofVarargs("partial", callArgs -> {
+                Object[] all = new Object[fixed.length + callArgs.length];
+                System.arraycopy(fixed, 0, all, 0, fixed.length);
+                System.arraycopy(callArgs, 0, all, fixed.length, callArgs.length);
+                return f.applyTo(all);
+            });
+        
+            }
+            case 49: {
+                Object[] fns = _args;
+            if (fns.length == 0) return Fn.of1("identity", x -> x);
+            if (fns.length == 1) return fns[0];
+            return Fn.ofVarargs("comp", args -> {
+                Object res = ((Fn) fns[fns.length - 1]).applyTo(args);
+                for (int i = fns.length - 2; i >= 0; i--) {
+                    res = ((Fn) fns[i]).invoke(res);
+                }
+                return res;
+            });
+        
+            }
+            case 50: { Object[] fns = _args; return (Fn.ofVarargs("juxt", args -> {
+            Object[] res = new Object[fns.length];
+            for (int i = 0; i < fns.length; i++) {
+                res[i] = ((Fn) fns[i]).applyTo(args);
+            }
+            return PersistentVector.createOwning(res);
+        })); }
+            case 51: {
+                Object[] fArgs = _args;
+            Fn f = (Fn) fArgs[0];
+            Object[] defaults = new Object[fArgs.length - 1];
+            System.arraycopy(fArgs, 1, defaults, 0, defaults.length);
+            return Fn.ofVarargs("fnil", callArgs -> {
+                Object[] patched = callArgs.clone();
+                int limit = Math.min(patched.length, defaults.length);
+                for (int i = 0; i < limit; i++) {
+                    if (patched[i] == null) patched[i] = defaults[i];
+                }
+                return f.applyTo(patched);
+            });
+        
+            }
+            case 52: {
+                Object[] args = _args;
+            Fn f = (Fn) args[0];
+            Object[] rest = new Object[args.length - 1];
+            System.arraycopy(args, 1, rest, 0, rest.length);
+            Object ret = f.applyTo(rest);
+            while (ret instanceof Fn nextFn && !(ret instanceof Keyword || ret instanceof Symbol
+                    || ret instanceof PersistentVector || ret instanceof PersistentHashMap || ret instanceof PersistentHashSet)) {
+                ret = nextFn.invoke();
+            }
+            return ret;
+        
+            }
+            case 53: { Object[] preds = _args; return (Fn.ofVarargs("every-pred", args -> {
+            for (Object p : preds) {
+                Fn pred = (Fn) p;
+                for (Object a : args) {
+                    if (!RT.truthy(pred.invoke(a))) return Boolean.FALSE;
+                }
+            }
+            return Boolean.TRUE;
+        })); }
+            case 54: { Object[] preds = _args; return (Fn.ofVarargs("some-fn", args -> {
+            for (Object p : preds) {
+                Fn pred = (Fn) p;
+                for (Object a : args) {
+                    Object r = pred.invoke(a);
+                    if (RT.truthy(r)) return r;
+                }
+            }
+            return null;
+        })); }
+            case 55: {
+                Object[] args = _args;
+            if (args.length == 1) return new Atom(args[0]);
+            PersistentHashMap meta = null;
+            Fn validator = null;
+            for (int i = 1; i < args.length; i += 2) {
+                if (Keyword.intern("meta").equals(args[i])) meta = (PersistentHashMap) args[i + 1];
+                else if (Keyword.intern("validator").equals(args[i])) validator = (Fn) args[i + 1];
+            }
+            Atom a = new Atom(args[0], meta);
+            if (validator != null) a.setValidator(validator);
+            return a;
+        
+            }
+            case 56: {
+                Object[] args = _args;
+            Atom a = (Atom) args[0];
+            Fn f = (Fn) args[1];
+            for (;;) {
+                Object oldv = a.deref();
+                Object[] callArgs = new Object[args.length - 1];
+                callArgs[0] = oldv;
+                System.arraycopy(args, 2, callArgs, 1, args.length - 2);
+                Object newv = f.applyTo(callArgs);
+                if (a.compareAndSet(oldv, newv)) return PersistentVector.createOwning(oldv, newv);
+            }
+        
+            }
+            case 57: {
+                Object[] args = _args;
+            if (args.length < 2) throw new IllegalArgumentException("vswap! requires at least 2 arguments");
+            Symbol volSym = Symbol.intern("vol__" + RT.nextID());
+            List<Object> call = new ArrayList<>(args.length);
+            call.add(args[1]);
+            call.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "deref"), volSym));
+            for (int i = 2; i < args.length; i++) call.add(args[i]);
+            return PersistentList.createFromArray(
+                    Symbol.intern("let*"),
+                    PersistentVector.createOwning(volSym, args[0]),
+                    PersistentList.createFromArray(
+                            Symbol.intern("clojure.core", "vreset!"),
+                            volSym,
+                            PersistentList.create(call)));
+        
+            }
+            case 58: {
+                Object[] args = _args;
+            Fn f = (Fn) args[0];
+            ISeq rets;
+            if (args.length == 2) {
+                rets = pmapFutures1(f, RT.seq(args[1]));
+            } else {
+                ISeq[] seqs = new ISeq[args.length - 1];
+                for (int i = 0; i < seqs.length; i++) seqs[i] = RT.seq(args[i + 1]);
+                rets = pmapFuturesN(f, seqs);
+            }
+            int procs = Runtime.getRuntime().availableProcessors() + 2;
+            ISeq ahead = rets;
+            for (int i = 0; i < procs && ahead != null; i++) {
+                ahead = RT.next(ahead);
+            }
+            return pmapStep(rets, ahead);
+        
+            }
+            case 59: {
+                Object[] args = _args;
+            IObj obj = (IObj) args[0];
+            Fn f = (Fn) args[1];
+            Object[] callArgs = new Object[args.length - 1];
+            callArgs[0] = obj.meta();
+            System.arraycopy(args, 2, callArgs, 1, args.length - 2);
+            return obj.withMeta((PersistentHashMap) f.applyTo(callArgs));
+        
+            }
+            case 60: {
+                Object[] args = _args;
+            Var v = (Var) args[0];
+            Fn f = (Fn) args[1];
+            Object[] rest = new Object[args.length - 2];
+            System.arraycopy(args, 2, rest, 0, rest.length);
+            return v.alterRoot(f, rest);
+        
+            }
+            case 61: {
+                Object[] args = _args;
+            for (Object o : args) if (!((Var) o).isBound()) return Boolean.FALSE;
+            return Boolean.TRUE;
+        
+            }
+            case 62: {
+                Object[] args = _args;
+            Namespace target = Namespace.find((Symbol) args[0]);
+            if (target == null) throw new RuntimeException("No namespace: " + args[0]);
+            Set<Symbol> exclude = new HashSet<>();
+            Set<Symbol> only = null;
+            Map<Symbol, Symbol> rename = new HashMap<>();
+            for (int i = 1; i + 1 < args.length; i += 2) {
+                Object opt = args[i];
+                Object val = args[i + 1];
+                if (Keyword.intern("exclude").equals(opt)) {
+                    for (ISeq s = RT.seq(val); s != null; s = s.next()) exclude.add(((Symbol) s.first()).withMeta(null));
+                } else if (Keyword.intern("only").equals(opt)) {
+                    only = new HashSet<>();
+                    for (ISeq s = RT.seq(val); s != null; s = s.next()) only.add(((Symbol) s.first()).withMeta(null));
+                } else if (Keyword.intern("rename").equals(opt)) {
+                    for (ISeq s = RT.seq(val); s != null; s = s.next()) {
+                        Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                        rename.put(((Symbol) e.getKey()).withMeta(null), ((Symbol) e.getValue()).withMeta(null));
+                    }
+                }
+            }
+            referWithFilters(RT.currentNS(), target, exclude, only, rename);
+            return null;
+        
+            }
+            case 63: {
+                Object[] args = _args;
+            Namespace cur = RT.currentNS();
+            for (Object spec : args) {
+                if (spec instanceof Symbol s) {
+                    Class<?> c = Interop.findClass(s.name);
+                    if (c == null) throw new RuntimeException("Class not found: " + s);
+                    cur.importClass(c);
+                } else if (spec instanceof ISeq || spec instanceof PersistentVector) {
+                    ISeq seq = RT.seq(spec);
+                    if (seq != null) {
+                        String pkg = seq.first().toString();
+                        for (ISeq s = seq.next(); s != null; s = s.next()) {
+                            String clsName = pkg + "." + s.first();
+                            Class<?> c = Interop.findClass(clsName);
+                            if (c == null) throw new RuntimeException("Class not found: " + clsName);
+                            cur.importClass(c);
+                        }
+                    }
+                }
+            }
+            return null;
+        
+            }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object callV_2(int _id, Object[] _args) {
+        switch (_id) {
+            case 64: {
+                Object[] args = _args;
+            for (Object spec : args) processLibSpec(spec, false);
+            return null;
+        
+            }
+            case 65: {
+                Object[] args = _args;
+            for (Object spec : args) processLibSpec(spec, true);
+            return null;
+        
+            }
+            case 66: {
+                Object[] args = _args;
+            throw new IllegalStateException("unquote used outside syntax-quote");
+        
+            }
+            case 67: {
+                Object[] args = _args;
+            throw new IllegalStateException("unquote-splicing used outside syntax-quote");
+        
+            }
+            case 68: {
+                Object[] args = _args;
+            if (args.length < 2) throw new IllegalArgumentException("aget requires array and at least one index");
+            Object cur = RT.aget(args[0], (int) Numbers.toLong(args[1]));
+            for (int i = 2; i < args.length; i++) {
+                cur = RT.aget(cur, (int) Numbers.toLong(args[i]));
+            }
+            return cur;
+        
+            }
+            case 69: {
+                Object[] args = _args;
+            if (args.length < 3) throw new IllegalArgumentException("aset requires array, index(es), and value");
+            Object cur = args[0];
+            for (int i = 1; i < args.length - 2; i++) {
+                cur = RT.aget(cur, (int) Numbers.toLong(args[i]));
+            }
+            return RT.aset(cur, (int) Numbers.toLong(args[args.length - 2]), args[args.length - 1]);
+        
+            }
+            case 70: return Core.expandDefn(_args);
+            case 71: {
+                Object[] args = _args;
+            if (args.length != 1) {
+                throw new IllegalArgumentException("doc requires 1 argument");
+            }
+            Object target = args[0];
+            Object argExpr = (target instanceof ISeq s
+                    && (Symbol.intern("var").equals(s.first()) || quoteSym.equals(s.first())))
+                    ? target
+                    : PersistentList.createFromArray(quoteSym, target);
+            return PersistentList.createFromArray(Symbol.intern("clojure.core", "print-doc"), argExpr);
+        
+            }
+            case 72: {
+                Object[] args = _args;
+            Symbol name = (Symbol) args[0];
+            PersistentHashMap meta = (name.meta() != null ? name.meta() : PersistentHashMap.EMPTY)
+                    .assoc(Keyword.intern("private"), Boolean.TRUE);
+            Object[] patched = args.clone();
+            patched[0] = name.withMeta(meta);
+            return expandDefn(patched);
+        
+            }
+            case 73: {
+                Object[] args = _args;
+            List<Object> list = new ArrayList<>(args.length + 1);
+            list.add(fnStar);
+            Collections.addAll(list, args);
+            return PersistentList.create(list);
+        
+            }
+            case 74: {
+                Object[] args = _args;
+            List<Object> forms = new ArrayList<>();
+            forms.add(doSym);
+            for (Object s : args) forms.add(PersistentList.createFromArray(defSym, s));
+            return PersistentList.create(forms);
+        
+            }
+            case 75: {
+                Object[] args = _args;
+            List<Object> list = new ArrayList<>(args.length + 1);
+            list.add(letStar);
+            Collections.addAll(list, args);
+            return PersistentList.create(list);
+        
+            }
+            case 76: {
+                Object[] args = _args;
+            List<Object> list = new ArrayList<>(args.length + 1);
+            list.add(loopStar);
+            Collections.addAll(list, args);
+            return PersistentList.create(list);
+        
+            }
+            case 77: {
+                Object[] args = _args;
+            List<Object> body = new ArrayList<>();
+            body.add(doSym);
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            return PersistentList.createFromArray(ifSym, args[0], PersistentList.create(body));
+        
+            }
+            case 78: {
+                Object[] args = _args;
+            List<Object> body = new ArrayList<>();
+            body.add(doSym);
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            return PersistentList.createFromArray(ifSym, args[0], null, PersistentList.create(body));
+        
+            }
+            case 79: {
+                Object[] args = _args;
+            Object test = args[0];
+            Object thenForm = args[1];
+            Object elseForm = args.length > 2 ? args[2] : null;
+            return PersistentList.createFromArray(ifSym,
+                    PersistentList.createFromArray(Symbol.intern("clojure.core", "not"), test),
+                    thenForm, elseForm);
+        
+            }
+            case 80: {
+                Object[] args = _args;
+            PersistentVector bindings = (PersistentVector) args[0];
+            Object form = bindings.nth(0);
+            Object tst = bindings.nth(1);
+            Symbol temp = Symbol.intern("temp__" + RT.nextID());
+            List<Object> body = new ArrayList<>();
+            body.add(Symbol.intern("when"));
+            body.add(temp);
+            List<Object> innerLet = new ArrayList<>();
+            innerLet.add(letStar);
+            innerLet.add(PersistentVector.createOwning(form, temp));
+            for (int i = 1; i < args.length; i++) innerLet.add(args[i]);
+            body.add(PersistentList.create(innerLet));
+            return PersistentList.createFromArray(letStar, PersistentVector.createOwning(temp, tst), PersistentList.create(body));
+        
+            }
+            case 81: {
+                Object[] args = _args;
+            PersistentVector bindings = (PersistentVector) args[0];
+            Object form = bindings.nth(0);
+            Object tst = bindings.nth(1);
+            Object thenF = args[1];
+            Object elseF = args.length > 2 ? args[2] : null;
+            Symbol temp = Symbol.intern("temp__" + RT.nextID());
+            return PersistentList.createFromArray(letStar,
+                    PersistentVector.createOwning(temp, tst),
+                    PersistentList.createFromArray(ifSym, temp,
+                            PersistentList.createFromArray(letStar, PersistentVector.createOwning(form, temp), thenF),
+                            elseF));
+        
+            }
+            case 82: {
+                Object[] args = _args;
+            PersistentVector bindings = (PersistentVector) args[0];
+            Object form = bindings.nth(0);
+            Object tst = bindings.nth(1);
+            Symbol temp = Symbol.intern("temp__" + RT.nextID());
+            List<Object> innerLet = new ArrayList<>();
+            innerLet.add(letStar);
+            innerLet.add(PersistentVector.createOwning(form, temp));
+            for (int i = 1; i < args.length; i++) innerLet.add(args[i]);
+            return PersistentList.createFromArray(letStar,
+                    PersistentVector.createOwning(temp, tst),
+                    PersistentList.createFromArray(ifSym,
+                            PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), temp),
+                            null,
+                            PersistentList.create(innerLet)));
+        
+            }
+            case 83: {
+                Object[] args = _args;
+            PersistentVector bindings = (PersistentVector) args[0];
+            Object form = bindings.nth(0);
+            Object tst = bindings.nth(1);
+            Object thenF = args[1];
+            Object elseF = args.length > 2 ? args[2] : null;
+            Symbol temp = Symbol.intern("temp__" + RT.nextID());
+            return PersistentList.createFromArray(letStar,
+                    PersistentVector.createOwning(temp, tst),
+                    PersistentList.createFromArray(ifSym,
+                            PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), temp),
+                            elseF,
+                            PersistentList.createFromArray(letStar, PersistentVector.createOwning(form, temp), thenF)));
+        
+            }
+            case 84: {
+                Object[] args = _args;
+            PersistentVector bindings = (PersistentVector) args[0];
+            Object x = bindings.nth(0);
+            Object xs = bindings.nth(1);
+            Symbol s = Symbol.intern("s__" + RT.nextID());
+            List<Object> body = new ArrayList<>();
+            body.add(letStar);
+            body.add(PersistentVector.createOwning(x, PersistentList.createFromArray(Symbol.intern("clojure.core", "first"), s)));
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            return PersistentList.createFromArray(Symbol.intern("when-let"),
+                    PersistentVector.createOwning(s, PersistentList.createFromArray(Symbol.intern("clojure.core", "seq"), xs)),
+                    PersistentList.create(body));
+        
+            }
+            case 85: {
+                Object[] args = _args;
+            if (args.length == 0) return Boolean.TRUE;
+            if (args.length == 1) return args[0];
+            Object acc = args[args.length - 1];
+            for (int i = args.length - 2; i >= 0; i--) {
+                Symbol temp = Symbol.intern("and__" + RT.nextID());
+                acc = PersistentList.createFromArray(letStar,
+                        PersistentVector.createOwning(temp, args[i]),
+                        PersistentList.createFromArray(ifSym, temp, acc, temp));
+            }
+            return acc;
+        
+            }
+            case 86: {
+                Object[] args = _args;
+            if (args.length == 0) return null;
+            if (args.length == 1) return args[0];
+            Object acc = args[args.length - 1];
+            for (int i = args.length - 2; i >= 0; i--) {
+                Symbol temp = Symbol.intern("or__" + RT.nextID());
+                acc = PersistentList.createFromArray(letStar,
+                        PersistentVector.createOwning(temp, args[i]),
+                        PersistentList.createFromArray(ifSym, temp, temp, acc));
+            }
+            return acc;
+        
+            }
+            case 87: {
+                Object[] args = _args;
+            if (args.length == 0) return null;
+            if ((args.length & 1) != 0) throw new IllegalArgumentException("cond requires an even number of forms");
+            Object acc = null;
+            for (int i = args.length - 2; i >= 0; i -= 2) {
+                Object test = args[i];
+                Object expr = args[i + 1];
+                if (Keyword.intern("else").equals(test) || Boolean.TRUE.equals(test)) {
+                    acc = expr;
+                } else {
+                    acc = PersistentList.createFromArray(ifSym, test, expr, acc);
+                }
+            }
+            return acc;
+        
+            }
+            case 88: {
+                Object[] args = _args;
+            if (args.length < 2) {
+                throw new IllegalArgumentException("condp requires at least a predicate and expression");
+            }
+            Object pred = args[0];
+            Object expr = args[1];
+            Symbol gpred = Symbol.intern("pred__" + RT.nextID());
+            Symbol gexpr = Symbol.intern("expr__" + RT.nextID());
+            Keyword arrowKw = Keyword.intern(">>");
+
+            List<Object[]> clauses = new ArrayList<>();
+            boolean hasDefault = false;
+            Object defaultExpr = null;
+            int idx = 2;
+            while (idx < args.length) {
+                if (idx == args.length - 1) {
+                    hasDefault = true;
+                    defaultExpr = args[idx];
+                    break;
+                }
+                if (idx + 2 < args.length && arrowKw.equals(args[idx + 1])) {
+                    clauses.add(new Object[]{args[idx], args[idx + 2], Boolean.TRUE});
+                    idx += 3;
+                } else {
+                    clauses.add(new Object[]{args[idx], args[idx + 1], Boolean.FALSE});
+                    idx += 2;
+                }
+            }
+
+            Object acc = hasDefault ? defaultExpr
+                    : PersistentList.createFromArray(Symbol.intern("throw"),
+                            PersistentList.createFromArray(Symbol.intern("IllegalArgumentException."),
+                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "str"), "No matching clause: ", gexpr)));
+            for (int i = clauses.size() - 1; i >= 0; i--) {
+                Object[] c = clauses.get(i);
+                Object testVal = c[0];
+                Object resForm = c[1];
+                boolean isArrow = (Boolean) c[2];
+                Object predCall = PersistentList.createFromArray(gpred, testVal, gexpr);
+                if (isArrow) {
+                    Symbol resSym = Symbol.intern("condp__" + RT.nextID());
+                    acc = PersistentList.createFromArray(letStar,
+                            PersistentVector.createOwning(resSym, predCall),
+                            PersistentList.createFromArray(ifSym,
+                                    resSym,
+                                    PersistentList.createFromArray(resForm, resSym),
+                                    acc));
+                } else {
+                    acc = PersistentList.createFromArray(ifSym, predCall, resForm, acc);
+                }
+            }
+            return PersistentList.createFromArray(letStar, PersistentVector.createOwning(gpred, pred, gexpr, expr), acc);
+        
+            }
+            case 89: {
+                Object[] args = _args;
+            Object expr = args[0];
+            boolean hasDefault = ((args.length - 1) & 1) != 0;
+            int end = hasDefault ? args.length - 1 : args.length;
+            List<Object> pairs = new ArrayList<>();
+            for (int i = 1; i < end; i++) pairs.add(args[i]);
+            PersistentVector pvec = PersistentVector.create(pairs);
+            if (hasDefault) {
+                return PersistentList.createFromArray(Symbol.intern("case*"), expr, pvec, args[args.length - 1]);
+            }
+            return PersistentList.createFromArray(Symbol.intern("case*"), expr, pvec);
+        
+            }
+            case 90: {
+                Object[] args = _args;
+            Object acc = args[0];
+            for (int i = 1; i < args.length; i++) {
+                Object form = args[i];
+                if (form instanceof ISeq s) {
+                    acc = RT.cons(s.first(), RT.cons(acc, s.next()));
+                } else {
+                    acc = PersistentList.createFromArray(form, acc);
+                }
+            }
+            return acc;
+        
+            }
+            case 91: {
+                Object[] args = _args;
+            Object acc = args[0];
+            for (int i = 1; i < args.length; i++) {
+                Object form = args[i];
+                if (form instanceof ISeq s) {
+                    List<Object> items = new ArrayList<>();
+                    for (ISeq p = s.seq(); p != null; p = p.next()) items.add(p.first());
+                    items.add(acc);
+                    acc = PersistentList.create(items);
+                } else {
+                    acc = PersistentList.createFromArray(form, acc);
+                }
+            }
+            return acc;
+        
+            }
+            case 92: {
+                Object[] args = _args;
+            Object expr = args[0];
+            Symbol name = (Symbol) args[1];
+            List<Object> bindings = new ArrayList<>();
+            bindings.add(name);
+            bindings.add(expr);
+            for (int i = 2; i < args.length; i++) {
+                bindings.add(name);
+                bindings.add(args[i]);
+            }
+            return PersistentList.createFromArray(letStar, PersistentVector.create(bindings), name);
+        
+            }
+            case 93: {
+                Object[] args = _args;
+            Symbol g = Symbol.intern("some__" + RT.nextID());
+            List<Object> steps = new ArrayList<>();
+            steps.add(g);
+            steps.add(args[0]);
+            for (int i = 1; i < args.length; i++) {
+                Object form = args[i];
+                Object step = (form instanceof ISeq s)
+                        ? RT.cons(s.first(), RT.cons(g, s.next()))
+                        : PersistentList.createFromArray(form, g);
+                steps.add(g);
+                steps.add(PersistentList.createFromArray(ifSym,
+                        PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), g),
+                        null, step));
+            }
+            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
+        
+            }
+            case 94: {
+                Object[] args = _args;
+            Symbol g = Symbol.intern("some__" + RT.nextID());
+            List<Object> steps = new ArrayList<>();
+            steps.add(g);
+            steps.add(args[0]);
+            for (int i = 1; i < args.length; i++) {
+                Object form = args[i];
+                Object step;
+                if (form instanceof ISeq s) {
+                    List<Object> items = new ArrayList<>();
+                    for (ISeq p = s.seq(); p != null; p = p.next()) items.add(p.first());
+                    items.add(g);
+                    step = PersistentList.create(items);
+                } else {
+                    step = PersistentList.createFromArray(form, g);
+                }
+                steps.add(g);
+                steps.add(PersistentList.createFromArray(ifSym,
+                        PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), g),
+                        null, step));
+            }
+            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
+        
+            }
+            case 95: {
+                Object[] args = _args;
+            Symbol g = Symbol.intern("cond__" + RT.nextID());
+            List<Object> steps = new ArrayList<>();
+            steps.add(g);
+            steps.add(args[0]);
+            for (int i = 1; i < args.length; i += 2) {
+                Object test = args[i];
+                Object form = args[i + 1];
+                Object step = (form instanceof ISeq s)
+                        ? RT.cons(s.first(), RT.cons(g, s.next()))
+                        : PersistentList.createFromArray(form, g);
+                steps.add(g);
+                steps.add(PersistentList.createFromArray(ifSym, test, step, g));
+            }
+            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
+        
+            }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object callV_3(int _id, Object[] _args) {
+        switch (_id) {
+            case 96: {
+                Object[] args = _args;
+            Symbol g = Symbol.intern("cond__" + RT.nextID());
+            List<Object> steps = new ArrayList<>();
+            steps.add(g);
+            steps.add(args[0]);
+            for (int i = 1; i < args.length; i += 2) {
+                Object test = args[i];
+                Object form = args[i + 1];
+                Object step;
+                if (form instanceof ISeq s) {
+                    List<Object> items = new ArrayList<>();
+                    for (ISeq p = s.seq(); p != null; p = p.next()) items.add(p.first());
+                    items.add(g);
+                    step = PersistentList.create(items);
+                } else {
+                    step = PersistentList.createFromArray(form, g);
+                }
+                steps.add(g);
+                steps.add(PersistentList.createFromArray(ifSym, test, step, g));
+            }
+            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
+        
+            }
+            case 97: {
+                Object[] args = _args;
+            Symbol gx = Symbol.intern("doto__" + RT.nextID());
+            List<Object> body = new ArrayList<>();
+            body.add(letStar);
+            body.add(PersistentVector.createOwning(gx, args[0]));
+            for (int i = 1; i < args.length; i++) {
+                Object form = args[i];
+                if (form instanceof ISeq s) {
+                    body.add(RT.cons(s.first(), RT.cons(gx, s.next())));
+                } else {
+                    body.add(PersistentList.createFromArray(form, gx));
+                }
+            }
+            body.add(gx);
+            return PersistentList.create(body);
+        
+            }
+            case 98: {
+                Object[] args = _args;
+            Object acc = PersistentList.createFromArray(Symbol.intern("."), args[0], args[1]);
+            for (int i = 2; i < args.length; i++) {
+                acc = PersistentList.createFromArray(Symbol.intern("."), acc, args[i]);
+            }
+            return acc;
+        
+            }
+            case 99: {
+                Object[] args = _args;
+            List<Object> body = new ArrayList<>();
+            body.add(fnStar);
+            body.add(PersistentVector.EMPTY);
+            Collections.addAll(body, args);
+            return PersistentList.createFromArray(Symbol.intern("clojure.core", "lazy-seq*"), PersistentList.create(body));
+        
+            }
+            case 100: {
+                Object[] args = _args;
+            List<Object> body = new ArrayList<>();
+            body.add(fnStar);
+            body.add(PersistentVector.EMPTY);
+            Collections.addAll(body, args);
+            return PersistentList.createFromArray(Symbol.intern("clojure.core", "delay*"), PersistentList.create(body));
+        
+            }
+            case 101: {
+                Object[] args = _args;
+            List<Object> body = new ArrayList<>();
+            body.add(fnStar);
+            body.add(PersistentVector.EMPTY);
+            Collections.addAll(body, args);
+            return PersistentList.createFromArray(Symbol.intern("clojure.core", "future-call"), PersistentList.create(body));
+        
+            }
+            case 102: { Object[] args = _args; return (null); }
+            case 103: {
+                Object[] args = _args;
+            PersistentVector bindings = (PersistentVector) args[0];
+            Object sym = bindings.nth(0);
+            Object limit = bindings.nth(1);
+            Symbol nSym = Symbol.intern("n__" + RT.nextID());
+            List<Object> body = new ArrayList<>();
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            body.add(PersistentList.createFromArray(Symbol.intern("recur"),
+                    PersistentList.createFromArray(Symbol.intern("clojure.core", "unchecked-inc-long"), sym)));
+            // Use standard inc for safety
+            body.set(body.size() - 1, PersistentList.createFromArray(Symbol.intern("recur"),
+                    PersistentList.createFromArray(Symbol.intern("clojure.core", "inc"), sym)));
+            List<Object> loopBody = new ArrayList<>();
+            loopBody.add(loopStar);
+            loopBody.add(PersistentVector.createOwning(sym, 0L));
+            List<Object> whenForm = new ArrayList<>();
+            whenForm.add(Symbol.intern("when"));
+            whenForm.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "<"), sym, nSym));
+            whenForm.addAll(body);
+            loopBody.add(PersistentList.create(whenForm));
+            return PersistentList.createFromArray(letStar,
+                    PersistentVector.createOwning(nSym, PersistentList.createFromArray(Symbol.intern("clojure.core", "long"), limit)),
+                    PersistentList.create(loopBody));
+        
+            }
+            case 104: {
+                Object[] args = _args;
+            Object test = args[0];
+            List<Object> body = new ArrayList<>();
+            body.add(Symbol.intern("when"));
+            body.add(test);
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            body.add(PersistentList.createFromArray(Symbol.intern("recur")));
+            return PersistentList.createFromArray(loopStar, PersistentVector.EMPTY, PersistentList.create(body));
+        
+            }
+            case 105: {
+                Object[] args = _args;
+            PersistentVector seqExprs = (PersistentVector) args[0];
+            List<Object> body = new ArrayList<>();
+            body.add(doSym);
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            Object inner = PersistentList.create(body);
+            return expandDoseq(seqExprs, 0, inner);
+        
+            }
+            case 106: {
+                Object[] args = _args;
+            PersistentVector seqExprs = (PersistentVector) args[0];
+            Object bodyExpr = args[1];
+            return expandFor(seqExprs, 0, bodyExpr);
+        
+            }
+            case 107: {
+                Object[] args = _args;
+            List<Object> out = new ArrayList<>(args.length + 1);
+            out.add(Symbol.intern("defmacro*"));
+            Collections.addAll(out, args);
+            return PersistentList.create(out);
+        
+            }
+            case 108: {
+                Object[] args = _args;
+            List<Object> out = new ArrayList<>(args.length + 2);
+            out.add(Symbol.intern("clojure.core", "refer"));
+            out.add(PersistentList.createFromArray(Symbol.intern("quote"), Symbol.intern("clojure.core")));
+            Collections.addAll(out, args);
+            return PersistentList.create(out);
+        
+            }
+            case 109: {
+                Object[] args = _args;
+            Object bmap = args[0];
+            Fn f = (Fn) args[1];
+            Object[] fargs = args.length > 2 ? Arrays.copyOfRange(args, 2, args.length) : Fn.EMPTY_ARGS;
+            Map<Var, Object> map = new HashMap<>();
+            for (ISeq s = RT.seq(bmap); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                map.put((Var) e.getKey(), e.getValue());
+            }
+            Var.pushThreadBindings(map);
+            try {
+                return f.applyTo(fargs);
+            } finally {
+                Var.popThreadBindings();
+            }
+        
+            }
+            case 110: {
+                Object[] args = _args;
+            List<Object> fnBody = new ArrayList<>();
+            fnBody.add(doSym);
+            for (int i = 1; i < args.length; i++) fnBody.add(args[i]);
+            return PersistentList.createFromArray(
+                    Symbol.intern("clojure.core", "with-bindings*"),
+                    args[0],
+                    PersistentList.createFromArray(Symbol.intern("fn*"), PersistentVector.EMPTY, PersistentList.create(fnBody)));
+        
+            }
+            case 111: {
+                Object[] args = _args;
+            List<Object> body = new ArrayList<>();
+            body.add(doSym);
+            Collections.addAll(body, args);
+            return PersistentList.createFromArray(
+                    Symbol.intern("clojure.core", "with-loading-context*"),
+                    PersistentList.createFromArray(Symbol.intern("fn*"), PersistentVector.EMPTY, PersistentList.create(body)));
+        
+            }
+            case 112: {
+                Object[] args = _args;
+            PersistentVector vec = (PersistentVector) args[0];
+            List<Object> kvs = new ArrayList<>();
+            kvs.add(Symbol.intern("clojure.core", "hash-map"));
+            for (int i = 0; i < vec.count(); i += 2) {
+                kvs.add(PersistentList.createFromArray(Symbol.intern("var"), vec.nth(i)));
+                kvs.add(vec.nth(i + 1));
+            }
+            List<Object> body = new ArrayList<>();
+            body.add(doSym);
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            return PersistentList.createFromArray(doSym,
+                    PersistentList.createFromArray(Symbol.intern("clojure.core", "push-thread-bindings"), PersistentList.create(kvs)),
+                    PersistentList.createFromArray(Symbol.intern("try"),
+                            PersistentList.create(body),
+                            PersistentList.createFromArray(Symbol.intern("finally"),
+                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "pop-thread-bindings")))));
+        
+            }
+            case 113: {
+                Object[] args = _args;
+            Symbol sw = Symbol.intern("sw__" + RT.nextID());
+            List<Object> body = new ArrayList<>();
+            body.add(Symbol.intern("binding"));
+            body.add(PersistentVector.createOwning(
+                    Symbol.intern("clojure.core", "*out*"),
+                    PersistentList.createFromArray(Symbol.intern("java.io.PrintWriter."), sw)));
+            for (Object a : args) body.add(a);
+            return PersistentList.createFromArray(letStar,
+                    PersistentVector.createOwning(sw, PersistentList.createFromArray(Symbol.intern("java.io.StringWriter."))),
+                    PersistentList.create(body),
+                    PersistentList.createFromArray(Symbol.intern("clojure.core", "str"), sw));
+        
+            }
+            case 114: {
+                Object[] args = _args;
+            List<Object> body = new ArrayList<>();
+            body.add(Symbol.intern("binding"));
+            body.add(PersistentVector.createOwning(
+                    Symbol.intern("clojure.core", "*in*"),
+                    PersistentList.createFromArray(Symbol.intern("java.io.BufferedReader."),
+                            PersistentList.createFromArray(Symbol.intern("java.io.StringReader."), args[0]))));
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            return PersistentList.create(body);
+        
+            }
+            case 115: {
+                Object[] args = _args;
+            PersistentVector bindings = (PersistentVector) args[0];
+            if (bindings.count() == 0) {
+                List<Object> body = new ArrayList<>();
+                body.add(doSym);
+                for (int i = 1; i < args.length; i++) body.add(args[i]);
+                return PersistentList.create(body);
+            }
+            Object sym = bindings.nth(0);
+            Object init = bindings.nth(1);
+            List<Object> restBindings = new ArrayList<>();
+            for (int i = 2; i < bindings.count(); i++) restBindings.add(bindings.nth(i));
+            List<Object> inner = new ArrayList<>();
+            inner.add(Symbol.intern("with-open"));
+            inner.add(PersistentVector.create(restBindings));
+            for (int i = 1; i < args.length; i++) inner.add(args[i]);
+            return PersistentList.createFromArray(letStar,
+                    PersistentVector.createOwning(sym, init),
+                    PersistentList.createFromArray(Symbol.intern("try"),
+                            PersistentList.create(inner),
+                            PersistentList.createFromArray(Symbol.intern("finally"),
+                                    PersistentList.createFromArray(Symbol.intern(".close"), sym))));
+        
+            }
+            case 116: {
+                Object[] args = _args;
+            if (!RT.truthy(RT.ASSERT.deref())) return null;
+            Object x = args[0];
+            Object msg = args.length > 1 ? args[1] : RT.printString(x);
+            return PersistentList.createFromArray(Symbol.intern("when-not"), x,
+                    PersistentList.createFromArray(Symbol.intern("throw"),
+                            PersistentList.createFromArray(Symbol.intern("AssertionError."),
+                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "str"), "Assert failed: ", msg))));
+        
+            }
+            case 117: {
+                Object[] args = _args;
+            Symbol nsSym = (Symbol) args[0];
+            int idx = 1;
+            String doc = (idx < args.length && args[idx] instanceof String s) ? (String) args[idx++] : null;
+            PersistentHashMap attrMap = (idx < args.length && args[idx] instanceof PersistentHashMap m)
+                    ? (PersistentHashMap) args[idx++] : null;
+            PersistentHashMap mergedMeta = nsSym.meta() != null ? nsSym.meta() : PersistentHashMap.EMPTY;
+            if (doc != null) mergedMeta = mergedMeta.assoc(Keyword.intern("doc"), doc);
+            if (attrMap != null) {
+                for (ISeq s = attrMap.seq(); s != null; s = s.next()) {
+                    Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                    mergedMeta = mergedMeta.assoc(e.getKey(), e.getValue());
+                }
+            }
+
+            List<Object> referClojureOpts = null;
+            List<Object> clauseForms = new ArrayList<>();
+            for (int i = idx; i < args.length; i++) {
+                if (args[i] instanceof ISeq clause) {
+                    Object head = clause.first();
+                    if (Keyword.intern("refer-clojure").equals(head)) {
+                        referClojureOpts = new ArrayList<>();
+                        referClojureOpts.add(Symbol.intern("clojure.core", "refer"));
+                        referClojureOpts.add(PersistentList.createFromArray(quoteSym, Symbol.intern("clojure.core")));
+                        for (ISeq s = clause.next(); s != null; s = s.next()) {
+                            referClojureOpts.add(PersistentList.createFromArray(quoteSym, s.first()));
+                        }
+                    } else if (Keyword.intern("require").equals(head)) {
+                        List<Object> req = new ArrayList<>();
+                        req.add(Symbol.intern("clojure.core", "require"));
+                        for (ISeq s = clause.next(); s != null; s = s.next()) {
+                            req.add(PersistentList.createFromArray(quoteSym, s.first()));
+                        }
+                        clauseForms.add(PersistentList.create(req));
+                    } else if (Keyword.intern("use").equals(head)) {
+                        List<Object> use = new ArrayList<>();
+                        use.add(Symbol.intern("clojure.core", "use"));
+                        for (ISeq s = clause.next(); s != null; s = s.next()) {
+                            use.add(PersistentList.createFromArray(quoteSym, s.first()));
+                        }
+                        clauseForms.add(PersistentList.create(use));
+                    } else if (Keyword.intern("import").equals(head)) {
+                        List<Object> imp = new ArrayList<>();
+                        imp.add(Symbol.intern("clojure.core", "import"));
+                        for (ISeq s = clause.next(); s != null; s = s.next()) {
+                            imp.add(PersistentList.createFromArray(quoteSym, s.first()));
+                        }
+                        clauseForms.add(PersistentList.create(imp));
+                    }
+                }
+            }
+
+            List<Object> forms = new ArrayList<>();
+            forms.add(doSym);
+            forms.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "in-ns"),
+                    PersistentList.createFromArray(quoteSym, nsSym)));
+            if (mergedMeta.count() > 0) {
+                forms.add(PersistentList.createFromArray(
+                        Symbol.intern("clojure.core", "alter-meta!"),
+                        PersistentList.createFromArray(Symbol.intern("clojure.core", "the-ns"),
+                                PersistentList.createFromArray(quoteSym, nsSym)),
+                        Symbol.intern("clojure.core", "merge"),
+                        PersistentList.createFromArray(quoteSym, mergedMeta)));
+            }
+            if (referClojureOpts != null) {
+                forms.add(PersistentList.create(referClojureOpts));
+            } else {
+                forms.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "refer"),
+                        PersistentList.createFromArray(quoteSym, Symbol.intern("clojure.core"))));
+            }
+            forms.addAll(clauseForms);
+            return PersistentList.create(forms);
+        
+            }
+            case 118: {
+                Object[] args = _args;
+            Symbol name = (Symbol) args[0];
+            int idx = 1;
+            if (idx < args.length && args[idx] instanceof String) idx++;
+            if (idx < args.length && args[idx] instanceof PersistentHashMap) idx++;
+            Object dispatchFn = args[idx++];
+            Object defaultVal = Keyword.intern("default");
+            for (int i = idx; i < args.length; i += 2) {
+                if (Keyword.intern("default").equals(args[i])) defaultVal = args[i + 1];
+            }
+            return PersistentList.createFromArray(defSym, name,
+                    PersistentList.createFromArray(Symbol.intern("clojure.core", "create-multi"),
+                            name.name, dispatchFn, defaultVal));
+        
+            }
+            case 119: {
+                Object[] args = _args;
+            Symbol mfName = (Symbol) args[0];
+            Object dispatchVal = args[1];
+            List<Object> fnBody = new ArrayList<>();
+            fnBody.add(fnStar);
+            for (int i = 2; i < args.length; i++) fnBody.add(args[i]);
+            return PersistentList.createFromArray(Symbol.intern("clojure.core", "add-method!"),
+                    mfName, dispatchVal, PersistentList.create(fnBody));
+        
+            }
+            case 120: {
+                Object[] args = _args;
+            PersistentVector fnspecs = (PersistentVector) args[0];
+            // Expand using atom indirection so mutual recursion works cleanly
+            List<Object> bindings = new ArrayList<>();
+            List<Object> resets = new ArrayList<>();
+            List<Object> innerLets = new ArrayList<>();
+            for (int i = 0; i < fnspecs.count(); i++) {
+                ISeq spec = (ISeq) fnspecs.nth(i);
+                Symbol fnName = (Symbol) spec.first();
+                Symbol boxSym = Symbol.intern("box__" + fnName.name + "__" + RT.nextID());
+                bindings.add(boxSym);
+                bindings.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "atom"), null));
+                innerLets.add(fnName);
+                innerLets.add(PersistentList.createFromArray(fnStar,
+                        PersistentVector.createOwning(Symbol.intern("&"), Symbol.intern("args__")),
+                        PersistentList.createFromArray(Symbol.intern("clojure.core", "apply"),
+                                PersistentList.createFromArray(Symbol.intern("clojure.core", "deref"), boxSym),
+                                Symbol.intern("args__"))));
+                resets.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "reset!"),
+                        boxSym,
+                        RT.cons(fnStar, spec)));
+            }
+            List<Object> body = new ArrayList<>();
+            body.add(doSym);
+            body.addAll(resets);
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            return PersistentList.createFromArray(letStar, PersistentVector.create(bindings),
+                    PersistentList.createFromArray(letStar, PersistentVector.create(innerLets),
+                            PersistentList.create(body)));
+        
+            }
+            default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
+        }
     }
 }

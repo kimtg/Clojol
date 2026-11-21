@@ -10,13 +10,16 @@ done
 CLJL_HOME="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 
 JAR="$CLJL_HOME/build/cljl.jar"
+AOT="$CLJL_HOME/build/cljl.aot"
 JSA="$CLJL_HOME/build/cljl.jsa"
 
 if [ ! -f "$JAR" ]; then
   "$CLJL_HOME/make.sh" build >&2
 fi
 
-if [ -f "$JSA" ]; then
+if [ -f "$AOT" ]; then
+  exec java ${CLJL_OPTS:-} -XX:AOTCache="$AOT" -jar "$JAR" "$@"
+elif [ -f "$JSA" ]; then
   exec java ${CLJL_OPTS:-} -XX:SharedArchiveFile="$JSA" -jar "$JAR" "$@"
 else
   exec java ${CLJL_OPTS:-} -jar "$JAR" "$@"

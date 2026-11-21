@@ -22,8 +22,6 @@ public final class Main {
     private Main() {}
 
     public static void main(String[] args) {
-        RT.ensureInit();
-
         CliOptions opts;
         try {
             opts = Deps.parseCli(args);
@@ -124,6 +122,7 @@ public final class Main {
         }
 
         if (opts.mode == Mode.EXEC || opts.mode == Mode.TOOL) {
+            RT.ensureInit();
             try {
                 Deps.runExec(opts, basis);
             } catch (Throwable t) {
@@ -161,6 +160,7 @@ public final class Main {
                 }
                 String path = args[++i];
                 hadInit = true;
+                RT.ensureInit();
                 try {
                     loadScriptOrResource(path);
                 } catch (Throwable t) {
@@ -177,6 +177,7 @@ public final class Main {
                 }
                 String expr = args[++i];
                 hadInit = true;
+                RT.ensureInit();
                 evalAndPrint(expr, "<eval>", reportTarget);
                 i++;
                 continue;
@@ -200,6 +201,7 @@ public final class Main {
         // Pass 2: main-opt (or default exit/repl)
         if (i >= args.length) {
             if (!hadInit) {
+                RT.ensureInit();
                 runRepl(reportTarget);
             }
             return;
@@ -215,6 +217,7 @@ public final class Main {
                     + ", Java " + System.getProperty("java.version") + ")");
             return;
         }
+        RT.ensureInit();
         if ("-r".equals(mainOpt) || "--repl".equals(mainOpt)) {
             bindCommandLineArgs(args, i + 1);
             runRepl(reportTarget);
