@@ -602,7 +602,8 @@ public final class TypeAnalyzer {
         if (candidates.isEmpty()) return;
 
         Set<Integer> escaped = new HashSet<>();
-        checkVolatileEscapes(method.body, false, candidates, aliases, escaped);
+        Deque<LoopNode> loopStack = new ArrayDeque<>();
+        checkVolatileEscapes(method.body, false, true, loopStack, candidates, aliases, escaped);
         candidates.removeAll(escaped);
         if (candidates.isEmpty()) return;
 
@@ -645,13 +646,20 @@ public final class TypeAnalyzer {
             return;
         }
         if (n instanceof LoopNode lp) {
-            for (int s : lp.slots) {
-                seenBinders.add(s);
-                forbidden.add(s);
-                candidates.remove(s);
-                aliases.remove(s);
+            for (int i = 0; i < lp.slots.length; i++) {
+                int s = lp.slots[i];
+                Node init = lp.inits[i];
+                boolean fresh = seenBinders.add(s) && !forbidden.contains(s);
+                if (fresh && init instanceof VolatileNode vn) {
+                    candidates.add(s);
+                    collectVolatileCandidates(vn.init, forbidden, seenBinders, candidates, aliases);
+                } else {
+                    forbidden.add(s);
+                    candidates.remove(s);
+                    aliases.remove(s);
+                    collectVolatileCandidates(init, forbidden, seenBinders, candidates, aliases);
+                }
             }
-            for (Node init : lp.inits) collectVolatileCandidates(init, forbidden, seenBinders, candidates, aliases);
             collectVolatileCandidates(lp.body, forbidden, seenBinders, candidates, aliases);
             return;
         }
@@ -694,12 +702,35 @@ public final class TypeAnalyzer {
         if (root != null) escaped.add(root);
     }
 
+    private static int candidateRootOf(int slot, Set<Integer> candidates, Map<Integer, Integer> aliases) {
+        if (candidates.contains(slot)) return slot;
+        Integer root = aliases.get(slot);
+        return root != null ? root : -1;
+    }
+
+    private static void checkRecurArgEscapes(
+            Node[] exprs, Deque<LoopNode> loopStack,
+            Set<Integer> candidates, Map<Integer, Integer> aliases, Set<Integer> escaped) {
+        LoopNode curLoop = loopStack.peek();
+        for (int k = 0; k < exprs.length; k++) {
+            Node arg = exprs[k];
+            if (curLoop != null && k < curLoop.slots.length && candidates.contains(curLoop.slots[k])) {
+                int targetSlot = curLoop.slots[k];
+                if (arg instanceof LocalNode ln && candidateRootOf(ln.slot, candidates, aliases) == targetSlot) {
+                    continue;
+                }
+                escaped.add(targetSlot);
+            }
+            checkVolatileEscapes(arg, false, false, loopStack, candidates, aliases, escaped);
+        }
+    }
+
     private static void checkVolatileEscapes(
-            Node n, boolean asVolatileTarget,
+            Node n, boolean asVolatileTarget, boolean inTailExit, Deque<LoopNode> loopStack,
             Set<Integer> candidates, Map<Integer, Integer> aliases, Set<Integer> escaped) {
         if (n == null) return;
         if (n instanceof LocalNode ln) {
-            if (!asVolatileTarget) {
+            if (!asVolatileTarget && !inTailExit) {
                 markIfCandidate(ln.slot, candidates, aliases, escaped);
             }
             return;
@@ -709,31 +740,31 @@ public final class TypeAnalyzer {
             return;
         }
         if (n instanceof DerefNode dn) {
-            checkVolatileEscapes(dn.target, true, candidates, aliases, escaped);
+            checkVolatileEscapes(dn.target, true, false, loopStack, candidates, aliases, escaped);
             return;
         }
         if (n instanceof VresetNode vr) {
-            checkVolatileEscapes(vr.target, true, candidates, aliases, escaped);
-            checkVolatileEscapes(vr.val, false, candidates, aliases, escaped);
+            checkVolatileEscapes(vr.target, true, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(vr.val, false, false, loopStack, candidates, aliases, escaped);
             return;
         }
         if (n instanceof VolatileNode vn) {
-            checkVolatileEscapes(vn.init, false, candidates, aliases, escaped);
+            checkVolatileEscapes(vn.init, false, false, loopStack, candidates, aliases, escaped);
             return;
         }
         if (n instanceof AtomNode an) {
-            checkVolatileEscapes(an.init, false, candidates, aliases, escaped);
+            checkVolatileEscapes(an.init, false, false, loopStack, candidates, aliases, escaped);
             return;
         }
         if (n instanceof ResetBangNode rb) {
-            checkVolatileEscapes(rb.target, false, candidates, aliases, escaped);
-            checkVolatileEscapes(rb.val, false, candidates, aliases, escaped);
+            checkVolatileEscapes(rb.target, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(rb.val, false, false, loopStack, candidates, aliases, escaped);
             return;
         }
         if (n instanceof SwapBangNode sb) {
-            checkVolatileEscapes(sb.target, false, candidates, aliases, escaped);
-            checkVolatileEscapes(sb.fn, false, candidates, aliases, escaped);
-            for (Node a : sb.extraArgs) checkVolatileEscapes(a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(sb.target, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(sb.fn, false, false, loopStack, candidates, aliases, escaped);
+            for (Node a : sb.extraArgs) checkVolatileEscapes(a, false, false, loopStack, candidates, aliases, escaped);
             return;
         }
         if (n instanceof LetNode ln) {
@@ -741,14 +772,14 @@ public final class TypeAnalyzer {
                 int s = ln.slots[i];
                 Node init = ln.inits[i];
                 if (candidates.contains(s) && init instanceof VolatileNode vn) {
-                    checkVolatileEscapes(vn.init, false, candidates, aliases, escaped);
+                    checkVolatileEscapes(vn.init, false, false, loopStack, candidates, aliases, escaped);
                 } else if (aliases.containsKey(s) && init instanceof LocalNode) {
                     // Alias binding: escape is checked at uses of s
                 } else {
-                    checkVolatileEscapes(init, false, candidates, aliases, escaped);
+                    checkVolatileEscapes(init, false, false, loopStack, candidates, aliases, escaped);
                 }
             }
-            checkVolatileEscapes(ln.body, false, candidates, aliases, escaped);
+            checkVolatileEscapes(ln.body, false, inTailExit, loopStack, candidates, aliases, escaped);
             return;
         }
         if (n instanceof FnNode fn) {
@@ -763,236 +794,248 @@ public final class TypeAnalyzer {
             return;
         }
         if (n instanceof IfNode iff) {
-            checkVolatileEscapes(iff.test, false, candidates, aliases, escaped);
-            checkVolatileEscapes(iff.thenNode, false, candidates, aliases, escaped);
-            checkVolatileEscapes(iff.elseNode, false, candidates, aliases, escaped);
+            checkVolatileEscapes(iff.test, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(iff.thenNode, false, inTailExit, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(iff.elseNode, false, inTailExit, loopStack, candidates, aliases, escaped);
         } else if (n instanceof DoNode dn) {
-            for (Node c : dn.nodes) checkVolatileEscapes(c, false, candidates, aliases, escaped);
+            int last = dn.nodes.length - 1;
+            for (int i = 0; i < dn.nodes.length; i++) {
+                checkVolatileEscapes(dn.nodes[i], false, (i == last) && inTailExit, loopStack, candidates, aliases, escaped);
+            }
         } else if (n instanceof LoopNode lp) {
-            for (Node i : lp.inits) checkVolatileEscapes(i, false, candidates, aliases, escaped);
-            checkVolatileEscapes(lp.body, false, candidates, aliases, escaped);
+            for (int i = 0; i < lp.slots.length; i++) {
+                Node init = lp.inits[i];
+                if (candidates.contains(lp.slots[i]) && init instanceof VolatileNode vn) {
+                    checkVolatileEscapes(vn.init, false, false, loopStack, candidates, aliases, escaped);
+                } else {
+                    checkVolatileEscapes(init, false, false, loopStack, candidates, aliases, escaped);
+                }
+            }
+            loopStack.push(lp);
+            checkVolatileEscapes(lp.body, false, inTailExit, loopStack, candidates, aliases, escaped);
+            loopStack.pop();
         } else if (n instanceof CaseNode cn) {
-            checkVolatileEscapes(cn.expr, false, candidates, aliases, escaped);
-            for (Node b : cn.table.values()) checkVolatileEscapes(b, false, candidates, aliases, escaped);
-            checkVolatileEscapes(cn.defaultNode, false, candidates, aliases, escaped);
+            checkVolatileEscapes(cn.expr, false, false, loopStack, candidates, aliases, escaped);
+            for (Node b : cn.table.values()) checkVolatileEscapes(b, false, inTailExit, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(cn.defaultNode, false, inTailExit, loopStack, candidates, aliases, escaped);
         } else if (n instanceof TryNode tn) {
-            checkVolatileEscapes(tn.body, false, candidates, aliases, escaped);
-            for (CatchClause cc : tn.catches) checkVolatileEscapes(cc.handler(), false, candidates, aliases, escaped);
-            checkVolatileEscapes(tn.finallyNode, false, candidates, aliases, escaped);
+            boolean tail = inTailExit && tn.finallyNode == null;
+            checkVolatileEscapes(tn.body, false, tail, loopStack, candidates, aliases, escaped);
+            for (CatchClause cc : tn.catches) checkVolatileEscapes(cc.handler(), false, tail, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(tn.finallyNode, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof LockingNode ln) {
-            checkVolatileEscapes(ln.target, false, candidates, aliases, escaped);
-            checkVolatileEscapes(ln.body, false, candidates, aliases, escaped);
+            checkVolatileEscapes(ln.target, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(ln.body, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof MonitorNode mn) {
-            checkVolatileEscapes(mn.target, false, candidates, aliases, escaped);
+            checkVolatileEscapes(mn.target, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof ThrowNode tn) {
-            checkVolatileEscapes(tn.expr, false, candidates, aliases, escaped);
+            checkVolatileEscapes(tn.expr, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Recur1Node r1) {
-            checkVolatileEscapes(r1.expr0, false, candidates, aliases, escaped);
+            checkRecurArgEscapes(new Node[]{r1.expr0}, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Recur2Node r2) {
-            checkVolatileEscapes(r2.expr0, false, candidates, aliases, escaped);
-            checkVolatileEscapes(r2.expr1, false, candidates, aliases, escaped);
+            checkRecurArgEscapes(new Node[]{r2.expr0, r2.expr1}, loopStack, candidates, aliases, escaped);
         } else if (n instanceof RecurNNode rn) {
-            for (Node e : rn.exprs) checkVolatileEscapes(e, false, candidates, aliases, escaped);
+            checkRecurArgEscapes(rn.exprs, loopStack, candidates, aliases, escaped);
         } else if (n instanceof VectorNode vn) {
-            for (Node e : vn.elems) checkVolatileEscapes(e, false, candidates, aliases, escaped);
+            for (Node e : vn.elems) checkVolatileEscapes(e, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof MapNode mn) {
-            for (Node e : mn.kvs) checkVolatileEscapes(e, false, candidates, aliases, escaped);
+            for (Node e : mn.kvs) checkVolatileEscapes(e, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof SetNode sn) {
-            for (Node e : sn.elems) checkVolatileEscapes(e, false, candidates, aliases, escaped);
+            for (Node e : sn.elems) checkVolatileEscapes(e, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof DefNode dn) {
-            checkVolatileEscapes(dn.init, false, candidates, aliases, escaped);
+            checkVolatileEscapes(dn.init, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof DefMacroNode dm) {
-            checkVolatileEscapes(dm.fnNode, false, candidates, aliases, escaped);
+            checkVolatileEscapes(dm.fnNode, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof VarCall1Node c) {
-            checkVolatileEscapes(c.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(c.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof VarCall2Node c) {
-            checkVolatileEscapes(c.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(c.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof VarCall3Node c) {
-            checkVolatileEscapes(c.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.b, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.c, false, candidates, aliases, escaped);
+            checkVolatileEscapes(c.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.b, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.c, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof VarCall4Node c) {
-            checkVolatileEscapes(c.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.b, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.c, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.d, false, candidates, aliases, escaped);
+            checkVolatileEscapes(c.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.b, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.c, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.d, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof VarCallNNode c) {
-            for (Node a : c.args) checkVolatileEscapes(a, false, candidates, aliases, escaped);
+            for (Node a : c.args) checkVolatileEscapes(a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Call0Node c) {
-            checkVolatileEscapes(c.fn, false, candidates, aliases, escaped);
+            checkVolatileEscapes(c.fn, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Call1Node c) {
-            checkVolatileEscapes(c.fn, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(c.fn, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Call2Node c) {
-            checkVolatileEscapes(c.fn, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(c.fn, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Call3Node c) {
-            checkVolatileEscapes(c.fn, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.b, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.c, false, candidates, aliases, escaped);
+            checkVolatileEscapes(c.fn, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.b, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.c, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Call4Node c) {
-            checkVolatileEscapes(c.fn, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.b, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.c, false, candidates, aliases, escaped);
-            checkVolatileEscapes(c.d, false, candidates, aliases, escaped);
+            checkVolatileEscapes(c.fn, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.b, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.c, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(c.d, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof CallNNode c) {
-            checkVolatileEscapes(c.fn, false, candidates, aliases, escaped);
-            for (Node a : c.args) checkVolatileEscapes(a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(c.fn, false, false, loopStack, candidates, aliases, escaped);
+            for (Node a : c.args) checkVolatileEscapes(a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Add2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Sub2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Mul2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Div2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Rem2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Quot2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof UncheckedAdd2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof UncheckedSub2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof UncheckedMul2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof BitOp2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Lt2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Lte2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Gt2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Gte2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Equiv2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof NumEq2Node a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof IdenticalNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.b, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof NegateNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof IncNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof DecNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof UncheckedIncNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof UncheckedDecNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof UncheckedNegateNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof BitNotNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof LongCastNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof DoubleCastNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof EvenPNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof OddPNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof TypePredNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof ZeroPNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof PosPNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof NegPNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof NilPNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof NotNode a) {
-            checkVolatileEscapes(a.a, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof AlengthNode a) {
-            checkVolatileEscapes(a.arr, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.arr, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof AgetNode a) {
-            checkVolatileEscapes(a.arr, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.idx, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.arr, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.idx, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof AsetNode a) {
-            checkVolatileEscapes(a.arr, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.idx, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.val, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.arr, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.idx, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.val, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof CountNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof NthNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.idx, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.notFound, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.idx, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.notFound, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof GetNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.key, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.notFound, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.key, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.notFound, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof TransientNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof PersistentBangNode a) {
-            checkVolatileEscapes(a.target, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.target, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof ConjBangNode a) {
-            checkVolatileEscapes(a.target, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.val, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.target, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.val, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof AssocBangNode a) {
-            checkVolatileEscapes(a.target, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.key, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.val, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.target, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.key, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.val, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof ConjNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.val, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.val, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof AssocNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.key, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.val, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.key, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.val, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof DissocNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.key, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.key, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof FirstNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof NextNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof RestNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof SeqNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof PopNode a) {
-            checkVolatileEscapes(a.coll, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.coll, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof NewNode a) {
-            for (Node arg : a.args) checkVolatileEscapes(arg, false, candidates, aliases, escaped);
+            for (Node arg : a.args) checkVolatileEscapes(arg, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof StaticMethodNode a) {
-            for (Node arg : a.args) checkVolatileEscapes(arg, false, candidates, aliases, escaped);
+            for (Node arg : a.args) checkVolatileEscapes(arg, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof InstanceFieldNode a) {
-            checkVolatileEscapes(a.target, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.target, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof InstanceMethodNode a) {
-            checkVolatileEscapes(a.target, false, candidates, aliases, escaped);
-            for (Node arg : a.args) checkVolatileEscapes(arg, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.target, false, false, loopStack, candidates, aliases, escaped);
+            for (Node arg : a.args) checkVolatileEscapes(arg, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof SetVarNode a) {
-            checkVolatileEscapes(a.val, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.val, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof SetFieldNode a) {
-            checkVolatileEscapes(a.target, false, candidates, aliases, escaped);
-            checkVolatileEscapes(a.val, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.target, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.val, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof SetStaticFieldNode a) {
-            checkVolatileEscapes(a.val, false, candidates, aliases, escaped);
+            checkVolatileEscapes(a.val, false, false, loopStack, candidates, aliases, escaped);
         } else {
             // Conservative fallback for any unknown node type
             escaped.addAll(candidates);
@@ -1071,6 +1114,9 @@ public final class TypeAnalyzer {
             return record(n, ValType.fromConstant(cn.val));
         }
         if (n instanceof LocalNode ln) {
+            if (scalarVolatileSlots.contains(ln.slot) || scalarVolatileAliases.containsKey(ln.slot)) {
+                return record(n, ValType.ref(Atom.Volatile.class, true));
+            }
             ValType base = slotTypes[ln.slot];
             ValType narrowed = ValType.narrow(base, ln.hint);
             return record(n, narrowed);
@@ -1134,9 +1180,22 @@ public final class TypeAnalyzer {
         if (n instanceof LoopNode lp) {
             ValType[] initTypes = new ValType[lp.slots.length];
             for (int i = 0; i < lp.slots.length; i++) {
-                initTypes[i] = ValType.narrow(analyzeNode(lp.inits[i]), hintForSlot(lp.slots[i]));
-                if (slotTypes[lp.slots[i]] == ValType.BOTTOM) {
-                    slotTypes[lp.slots[i]] = initTypes[i];
+                int slot = lp.slots[i];
+                Node init = lp.inits[i];
+                if (scalarVolatileSlots.contains(slot) && init instanceof VolatileNode vn) {
+                    ValType initT = analyzeNode(vn.init);
+                    ValType joined = ValType.join(slotTypes[slot], initT);
+                    if (!joined.equals(slotTypes[slot])) {
+                        slotTypes[slot] = joined;
+                        changed = true;
+                    }
+                    record(vn, ValType.ref(Atom.Volatile.class, true));
+                    initTypes[i] = slotTypes[slot];
+                    continue;
+                }
+                initTypes[i] = ValType.narrow(analyzeNode(init), hintForSlot(slot));
+                if (slotTypes[slot] == ValType.BOTTOM) {
+                    slotTypes[slot] = initTypes[i];
                     changed = true;
                 }
             }
@@ -1149,9 +1208,11 @@ public final class TypeAnalyzer {
             recurStack.pop();
 
             for (int i = 0; i < lp.slots.length; i++) {
-                ValType merged = ValType.narrow(lf.accumTypes[i], hintForSlot(lp.slots[i]));
-                if (!merged.equals(slotTypes[lp.slots[i]])) {
-                    slotTypes[lp.slots[i]] = merged;
+                int slot = lp.slots[i];
+                if (scalarVolatileSlots.contains(slot)) continue;
+                ValType merged = ValType.narrow(lf.accumTypes[i], hintForSlot(slot));
+                if (!merged.equals(slotTypes[slot])) {
+                    slotTypes[slot] = merged;
                     changed = true;
                 }
             }
@@ -1639,6 +1700,7 @@ public final class TypeAnalyzer {
             }
         } else {
             for (int i = 0; i < frame.slots.length && i < argTypes.length; i++) {
+                if (scalarVolatileSlots.contains(frame.slots[i])) continue;
                 frame.accumTypes[i] = ValType.join(frame.accumTypes[i], argTypes[i]);
             }
         }

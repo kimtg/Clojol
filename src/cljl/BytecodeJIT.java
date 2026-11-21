@@ -1103,6 +1103,8 @@ public final class BytecodeJIT {
         final List<Label> allLabels = new ArrayList<>();
         final Set<Integer> boundedBelowMaxLong = new HashSet<>();
         final Set<Integer> boundedAboveMinLong = new HashSet<>();
+        final Set<Integer> boundedBelowMaxVolatiles = new HashSet<>();
+        final Set<Integer> boundedAboveMinVolatiles = new HashSet<>();
 
         FnMethod currentMethod;
         AnalysisResult analysis;
@@ -1563,6 +1565,158 @@ public final class BytecodeJIT {
             return analysis != null ? analysis.resolveScalarVolatileRoot(target) : -1;
         }
 
+        private int scalarLongVolatileSlot(Node n) {
+            if (n instanceof DerefNode dn) {
+                int root = scalarVolatileRoot(dn.target);
+                if (root != -1 && layout != null && layout.slotTypes[root] == ValType.LONG) {
+                    return root;
+                }
+            }
+            return -1;
+        }
+
+        private void invalidateVolatileBounds(int root) {
+            boundedBelowMaxVolatiles.remove(root);
+            boundedAboveMinVolatiles.remove(root);
+        }
+
+        private void emitMaterializeScalarVolatile(int rootSlot) {
+            ValType st = layout.slotTypes[rootSlot];
+            newInst("cljl/Atom$Volatile");
+            dup();
+            loadLogicalSlot(rootSlot);
+            if (st == ValType.LONG) {
+                invokespecial("cljl/Atom$Volatile", "<init>", "(J)V", 3, 0);
+            } else if (st == ValType.DOUBLE) {
+                invokespecial("cljl/Atom$Volatile", "<init>", "(D)V", 3, 0);
+            } else {
+                if (st == ValType.BOOL) boxValue(ValType.BOOL);
+                invokespecial("cljl/Atom$Volatile", "<init>", "(Ljava/lang/Object;)V", 2, 0);
+            }
+        }
+
+        private static boolean isSameLocalDeref(Node n, int targetSlot) {
+            return n instanceof DerefNode dn && dn.target instanceof LocalNode ln && ln.slot == targetSlot;
+        }
+
+        /**
+         * Fuses (vreset! v (op @v ...)) / (vswap! v op ...) on an escaping Atom.Volatile local
+         * into a single allocation-free Atom$Volatile.vswap* call.
+         * Returns: 0 = not fused, 1 = fused normally, 2 = fused and terminated.
+         */
+        private int tryEmitFusedVreset(VresetNode vr, ValType resultMode) {
+            if (!(vr.target instanceof LocalNode tl)) return 0;
+            int slot = tl.slot;
+            Node val = vr.val;
+
+            if (val instanceof IncNode a && isSameLocalDeref(a.a, slot)) {
+                emitRef(vr.target, Atom.Volatile.class);
+                if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapIncDiscard", "()V", 1, 0);
+                else if (resultMode == ValType.LONG) invokevirtual("cljl/Atom$Volatile", "vswapIncLong", "()J", 1, 2);
+                else if (resultMode == ValType.ANY) invokevirtual("cljl/Atom$Volatile", "vswapInc", "()Ljava/lang/Object;", 1, 1);
+                else return 0;
+                return 1;
+            }
+            if (val instanceof DecNode a && isSameLocalDeref(a.a, slot)) {
+                emitRef(vr.target, Atom.Volatile.class);
+                if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapDecDiscard", "()V", 1, 0);
+                else if (resultMode == ValType.LONG) invokevirtual("cljl/Atom$Volatile", "vswapDecLong", "()J", 1, 2);
+                else if (resultMode == ValType.ANY) invokevirtual("cljl/Atom$Volatile", "vswapDec", "()Ljava/lang/Object;", 1, 1);
+                else return 0;
+                return 1;
+            }
+            if (val instanceof UncheckedIncNode a && isSameLocalDeref(a.a, slot)) {
+                emitRef(vr.target, Atom.Volatile.class);
+                if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapUncheckedIncDiscard", "()V", 1, 0);
+                else if (resultMode == ValType.LONG) invokevirtual("cljl/Atom$Volatile", "vswapUncheckedIncLong", "()J", 1, 2);
+                else if (resultMode == ValType.ANY) invokevirtual("cljl/Atom$Volatile", "vswapUncheckedInc", "()Ljava/lang/Object;", 1, 1);
+                else return 0;
+                return 1;
+            }
+            if (val instanceof UncheckedDecNode a && isSameLocalDeref(a.a, slot)) {
+                emitRef(vr.target, Atom.Volatile.class);
+                if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapUncheckedDecDiscard", "()V", 1, 0);
+                else if (resultMode == ValType.LONG) invokevirtual("cljl/Atom$Volatile", "vswapUncheckedDecLong", "()J", 1, 2);
+                else if (resultMode == ValType.ANY) invokevirtual("cljl/Atom$Volatile", "vswapUncheckedDec", "()Ljava/lang/Object;", 1, 1);
+                else return 0;
+                return 1;
+            }
+            if (val instanceof Add2Node a && isSameLocalDeref(a.a, slot)) {
+                ValType rt = typeOf(a.b);
+                if (rt == ValType.LONG) {
+                    if (resultMode == null || resultMode == ValType.LONG || resultMode == ValType.ANY) {
+                        emitRef(vr.target, Atom.Volatile.class);
+                        if (emitLong(a.b)) return 2;
+                        if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapAddLongDiscard", "(J)V", 3, 0);
+                        else if (resultMode == ValType.LONG) invokevirtual("cljl/Atom$Volatile", "vswapAddLongPrim", "(J)J", 3, 2);
+                        else invokevirtual("cljl/Atom$Volatile", "vswapAddLong", "(J)Ljava/lang/Object;", 3, 1);
+                        return 1;
+                    }
+                } else if (rt == ValType.DOUBLE) {
+                    if (resultMode == null || resultMode == ValType.DOUBLE || resultMode == ValType.ANY) {
+                        emitRef(vr.target, Atom.Volatile.class);
+                        if (emitDouble(a.b)) return 2;
+                        if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapAddDoubleDiscard", "(D)V", 3, 0);
+                        else if (resultMode == ValType.DOUBLE) invokevirtual("cljl/Atom$Volatile", "vswapAddDoublePrim", "(D)D", 3, 2);
+                        else invokevirtual("cljl/Atom$Volatile", "vswapAddDouble", "(D)Ljava/lang/Object;", 3, 1);
+                        return 1;
+                    }
+                } else if (resultMode == null || resultMode == ValType.ANY) {
+                    emitRef(vr.target, Atom.Volatile.class);
+                    if (emitBoxed(a.b)) return 2;
+                    if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapAddDiscard", "(Ljava/lang/Object;)V", 2, 0);
+                    else invokevirtual("cljl/Atom$Volatile", "vswapAdd", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                    return 1;
+                }
+            }
+            if (val instanceof UncheckedAdd2Node a && isSameLocalDeref(a.a, slot) && typeOf(a.b) == ValType.LONG) {
+                if (resultMode == null || resultMode == ValType.ANY) {
+                    emitRef(vr.target, Atom.Volatile.class);
+                    if (emitLong(a.b)) return 2;
+                    if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapUncheckedAddLongDiscard", "(J)V", 3, 0);
+                    else invokevirtual("cljl/Atom$Volatile", "vswapUncheckedAddLong", "(J)Ljava/lang/Object;", 3, 1);
+                    return 1;
+                }
+            }
+            if (val instanceof Sub2Node a && isSameLocalDeref(a.a, slot) && (resultMode == null || resultMode == ValType.ANY)) {
+                ValType rt = typeOf(a.b);
+                emitRef(vr.target, Atom.Volatile.class);
+                if (rt == ValType.LONG) {
+                    if (emitLong(a.b)) return 2;
+                    if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapSubLongDiscard", "(J)V", 3, 0);
+                    else invokevirtual("cljl/Atom$Volatile", "vswapSubLong", "(J)Ljava/lang/Object;", 3, 1);
+                } else if (rt == ValType.DOUBLE) {
+                    if (emitDouble(a.b)) return 2;
+                    if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapSubDoubleDiscard", "(D)V", 3, 0);
+                    else invokevirtual("cljl/Atom$Volatile", "vswapSubDouble", "(D)Ljava/lang/Object;", 3, 1);
+                } else {
+                    if (emitBoxed(a.b)) return 2;
+                    if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapSubDiscard", "(Ljava/lang/Object;)V", 2, 0);
+                    else invokevirtual("cljl/Atom$Volatile", "vswapSub", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                }
+                return 1;
+            }
+            if (val instanceof Mul2Node a && isSameLocalDeref(a.a, slot) && (resultMode == null || resultMode == ValType.ANY)) {
+                ValType rt = typeOf(a.b);
+                emitRef(vr.target, Atom.Volatile.class);
+                if (rt == ValType.LONG) {
+                    if (emitLong(a.b)) return 2;
+                    if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapMulLongDiscard", "(J)V", 3, 0);
+                    else invokevirtual("cljl/Atom$Volatile", "vswapMulLong", "(J)Ljava/lang/Object;", 3, 1);
+                } else if (rt == ValType.DOUBLE) {
+                    if (emitDouble(a.b)) return 2;
+                    if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapMulDoubleDiscard", "(D)V", 3, 0);
+                    else invokevirtual("cljl/Atom$Volatile", "vswapMulDouble", "(D)Ljava/lang/Object;", 3, 1);
+                } else {
+                    if (emitBoxed(a.b)) return 2;
+                    if (resultMode == null) invokevirtual("cljl/Atom$Volatile", "vswapMulDiscard", "(Ljava/lang/Object;)V", 2, 0);
+                    else invokevirtual("cljl/Atom$Volatile", "vswapMul", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                }
+                return 1;
+            }
+            return 0;
+        }
+
         private void emitScalarSlotAs(int rootSlot, ValType desiredT) {
             ValType st = layout.slotTypes[rootSlot];
             if (desiredT == ValType.BOOL) {
@@ -1631,8 +1785,11 @@ public final class BytecodeJIT {
                 if (root != -1) {
                     if (emitSlotInit(root, vr.val)) return true;
                     storeLogicalSlot(root);
+                    invalidateVolatileBounds(root);
                     return false;
                 }
+                int fused = tryEmitFusedVreset(vr, null);
+                if (fused != 0) return fused == 2;
                 emitRef(vr.target, Atom.Volatile.class);
                 ValType vt = typeOf(vr.val);
                 if (vt == ValType.LONG) {
@@ -1866,6 +2023,13 @@ public final class BytecodeJIT {
                     ladd();
                     return false;
                 }
+                int vroot = scalarLongVolatileSlot(a.a);
+                if (vroot != -1 && boundedBelowMaxVolatiles.contains(vroot)) {
+                    loadLogicalSlot(vroot);
+                    ldcLong(1L);
+                    ladd();
+                    return false;
+                }
                 if (emitLong(a.a)) return true;
                 invokestatic("cljl/Numbers", "incExact", "(J)J", 2, 2);
                 return false;
@@ -1873,6 +2037,13 @@ public final class BytecodeJIT {
             if (node instanceof DecNode a && typeOf(a.a) == ValType.LONG) {
                 if (a.a instanceof LocalNode ln && boundedAboveMinLong.contains(ln.slot)) {
                     loadLogicalSlot(ln.slot);
+                    ldcLong(1L);
+                    lsub();
+                    return false;
+                }
+                int vroot = scalarLongVolatileSlot(a.a);
+                if (vroot != -1 && boundedAboveMinVolatiles.contains(vroot)) {
+                    loadLogicalSlot(vroot);
                     ldcLong(1L);
                     lsub();
                     return false;
@@ -2112,13 +2283,17 @@ public final class BytecodeJIT {
                         if (emitLong(vr.val)) return true;
                         dup2();
                         storeLogicalSlot(root);
+                        invalidateVolatileBounds(root);
                         return false;
                     }
                     if (emitSlotInit(root, vr.val)) return true;
                     storeLogicalSlot(root);
+                    invalidateVolatileBounds(root);
                     emitScalarSlotAs(root, ValType.LONG);
                     return false;
                 }
+                int fused = tryEmitFusedVreset(vr, ValType.LONG);
+                if (fused != 0) return fused == 2;
                 emitRef(vr.target, Atom.Volatile.class);
                 if (emitLong(vr.val)) return true;
                 invokevirtual("cljl/Atom$Volatile", "resetLong", "(J)J", 3, 2);
@@ -2361,13 +2536,17 @@ public final class BytecodeJIT {
                         if (emitDouble(vr.val)) return true;
                         dup2();
                         storeLogicalSlot(root);
+                        invalidateVolatileBounds(root);
                         return false;
                     }
                     if (emitSlotInit(root, vr.val)) return true;
                     storeLogicalSlot(root);
+                    invalidateVolatileBounds(root);
                     emitScalarSlotAs(root, ValType.DOUBLE);
                     return false;
                 }
+                int fused = tryEmitFusedVreset(vr, ValType.DOUBLE);
+                if (fused != 0) return fused == 2;
                 emitRef(vr.target, Atom.Volatile.class);
                 if (emitDouble(vr.val)) return true;
                 invokevirtual("cljl/Atom$Volatile", "resetDouble", "(D)D", 3, 2);
@@ -2772,6 +2951,7 @@ public final class BytecodeJIT {
                 if (root != -1) {
                     if (emitSlotInit(root, vr.val)) return true;
                     storeLogicalSlot(root);
+                    invalidateVolatileBounds(root);
                     emitScalarSlotAs(root, ValType.BOOL);
                     return false;
                 }
@@ -2839,35 +3019,72 @@ public final class BytecodeJIT {
 
             int thenBelowMax = -1, thenAboveMin = -1;
             int elseBelowMax = -1, elseAboveMin = -1;
+            int thenBelowMaxVol = -1, thenAboveMinVol = -1;
+            int elseBelowMaxVol = -1, elseAboveMinVol = -1;
             if (iff.test instanceof Lt2Node lt && typeOf(lt.a) == ValType.LONG && typeOf(lt.b) == ValType.LONG) {
                 if (lt.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) thenBelowMax = ln.slot;
+                else thenBelowMaxVol = scalarLongVolatileSlot(lt.a);
                 if (lt.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) thenAboveMin = ln.slot;
+                else thenAboveMinVol = scalarLongVolatileSlot(lt.b);
             } else if (iff.test instanceof Gt2Node gt && typeOf(gt.a) == ValType.LONG && typeOf(gt.b) == ValType.LONG) {
                 if (gt.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) thenAboveMin = ln.slot;
+                else thenAboveMinVol = scalarLongVolatileSlot(gt.a);
                 if (gt.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) thenBelowMax = ln.slot;
+                else thenBelowMaxVol = scalarLongVolatileSlot(gt.b);
             } else if (iff.test instanceof Gte2Node ge && typeOf(ge.a) == ValType.LONG && typeOf(ge.b) == ValType.LONG) {
                 if (ge.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) elseBelowMax = ln.slot;
+                else elseBelowMaxVol = scalarLongVolatileSlot(ge.a);
                 if (ge.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) elseAboveMin = ln.slot;
+                else elseAboveMinVol = scalarLongVolatileSlot(ge.b);
             } else if (iff.test instanceof Lte2Node le && typeOf(le.a) == ValType.LONG && typeOf(le.b) == ValType.LONG) {
                 if (le.a instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) elseAboveMin = ln.slot;
+                else elseAboveMinVol = scalarLongVolatileSlot(le.a);
                 if (le.b instanceof LocalNode ln && isImmutableLongSlot(ln.slot)) elseBelowMax = ln.slot;
+                else elseBelowMaxVol = scalarLongVolatileSlot(le.b);
             }
+
+            Set<Integer> outerVolBelow = new HashSet<>(boundedBelowMaxVolatiles);
+            Set<Integer> outerVolAbove = new HashSet<>(boundedAboveMinVolatiles);
 
             boolean addedThenBelow = thenBelowMax != -1 && boundedBelowMaxLong.add(thenBelowMax);
             boolean addedThenAbove = thenAboveMin != -1 && boundedAboveMinLong.add(thenAboveMin);
+            if (thenBelowMaxVol != -1) boundedBelowMaxVolatiles.add(thenBelowMaxVol);
+            if (thenAboveMinVol != -1) boundedAboveMinVolatiles.add(thenAboveMinVol);
             boolean thenTerm = emitTyped(iff.thenNode, targetT);
             if (addedThenBelow) boundedBelowMaxLong.remove(thenBelowMax);
             if (addedThenAbove) boundedAboveMinLong.remove(thenAboveMin);
+            Set<Integer> afterThenVolBelow = new HashSet<>(boundedBelowMaxVolatiles);
+            Set<Integer> afterThenVolAbove = new HashSet<>(boundedAboveMinVolatiles);
             if (!thenTerm) {
                 gotoLabel(endLabel);
             }
             curStack = stackAtIf;
             markLabel(elseLabel);
+            boundedBelowMaxVolatiles.clear();
+            boundedBelowMaxVolatiles.addAll(outerVolBelow);
+            boundedAboveMinVolatiles.clear();
+            boundedAboveMinVolatiles.addAll(outerVolAbove);
             boolean addedElseBelow = elseBelowMax != -1 && boundedBelowMaxLong.add(elseBelowMax);
             boolean addedElseAbove = elseAboveMin != -1 && boundedAboveMinLong.add(elseAboveMin);
+            if (elseBelowMaxVol != -1) boundedBelowMaxVolatiles.add(elseBelowMaxVol);
+            if (elseAboveMinVol != -1) boundedAboveMinVolatiles.add(elseAboveMinVol);
             boolean elseTerm = emitTyped(iff.elseNode, targetT);
             if (addedElseBelow) boundedBelowMaxLong.remove(elseBelowMax);
             if (addedElseAbove) boundedAboveMinLong.remove(elseAboveMin);
+            Set<Integer> afterElseVolBelow = new HashSet<>(boundedBelowMaxVolatiles);
+            Set<Integer> afterElseVolAbove = new HashSet<>(boundedAboveMinVolatiles);
+            boundedBelowMaxVolatiles.clear();
+            boundedBelowMaxVolatiles.addAll(outerVolBelow);
+            boundedAboveMinVolatiles.clear();
+            boundedAboveMinVolatiles.addAll(outerVolAbove);
+            if (!thenTerm) {
+                boundedBelowMaxVolatiles.retainAll(afterThenVolBelow);
+                boundedAboveMinVolatiles.retainAll(afterThenVolAbove);
+            }
+            if (!elseTerm) {
+                boundedBelowMaxVolatiles.retainAll(afterElseVolBelow);
+                boundedAboveMinVolatiles.retainAll(afterElseVolAbove);
+            }
             markLabel(endLabel);
             if (!thenTerm || !elseTerm) {
                 curStack = stackAtIf + valWords;
@@ -2903,14 +3120,17 @@ public final class BytecodeJIT {
 
         private boolean emitLoopTyped(LoopNode lp, ValType targetT) {
             for (int i = 0; i < lp.slots.length; i++) {
-                if (emitSlotInit(lp.slots[i], lp.inits[i])) return true;
-                storeLogicalSlot(lp.slots[i]);
+                if (emitLetSlotBinding(lp.slots[i], lp.inits[i])) return true;
             }
+            boundedBelowMaxVolatiles.clear();
+            boundedAboveMinVolatiles.clear();
             Label loopStart = new Label();
             markLabel(loopStart);
             pushLoopTarget(lp.slots, loopStart);
             boolean term = emitTyped(lp.body, targetT);
             popLoopTarget();
+            boundedBelowMaxVolatiles.clear();
+            boundedAboveMinVolatiles.clear();
             return term;
         }
 
@@ -3246,25 +3466,31 @@ public final class BytecodeJIT {
                 return true;
             }
             if (node instanceof Recur1Node r1) {
-                if (emitSlotInit(target.slots[0], r1.expr0)) return true;
-                storeLogicalSlot(target.slots[0]);
+                if (analysis == null || !analysis.scalarVolatileSlots.contains(target.slots[0])) {
+                    if (emitSlotInit(target.slots[0], r1.expr0)) return true;
+                    storeLogicalSlot(target.slots[0]);
+                }
                 gotoLabel(target.start);
                 return true;
             }
             if (node instanceof Recur2Node r2) {
-                if (emitSlotInit(target.slots[0], r2.expr0)) return true;
-                if (emitSlotInit(target.slots[1], r2.expr1)) return true;
-                storeLogicalSlot(target.slots[1]);
-                storeLogicalSlot(target.slots[0]);
+                boolean emit0 = analysis == null || !analysis.scalarVolatileSlots.contains(target.slots[0]);
+                boolean emit1 = analysis == null || !analysis.scalarVolatileSlots.contains(target.slots[1]);
+                if (emit0 && emitSlotInit(target.slots[0], r2.expr0)) return true;
+                if (emit1 && emitSlotInit(target.slots[1], r2.expr1)) return true;
+                if (emit1) storeLogicalSlot(target.slots[1]);
+                if (emit0) storeLogicalSlot(target.slots[0]);
                 gotoLabel(target.start);
                 return true;
             }
             RecurNNode rn = (RecurNNode) node;
+            boolean[] emitMask = new boolean[rn.exprs.length];
             for (int i = 0; i < rn.exprs.length; i++) {
-                if (emitSlotInit(target.slots[i], rn.exprs[i])) return true;
+                emitMask[i] = analysis == null || !analysis.scalarVolatileSlots.contains(target.slots[i]);
+                if (emitMask[i] && emitSlotInit(target.slots[i], rn.exprs[i])) return true;
             }
             for (int i = rn.slots.length - 1; i >= 0; i--) {
-                storeLogicalSlot(target.slots[i]);
+                if (emitMask[i]) storeLogicalSlot(target.slots[i]);
             }
             gotoLabel(target.start);
             return true;
@@ -3630,6 +3856,11 @@ public final class BytecodeJIT {
                 return false;
             }
             if (node instanceof LocalNode ln) {
+                int vroot = scalarVolatileRoot(ln);
+                if (vroot != -1) {
+                    emitMaterializeScalarVolatile(vroot);
+                    return false;
+                }
                 ValType st = layout.slotTypes[ln.slot];
                 loadLogicalSlot(ln.slot);
                 boxValue(st);
@@ -4318,9 +4549,12 @@ public final class BytecodeJIT {
                 if (root != -1) {
                     if (emitSlotInit(root, vr.val)) return true;
                     storeLogicalSlot(root);
+                    invalidateVolatileBounds(root);
                     emitScalarSlotAs(root, ValType.ANY);
                     return false;
                 }
+                int fused = tryEmitFusedVreset(vr, ValType.ANY);
+                if (fused != 0) return fused == 2;
                 emitRef(vr.target, Atom.Volatile.class);
                 ValType vt = typeOf(vr.val);
                 if (vt == ValType.LONG) {

@@ -1395,6 +1395,119 @@
       (is (thrown? RuntimeException (edn/read-string "#?(:clj 1)")))
       (is (thrown? RuntimeException (edn/read-string "#=(+ 1 2)"))))))
 
+(deftest volatile-loop-optimizations-test
+  (testing "return-escaped volatile! (deferred materialization)"
+    (let [make-counted (fn [n]
+                         (let [v (volatile! 0)]
+                           (loop [i 0]
+                             (when (< i n)
+                               (vswap! v inc)
+                               (recur (inc i))))
+                           v))
+          v1 (make-counted 100)]
+      (is (volatile? v1))
+      (is (= 100 @v1))
+      (is (= 101 (vswap! v1 inc))))
+    (let [cond-ret (fn [flag]
+                     (let [v (volatile! 10)]
+                       (vswap! v + 5)
+                       (if flag v (do (vreset! v :kw) v))))]
+      (is (= 15 @(cond-ret true)))
+      (is (= :kw @(cond-ret false))))
+    (let [mixed-ret (fn [n]
+                      (let [v (volatile! 0)]
+                        (dotimes [_ n] (vswap! v inc))
+                        (vreset! v (+ @v 0.5))
+                        v))]
+      (is (= 5.5 @(mixed-ret 5)))))
+
+  (testing "loop-bound invariant vs rebound volatile!"
+    (let [inv-fn (fn [n]
+                   (loop [v (volatile! 0) i 0]
+                     (if (< i n)
+                       (do (vswap! v + i) (recur v (inc i)))
+                       @v)))
+          rebind-fn (fn [n]
+                      (loop [v (volatile! 0) i 0]
+                        (if (< i n)
+                          (recur (volatile! (+ @v i)) (inc i))
+                          @v)))]
+      (is (= 4950 (inv-fn 100)))
+      (is (= 4950 (rebind-fn 100)))))
+
+  (testing "while range-bounded overflow check elimination and invalidation"
+    (let [while-inc (fn [n]
+                      (let [v (volatile! 0)]
+                        (while (< @v n)
+                          (vswap! v inc))
+                        @v))
+          while-dec (fn [n]
+                      (let [v (volatile! n)]
+                        (while (> @v 0)
+                          (vswap! v dec))
+                        @v))
+          double-step-overflow (fn []
+                                 (let [v (volatile! (- Long/MAX_VALUE 1))]
+                                   (if (< @v Long/MAX_VALUE)
+                                     (do
+                                       (vswap! v inc)
+                                       (vswap! v inc))
+                                     @v)))]
+      (is (= 1000 (while-inc 1000)))
+      (is (= 0 (while-dec 1000)))
+      ;; Second vswap! must NOT have its overflow check suppressed -> ArithmeticException
+      (is (thrown? ArithmeticException (double-step-overflow)))))
+
+  (testing "fused escaping Atom.Volatile ops (param, def, closure, overflow, mixed types)"
+    (let [param-ops (fn [v n]
+                      (dotimes [_ n] (vswap! v inc))
+                      (dotimes [_ 2] (vswap! v dec))
+                      (dotimes [_ 3] (vswap! v unchecked-inc))
+                      (dotimes [_ 1] (vswap! v unchecked-dec))
+                      (vswap! v + 10)
+                      (vswap! v - 4)
+                      (vswap! v * 2)
+                      @v)
+          v (volatile! 0)]
+      (is (= 24 (param-ops v 6)))
+      (is (= 24 @v)))
+
+    ;; Overflow & 63-bit fast-long boundary transitions
+    (let [v-max (volatile! Long/MAX_VALUE)
+          v-min (volatile! Long/MIN_VALUE)
+          v-62 (volatile! (dec (bit-shift-left 1 62)))
+          v-uinc (volatile! Long/MAX_VALUE)
+          inc-param (fn [vol] (vswap! vol inc))
+          dec-param (fn [vol] (vswap! vol dec))
+          uinc-param (fn [vol] (vswap! vol unchecked-inc))
+          add-param (fn [vol x] (vswap! vol + x))
+          mul-param (fn [vol x] (vswap! vol * x))]
+      (is (thrown? ArithmeticException (inc-param v-max)))
+      (is (thrown? ArithmeticException (dec-param v-min)))
+      (is (= (bit-shift-left 1 62) (inc-param v-62)))
+      (is (= (+ (bit-shift-left 1 62) 10) (add-param v-62 10)))
+      (is (= Long/MIN_VALUE (uinc-param v-uinc)))
+      (let [v-dbl (volatile! 1.5)]
+        (is (= 4.0 (add-param v-dbl 2.5)))
+        (is (= 8.0 (mul-param v-dbl 2.0)))
+        (is (= 10.0 (add-param v-dbl 2))))
+      (let [v-mix (volatile! 0)
+            closure-add (fn [x] (vswap! v-mix + x))]
+        (is (= 5 (closure-add 5)))
+        (is (= 7.5 (closure-add 2.5)))
+        (is (= :done (vreset! v-mix :done)))
+        (is (= :done @v-mix))))
+
+    ;; Multi-threaded visibility (acquire/release happens-before publication)
+    (let [v (volatile! 0)
+          done (volatile! false)
+          writer (future
+                   (dotimes [_ 10000] (vswap! v inc))
+                   (vreset! done true))]
+      @writer
+      (is (true? @done))
+      (is (= 10000 @v)))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

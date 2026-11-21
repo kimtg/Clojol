@@ -419,87 +419,598 @@ public final class Atom implements IDeref, IMeta, IReference {
     }
 
     public static final class Volatile implements IDeref {
-        private static final Object BOXED_LONG = new Object();
+        private static final boolean STRICT_VOLATILE = Boolean.getBoolean("cljl.volatile.strict");
+        private static final Object VOL_UNBOXED = new Object();
         private static final Object BOXED_DOUBLE = new Object();
 
+        private static final VarHandle VOL_FAST_VH;
+        private static final VarHandle VOL_VAL_VH;
+        private static final VarHandle VOL_DVAL_VH;
+        static {
+            try {
+                MethodHandles.Lookup lookup = MethodHandles.lookup();
+                VOL_FAST_VH = lookup.findVarHandle(Volatile.class, "fastVal", long.class);
+                VOL_VAL_VH = lookup.findVarHandle(Volatile.class, "val", Object.class);
+                VOL_DVAL_VH = lookup.findVarHandle(Volatile.class, "dval", double.class);
+            } catch (ReflectiveOperationException e) {
+                throw new ExceptionInInitializerError(e);
+            }
+        }
+
+        // Bit 0 == 0: active 63-bit fast-long mode, value is (fastVal >> 1).
+        // Bit 0 == 1: fallback mode (val == BOXED_DOUBLE -> dval, otherwise boxed Object in val).
+        // Transitions are strictly one-way (fast-long -> boxed, fast-double -> boxed),
+        // preventing any torn (tag, value) reads across threads.
+        private volatile long fastVal;
         public volatile Object val;
-        public volatile long lval;
-        public volatile double dval;
+        private volatile double dval;
 
         public Volatile(Object val) {
-            if (val instanceof Long l) {
-                this.lval = l;
-                this.val = BOXED_LONG;
+            if (val instanceof Long l && isFastLong(l)) {
+                this.val = VOL_UNBOXED;
+                this.fastVal = l << 1;
             } else if (val instanceof Double d) {
                 this.dval = d;
                 this.val = BOXED_DOUBLE;
+                this.fastVal = 1L;
             } else {
                 this.val = val;
+                this.fastVal = 1L;
             }
         }
 
         public Volatile(long val) {
-            this.lval = val;
-            this.val = BOXED_LONG;
+            if (isFastLong(val)) {
+                this.val = VOL_UNBOXED;
+                this.fastVal = val << 1;
+            } else {
+                this.val = Long.valueOf(val);
+                this.fastVal = 1L;
+            }
         }
 
         public Volatile(double val) {
             this.dval = val;
             this.val = BOXED_DOUBLE;
+            this.fastVal = 1L;
+        }
+
+        private long getFast() {
+            return STRICT_VOLATILE ? this.fastVal : (long) VOL_FAST_VH.getAcquire(this);
+        }
+
+        private void setFast(long encoded) {
+            if (STRICT_VOLATILE) {
+                this.fastVal = encoded;
+            } else {
+                VOL_FAST_VH.setRelease(this, encoded);
+            }
+        }
+
+        private Object getValField() {
+            return STRICT_VOLATILE ? this.val : VOL_VAL_VH.getAcquire(this);
+        }
+
+        private void setValField(Object v) {
+            if (STRICT_VOLATILE) {
+                this.val = v;
+            } else {
+                VOL_VAL_VH.setRelease(this, v);
+            }
+        }
+
+        private double getDvalField() {
+            return STRICT_VOLATILE ? this.dval : (double) VOL_DVAL_VH.getAcquire(this);
+        }
+
+        private void setDvalField(double d) {
+            if (STRICT_VOLATILE) {
+                this.dval = d;
+            } else {
+                VOL_DVAL_VH.setRelease(this, d);
+            }
         }
 
         @Override
         public Object deref() {
-            Object o = val;
-            if (o == BOXED_LONG) return Long.valueOf(lval);
-            if (o == BOXED_DOUBLE) return Double.valueOf(dval);
+            long f = getFast();
+            if ((f & 1L) == 0L) return Long.valueOf(f >> 1);
+            Object o = getValField();
+            if (o == BOXED_DOUBLE) return Double.valueOf(getDvalField());
             return o;
         }
 
         public long derefLong() {
-            Object o = val;
-            if (o == BOXED_LONG) return lval;
-            if (o == BOXED_DOUBLE) return Numbers.longCast(dval);
+            long f = getFast();
+            if ((f & 1L) == 0L) return f >> 1;
+            Object o = getValField();
+            if (o == BOXED_DOUBLE) return Numbers.longCast(getDvalField());
             return Numbers.longCast(o);
         }
 
         public double derefDouble() {
-            Object o = val;
-            if (o == BOXED_DOUBLE) return dval;
-            if (o == BOXED_LONG) return (double) lval;
+            long f = getFast();
+            if ((f & 1L) == 0L) return (double) (f >> 1);
+            Object o = getValField();
+            if (o == BOXED_DOUBLE) return getDvalField();
             return Numbers.toDouble(o);
         }
 
         public Object reset(Object newval) {
-            Object cur = val;
-            if (cur == BOXED_LONG && newval instanceof Long l) {
-                this.lval = l;
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                if (newval instanceof Long l && isFastLong(l)) {
+                    setFast(l << 1);
+                    return newval;
+                }
+                setValField(newval);
+                setFast(1L);
                 return newval;
             }
+            Object cur = getValField();
             if (cur == BOXED_DOUBLE && newval instanceof Double d) {
-                this.dval = d;
+                setDvalField(d);
                 return newval;
             }
-            this.val = newval;
+            setValField(newval);
             return newval;
         }
 
         public long resetLong(long newval) {
-            if (val == BOXED_LONG) {
-                this.lval = newval;
-            } else {
-                this.val = Long.valueOf(newval);
+            long f = getFast();
+            if ((f & 1L) == 0L && isFastLong(newval)) {
+                setFast(newval << 1);
+                return newval;
             }
+            Object boxed = Long.valueOf(newval);
+            setValField(boxed);
+            if ((f & 1L) == 0L) setFast(1L);
             return newval;
         }
 
         public double resetDouble(double newval) {
-            if (val == BOXED_DOUBLE) {
-                this.dval = newval;
-            } else {
-                this.val = Double.valueOf(newval);
+            long f = getFast();
+            if ((f & 1L) != 0L && getValField() == BOXED_DOUBLE) {
+                setDvalField(newval);
+                return newval;
             }
+            Object boxed = Double.valueOf(newval);
+            setValField(boxed);
+            if ((f & 1L) == 0L) setFast(1L);
             return newval;
+        }
+
+        // Fused unboxed RMW helpers for (vswap! v op ...) and (vreset! v (op @v ...))
+
+        public void vswapIncDiscard() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur < MAX_FAST) {
+                    setFast((cur + 1L) << 1);
+                    return;
+                }
+            }
+            reset(Numbers.inc(deref()));
+        }
+
+        public Object vswapInc() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur < MAX_FAST) {
+                    long nxt = cur + 1L;
+                    setFast(nxt << 1);
+                    return Long.valueOf(nxt);
+                }
+            }
+            return reset(Numbers.inc(deref()));
+        }
+
+        public long vswapIncLong() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur < MAX_FAST) {
+                    long nxt = cur + 1L;
+                    setFast(nxt << 1);
+                    return nxt;
+                }
+            }
+            return Numbers.longCast(reset(Numbers.inc(deref())));
+        }
+
+        public void vswapDecDiscard() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur > MIN_FAST) {
+                    setFast((cur - 1L) << 1);
+                    return;
+                }
+            }
+            reset(Numbers.dec(deref()));
+        }
+
+        public Object vswapDec() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur > MIN_FAST) {
+                    long nxt = cur - 1L;
+                    setFast(nxt << 1);
+                    return Long.valueOf(nxt);
+                }
+            }
+            return reset(Numbers.dec(deref()));
+        }
+
+        public long vswapDecLong() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur > MIN_FAST) {
+                    long nxt = cur - 1L;
+                    setFast(nxt << 1);
+                    return nxt;
+                }
+            }
+            return Numbers.longCast(reset(Numbers.dec(deref())));
+        }
+
+        public void vswapUncheckedIncDiscard() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur < MAX_FAST) {
+                    setFast((cur + 1L) << 1);
+                    return;
+                }
+            }
+            reset(Numbers.uncheckedInc(deref()));
+        }
+
+        public Object vswapUncheckedInc() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur < MAX_FAST) {
+                    long nxt = cur + 1L;
+                    setFast(nxt << 1);
+                    return Long.valueOf(nxt);
+                }
+            }
+            return reset(Numbers.uncheckedInc(deref()));
+        }
+
+        public long vswapUncheckedIncLong() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur < MAX_FAST) {
+                    long nxt = cur + 1L;
+                    setFast(nxt << 1);
+                    return nxt;
+                }
+            }
+            return Numbers.longCast(reset(Numbers.uncheckedInc(deref())));
+        }
+
+        public void vswapUncheckedDecDiscard() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur > MIN_FAST) {
+                    setFast((cur - 1L) << 1);
+                    return;
+                }
+            }
+            reset(Numbers.uncheckedDec(deref()));
+        }
+
+        public Object vswapUncheckedDec() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur > MIN_FAST) {
+                    long nxt = cur - 1L;
+                    setFast(nxt << 1);
+                    return Long.valueOf(nxt);
+                }
+            }
+            return reset(Numbers.uncheckedDec(deref()));
+        }
+
+        public long vswapUncheckedDecLong() {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                if (cur > MIN_FAST) {
+                    long nxt = cur - 1L;
+                    setFast(nxt << 1);
+                    return nxt;
+                }
+            }
+            return Numbers.longCast(reset(Numbers.uncheckedDec(deref())));
+        }
+
+        public void vswapAddLongDiscard(long x) {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                long nxt = cur + x;
+                if (((cur ^ nxt) & (x ^ nxt)) >= 0L && isFastLong(nxt)) {
+                    setFast(nxt << 1);
+                    return;
+                }
+            } else if (getValField() == BOXED_DOUBLE) {
+                setDvalField(getDvalField() + (double) x);
+                return;
+            }
+            reset(Numbers.add(deref(), Long.valueOf(x)));
+        }
+
+        public Object vswapAddLong(long x) {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                long nxt = cur + x;
+                if (((cur ^ nxt) & (x ^ nxt)) >= 0L && isFastLong(nxt)) {
+                    setFast(nxt << 1);
+                    return Long.valueOf(nxt);
+                }
+            } else if (getValField() == BOXED_DOUBLE) {
+                double nxt = getDvalField() + (double) x;
+                setDvalField(nxt);
+                return Double.valueOf(nxt);
+            }
+            return reset(Numbers.add(deref(), Long.valueOf(x)));
+        }
+
+        public long vswapAddLongPrim(long x) {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                long nxt = cur + x;
+                if (((cur ^ nxt) & (x ^ nxt)) >= 0L && isFastLong(nxt)) {
+                    setFast(nxt << 1);
+                    return nxt;
+                }
+            }
+            return Numbers.longCast(reset(Numbers.add(deref(), Long.valueOf(x))));
+        }
+
+        public void vswapUncheckedAddLongDiscard(long x) {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                long nxt = cur + x;
+                if (isFastLong(nxt)) {
+                    setFast(nxt << 1);
+                    return;
+                }
+            }
+            reset(Numbers.uncheckedAdd(deref(), Long.valueOf(x)));
+        }
+
+        public Object vswapUncheckedAddLong(long x) {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                long nxt = cur + x;
+                if (isFastLong(nxt)) {
+                    setFast(nxt << 1);
+                    return Long.valueOf(nxt);
+                }
+            }
+            return reset(Numbers.uncheckedAdd(deref(), Long.valueOf(x)));
+        }
+
+        public void vswapAddDoubleDiscard(double x) {
+            long f = getFast();
+            if ((f & 1L) != 0L && getValField() == BOXED_DOUBLE) {
+                setDvalField(getDvalField() + x);
+                return;
+            }
+            reset(Numbers.add(deref(), Double.valueOf(x)));
+        }
+
+        public Object vswapAddDouble(double x) {
+            long f = getFast();
+            if ((f & 1L) != 0L && getValField() == BOXED_DOUBLE) {
+                double nxt = getDvalField() + x;
+                setDvalField(nxt);
+                return Double.valueOf(nxt);
+            }
+            return reset(Numbers.add(deref(), Double.valueOf(x)));
+        }
+
+        public double vswapAddDoublePrim(double x) {
+            long f = getFast();
+            if ((f & 1L) != 0L && getValField() == BOXED_DOUBLE) {
+                double nxt = getDvalField() + x;
+                setDvalField(nxt);
+                return nxt;
+            }
+            return Numbers.toDouble(reset(Numbers.add(deref(), Double.valueOf(x))));
+        }
+
+        public void vswapAddDiscard(Object x) {
+            if (x instanceof Long lx) {
+                vswapAddLongDiscard(lx);
+                return;
+            }
+            if (x instanceof Double dx) {
+                vswapAddDoubleDiscard(dx);
+                return;
+            }
+            reset(Numbers.add(deref(), x));
+        }
+
+        public Object vswapAdd(Object x) {
+            if (x instanceof Long lx) {
+                return vswapAddLong(lx);
+            }
+            if (x instanceof Double dx) {
+                return vswapAddDouble(dx);
+            }
+            return reset(Numbers.add(deref(), x));
+        }
+
+        public void vswapSubLongDiscard(long x) {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                long nxt = cur - x;
+                if (((cur ^ x) & (cur ^ nxt)) >= 0L && isFastLong(nxt)) {
+                    setFast(nxt << 1);
+                    return;
+                }
+            } else if (getValField() == BOXED_DOUBLE) {
+                setDvalField(getDvalField() - (double) x);
+                return;
+            }
+            reset(Numbers.minus(deref(), Long.valueOf(x)));
+        }
+
+        public Object vswapSubLong(long x) {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                long nxt = cur - x;
+                if (((cur ^ x) & (cur ^ nxt)) >= 0L && isFastLong(nxt)) {
+                    setFast(nxt << 1);
+                    return Long.valueOf(nxt);
+                }
+            } else if (getValField() == BOXED_DOUBLE) {
+                double nxt = getDvalField() - (double) x;
+                setDvalField(nxt);
+                return Double.valueOf(nxt);
+            }
+            return reset(Numbers.minus(deref(), Long.valueOf(x)));
+        }
+
+        public void vswapSubDoubleDiscard(double x) {
+            long f = getFast();
+            if ((f & 1L) != 0L && getValField() == BOXED_DOUBLE) {
+                setDvalField(getDvalField() - x);
+                return;
+            }
+            reset(Numbers.minus(deref(), Double.valueOf(x)));
+        }
+
+        public Object vswapSubDouble(double x) {
+            long f = getFast();
+            if ((f & 1L) != 0L && getValField() == BOXED_DOUBLE) {
+                double nxt = getDvalField() - x;
+                setDvalField(nxt);
+                return Double.valueOf(nxt);
+            }
+            return reset(Numbers.minus(deref(), Double.valueOf(x)));
+        }
+
+        public void vswapSubDiscard(Object x) {
+            if (x instanceof Long lx) {
+                vswapSubLongDiscard(lx);
+                return;
+            }
+            if (x instanceof Double dx) {
+                vswapSubDoubleDiscard(dx);
+                return;
+            }
+            reset(Numbers.minus(deref(), x));
+        }
+
+        public Object vswapSub(Object x) {
+            if (x instanceof Long lx) {
+                return vswapSubLong(lx);
+            }
+            if (x instanceof Double dx) {
+                return vswapSubDouble(dx);
+            }
+            return reset(Numbers.minus(deref(), x));
+        }
+
+        public void vswapMulLongDiscard(long x) {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                long ax = cur < 0 ? -cur : cur;
+                long ay = x < 0 ? -x : x;
+                if (((ax | ay) >>> 31) == 0L) {
+                    long nxt = cur * x;
+                    if (isFastLong(nxt)) {
+                        setFast(nxt << 1);
+                        return;
+                    }
+                }
+            } else if (getValField() == BOXED_DOUBLE) {
+                setDvalField(getDvalField() * (double) x);
+                return;
+            }
+            reset(Numbers.multiply(deref(), Long.valueOf(x)));
+        }
+
+        public Object vswapMulLong(long x) {
+            long f = getFast();
+            if ((f & 1L) == 0L) {
+                long cur = f >> 1;
+                long ax = cur < 0 ? -cur : cur;
+                long ay = x < 0 ? -x : x;
+                if (((ax | ay) >>> 31) == 0L) {
+                    long nxt = cur * x;
+                    if (isFastLong(nxt)) {
+                        setFast(nxt << 1);
+                        return Long.valueOf(nxt);
+                    }
+                }
+            } else if (getValField() == BOXED_DOUBLE) {
+                double nxt = getDvalField() * (double) x;
+                setDvalField(nxt);
+                return Double.valueOf(nxt);
+            }
+            return reset(Numbers.multiply(deref(), Long.valueOf(x)));
+        }
+
+        public void vswapMulDoubleDiscard(double x) {
+            long f = getFast();
+            if ((f & 1L) != 0L && getValField() == BOXED_DOUBLE) {
+                setDvalField(getDvalField() * x);
+                return;
+            }
+            reset(Numbers.multiply(deref(), Double.valueOf(x)));
+        }
+
+        public Object vswapMulDouble(double x) {
+            long f = getFast();
+            if ((f & 1L) != 0L && getValField() == BOXED_DOUBLE) {
+                double nxt = getDvalField() * x;
+                setDvalField(nxt);
+                return Double.valueOf(nxt);
+            }
+            return reset(Numbers.multiply(deref(), Double.valueOf(x)));
+        }
+
+        public void vswapMulDiscard(Object x) {
+            if (x instanceof Long lx) {
+                vswapMulLongDiscard(lx);
+                return;
+            }
+            if (x instanceof Double dx) {
+                vswapMulDoubleDiscard(dx);
+                return;
+            }
+            reset(Numbers.multiply(deref(), x));
+        }
+
+        public Object vswapMul(Object x) {
+            if (x instanceof Long lx) {
+                return vswapMulLong(lx);
+            }
+            if (x instanceof Double dx) {
+                return vswapMulDouble(dx);
+            }
+            return reset(Numbers.multiply(deref(), x));
         }
 
         @Override
