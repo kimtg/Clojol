@@ -156,6 +156,7 @@ public final class Agent extends Fn implements IDeref, IReference {
             }
         }
         if (schedule) {
+            Atom.markMultiThreaded();
             try {
                 action.exec.execute(() -> processQueue(action.exec));
             } catch (Throwable t) {

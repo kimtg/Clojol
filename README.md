@@ -50,9 +50,14 @@ Note that `gcc -O3` and `clang -O3` do not perform recursive pure-call CSE (conv
 | `volatile!` (local `vswap!`) | **0.13 ms** | 8.22 ms | **61.8x faster** |
 | `volatile!` (returned/tail-escaping `vswap!`) | **0.14 ms** | 6.39 ms | **46.6x faster** |
 | `volatile!` (escaping param `vswap!`) | **0.75 ms** | 6.50 ms | **8.6x faster** |
-| `atom` (`swap!`) | **10.44 ms** | 13.06 ms | **1.25x faster** |
+| `atom` (local `while` / `loop` `swap!`) | **0.28 ms** | 14.05 ms | **50.2x faster** |
+| `atom` (returned/tail-escaping `swap!`) | **0.46 ms** | 11.80 ms | **25.7x faster** |
+| `atom` (escaping param `swap!`, single-thread biased) | **1.56 ms** | 12.39 ms | **7.9x faster** |
+| `atom` (escaping param `reset!`, single-thread biased) | **0.55 ms** | 7.36 ms | **13.4x faster** |
+| `atom` (escaping param `swap!`, multi-thread / `-Dcljl.atom.strict=true`) | **8.41 ms** | 12.39 ms | **1.47x faster** |
+| `atom` (4-thread contended `4×250k` `swap!`) | **37.37 ms** | 105.55 ms | **2.82x faster** |
 
-`BytecodeJIT.java` eliminates redundant overflow checks on range-bounded `long` loop counters (`(< i n)` -> `(inc i)`), scalar-replaces local and tail-escaping `volatile!` bindings into unboxed JVM locals (deferring allocation until return when needed), compiles escaping `vswap!`/`vreset!` into fused unboxed RMW ops backed by a single-field 63-bit fast-long `VarHandle` acquire/release path in `Atom.Volatile` (pass `-Dcljl.volatile.strict=true` for full `volatile` fence semantics), and uses a lock-free 63-bit fast-long `VarHandle` CAS path in `Atom` to eliminate `Long` allocation and GC write barriers on numeric `swap!`/`reset!`.
+`BytecodeJIT.java` eliminates redundant overflow checks on range-bounded `long` loop counters (`(< i n)` -> `(inc i)`), scalar-replaces non-escaping and tail-escaping local `volatile!` and `atom` bindings into unboxed JVM locals (deferring allocation until return when needed), compiles escaping `vswap!`/`vreset!` into fused unboxed RMW ops backed by a single-field 63-bit fast-long `VarHandle` acquire/release path in `Atom.Volatile` (pass `-Dcljl.volatile.strict=true` for full `volatile` fence semantics), and uses **single-thread biasing** in `Atom` (`SINGLE_THREAD == Thread.currentThread()` with `VarHandle.setRelease`, automatically and permanently revoked via JMM happens-before before any second thread starts in `future`, `pmap`, `agent`, `tap>`, `clojure.core.async`, or Java `Thread`/`Executor`/`ForkJoin`/`CompletableFuture`/`Timer`/`BaseStream` interop; pass `-Dcljl.atom.strict=true` to disable). Once multi-threaded, `Atom` switches seamlessly to a wait-free 63-bit `VarHandle.getAndAdd` (`lock xadd`) and CAS path that eliminates `Long` allocation and GC write barriers on numeric `swap!`/`reset!`.
 
 ### Cold Startup & AOT Cache Impact
 

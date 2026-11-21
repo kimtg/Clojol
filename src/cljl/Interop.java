@@ -162,7 +162,19 @@ public final class Interop {
         return next;
     }
 
+    public static boolean isConcurrencyClass(Class<?> c) {
+        return c != null && (
+                Thread.class.isAssignableFrom(c)
+                || Thread.Builder.class.isAssignableFrom(c)
+                || java.util.concurrent.Executor.class.isAssignableFrom(c)
+                || java.util.concurrent.ForkJoinTask.class.isAssignableFrom(c)
+                || java.util.concurrent.CompletableFuture.class.isAssignableFrom(c)
+                || java.util.Timer.class.isAssignableFrom(c)
+                || java.util.stream.BaseStream.class.isAssignableFrom(c));
+    }
+
     public static Object invokeConstructor(Class<?> clazz, Object[] args) {
+        if (isConcurrencyClass(clazz)) Atom.markMultiThreaded();
         try {
             int arity = args == null ? 0 : args.length;
             ClassCache cc = CLASS_INFO.get(clazz);
@@ -242,6 +254,7 @@ public final class Interop {
     }
 
     public static Object invokeStaticMethod(Class<?> clazz, String methodName, Object[] args) {
+        if (isConcurrencyClass(clazz)) Atom.markMultiThreaded();
         try {
             int arity = args == null ? 0 : args.length;
             Method best = findBestMethod(clazz, methodName, args, true);
@@ -267,6 +280,7 @@ public final class Interop {
             if (phm.containsKey(kw)) return phm.valAt(kw);
         }
         Class<?> clazz = target.getClass();
+        if (isConcurrencyClass(clazz)) Atom.markMultiThreaded();
         try {
             ClassCache cc = CLASS_INFO.get(clazz);
             Field f = cc.instanceFields.get(fieldName);
@@ -290,6 +304,7 @@ public final class Interop {
     public static Object setInstanceField(Object target, String fieldName, Object val) {
         if (target == null) throw new NullPointerException("Cannot set field " + fieldName + " on nil");
         Class<?> clazz = target.getClass();
+        if (isConcurrencyClass(clazz)) Atom.markMultiThreaded();
         try {
             Field f = findField(clazz, fieldName);
             if (f == null) throw new IllegalArgumentException("No such field " + fieldName + " on " + clazz.getName());
@@ -327,6 +342,7 @@ public final class Interop {
             }
         }
         Class<?> clazz = target.getClass();
+        if (isConcurrencyClass(clazz)) Atom.markMultiThreaded();
         try {
             int arity = args == null ? 0 : args.length;
             Method best = findBestMethod(clazz, methodName, args, false);

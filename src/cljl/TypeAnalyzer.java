@@ -25,6 +25,8 @@ public final class TypeAnalyzer {
         public final IdentityHashMap<Node, Field> resolvedFields = new IdentityHashMap<>();
         public final Set<Integer> scalarVolatileSlots = new HashSet<>();
         public final Map<Integer, Integer> scalarVolatileAliases = new HashMap<>();
+        public final Set<Integer> scalarAtomSlots = new HashSet<>();
+        public final Map<Integer, Integer> scalarAtomAliases = new HashMap<>();
 
         AnalysisResult(ValType[] entryParamTypes, ValType[] slotTypes, ValType returnType, boolean recurIncompatible) {
             this.entryParamTypes = entryParamTypes;
@@ -40,6 +42,23 @@ public final class TypeAnalyzer {
                 if (root != null) return root;
             }
             return -1;
+        }
+
+        public int resolveScalarAtomRoot(Node target) {
+            if (target instanceof LocalNode ln) {
+                if (scalarAtomSlots.contains(ln.slot)) return ln.slot;
+                Integer root = scalarAtomAliases.get(ln.slot);
+                if (root != null) return root;
+            }
+            return -1;
+        }
+
+        public boolean isScalarBoxSlot(int slot) {
+            return scalarVolatileSlots.contains(slot) || scalarAtomSlots.contains(slot);
+        }
+
+        public boolean isScalarBoxAlias(int slot) {
+            return scalarVolatileAliases.containsKey(slot) || scalarAtomAliases.containsKey(slot);
         }
 
         public ValType typeOf(Node n) {
@@ -91,6 +110,8 @@ public final class TypeAnalyzer {
     private final IdentityHashMap<Node, Field> resolvedFields = new IdentityHashMap<>();
     private final Set<Integer> scalarVolatileSlots = new HashSet<>();
     private final Map<Integer, Integer> scalarVolatileAliases = new HashMap<>();
+    private final Set<Integer> scalarAtomSlots = new HashSet<>();
+    private final Map<Integer, Integer> scalarAtomAliases = new HashMap<>();
 
     private final Deque<RecurFrame> recurStack = new ArrayDeque<>();
     private ValType selfReturnType = ValType.BOTTOM;
@@ -589,7 +610,23 @@ public final class TypeAnalyzer {
         return -1;
     }
 
-    private void discoverScalarVolatiles() {
+    private int resolveScalarAtomRoot(Node target) {
+        if (target instanceof LocalNode ln) {
+            if (scalarAtomSlots.contains(ln.slot)) return ln.slot;
+            Integer root = scalarAtomAliases.get(ln.slot);
+            if (root != null) return root;
+        }
+        return -1;
+    }
+
+    private boolean isScalarBoxSlot(int slot) {
+        return scalarVolatileSlots.contains(slot) || scalarAtomSlots.contains(slot);
+    }
+
+    private boolean escapeIsAtom = false;
+
+    private void discoverScalarBoxes(boolean isAtom, Set<Integer> outSlots, Map<Integer, Integer> outAliases) {
+        this.escapeIsAtom = isAtom;
         Set<Integer> forbidden = new HashSet<>();
         if (method.selfSlot != -1) forbidden.add(method.selfSlot);
         for (int s : method.paramSlots) forbidden.add(s);
@@ -607,15 +644,20 @@ public final class TypeAnalyzer {
         candidates.removeAll(escaped);
         if (candidates.isEmpty()) return;
 
-        scalarVolatileSlots.addAll(candidates);
+        outSlots.addAll(candidates);
         for (Map.Entry<Integer, Integer> e : aliases.entrySet()) {
             if (candidates.contains(e.getValue())) {
-                scalarVolatileAliases.put(e.getKey(), e.getValue());
+                outAliases.put(e.getKey(), e.getValue());
             }
         }
     }
 
-    private static void collectVolatileCandidates(
+    private void discoverScalarVolatiles() {
+        discoverScalarBoxes(false, scalarVolatileSlots, scalarVolatileAliases);
+        discoverScalarBoxes(true, scalarAtomSlots, scalarAtomAliases);
+    }
+
+    private void collectVolatileCandidates(
             Node n, Set<Integer> forbidden, Set<Integer> seenBinders,
             Set<Integer> candidates, Map<Integer, Integer> aliases) {
         if (n == null) return;
@@ -624,9 +666,12 @@ public final class TypeAnalyzer {
                 int s = ln.slots[i];
                 boolean fresh = seenBinders.add(s) && !forbidden.contains(s);
                 Node init = ln.inits[i];
-                if (fresh && init instanceof VolatileNode vn) {
+                if (fresh && !escapeIsAtom && init instanceof VolatileNode vn) {
                     candidates.add(s);
                     collectVolatileCandidates(vn.init, forbidden, seenBinders, candidates, aliases);
+                } else if (fresh && escapeIsAtom && init instanceof AtomNode an) {
+                    candidates.add(s);
+                    collectVolatileCandidates(an.init, forbidden, seenBinders, candidates, aliases);
                 } else if (fresh && init instanceof LocalNode src) {
                     Integer root = candidates.contains(src.slot) ? Integer.valueOf(src.slot) : aliases.get(src.slot);
                     if (root != null) {
@@ -650,9 +695,12 @@ public final class TypeAnalyzer {
                 int s = lp.slots[i];
                 Node init = lp.inits[i];
                 boolean fresh = seenBinders.add(s) && !forbidden.contains(s);
-                if (fresh && init instanceof VolatileNode vn) {
+                if (fresh && !escapeIsAtom && init instanceof VolatileNode vn) {
                     candidates.add(s);
                     collectVolatileCandidates(vn.init, forbidden, seenBinders, candidates, aliases);
+                } else if (fresh && escapeIsAtom && init instanceof AtomNode an) {
+                    candidates.add(s);
+                    collectVolatileCandidates(an.init, forbidden, seenBinders, candidates, aliases);
                 } else {
                     forbidden.add(s);
                     candidates.remove(s);
@@ -688,11 +736,20 @@ public final class TypeAnalyzer {
             collectVolatileCandidates(ln.body, forbidden, seenBinders, candidates, aliases);
         } else if (n instanceof VolatileNode vn) {
             collectVolatileCandidates(vn.init, forbidden, seenBinders, candidates, aliases);
+        } else if (n instanceof AtomNode an) {
+            collectVolatileCandidates(an.init, forbidden, seenBinders, candidates, aliases);
         } else if (n instanceof DerefNode dn) {
             collectVolatileCandidates(dn.target, forbidden, seenBinders, candidates, aliases);
         } else if (n instanceof VresetNode vr) {
             collectVolatileCandidates(vr.target, forbidden, seenBinders, candidates, aliases);
             collectVolatileCandidates(vr.val, forbidden, seenBinders, candidates, aliases);
+        } else if (n instanceof ResetBangNode rb) {
+            collectVolatileCandidates(rb.target, forbidden, seenBinders, candidates, aliases);
+            collectVolatileCandidates(rb.val, forbidden, seenBinders, candidates, aliases);
+        } else if (n instanceof SwapBangNode sb) {
+            collectVolatileCandidates(sb.target, forbidden, seenBinders, candidates, aliases);
+            collectVolatileCandidates(sb.fn, forbidden, seenBinders, candidates, aliases);
+            for (Node a : sb.extraArgs) collectVolatileCandidates(a, forbidden, seenBinders, candidates, aliases);
         }
     }
 
@@ -708,7 +765,7 @@ public final class TypeAnalyzer {
         return root != null ? root : -1;
     }
 
-    private static void checkRecurArgEscapes(
+    private void checkRecurArgEscapes(
             Node[] exprs, Deque<LoopNode> loopStack,
             Set<Integer> candidates, Map<Integer, Integer> aliases, Set<Integer> escaped) {
         LoopNode curLoop = loopStack.peek();
@@ -725,7 +782,7 @@ public final class TypeAnalyzer {
         }
     }
 
-    private static void checkVolatileEscapes(
+    private void checkVolatileEscapes(
             Node n, boolean asVolatileTarget, boolean inTailExit, Deque<LoopNode> loopStack,
             Set<Integer> candidates, Map<Integer, Integer> aliases, Set<Integer> escaped) {
         if (n == null) return;
@@ -744,7 +801,7 @@ public final class TypeAnalyzer {
             return;
         }
         if (n instanceof VresetNode vr) {
-            checkVolatileEscapes(vr.target, true, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(vr.target, !escapeIsAtom, false, loopStack, candidates, aliases, escaped);
             checkVolatileEscapes(vr.val, false, false, loopStack, candidates, aliases, escaped);
             return;
         }
@@ -757,12 +814,12 @@ public final class TypeAnalyzer {
             return;
         }
         if (n instanceof ResetBangNode rb) {
-            checkVolatileEscapes(rb.target, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(rb.target, escapeIsAtom, false, loopStack, candidates, aliases, escaped);
             checkVolatileEscapes(rb.val, false, false, loopStack, candidates, aliases, escaped);
             return;
         }
         if (n instanceof SwapBangNode sb) {
-            checkVolatileEscapes(sb.target, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(sb.target, escapeIsAtom, false, loopStack, candidates, aliases, escaped);
             checkVolatileEscapes(sb.fn, false, false, loopStack, candidates, aliases, escaped);
             for (Node a : sb.extraArgs) checkVolatileEscapes(a, false, false, loopStack, candidates, aliases, escaped);
             return;
@@ -771,8 +828,10 @@ public final class TypeAnalyzer {
             for (int i = 0; i < ln.slots.length; i++) {
                 int s = ln.slots[i];
                 Node init = ln.inits[i];
-                if (candidates.contains(s) && init instanceof VolatileNode vn) {
+                if (candidates.contains(s) && !escapeIsAtom && init instanceof VolatileNode vn) {
                     checkVolatileEscapes(vn.init, false, false, loopStack, candidates, aliases, escaped);
+                } else if (candidates.contains(s) && escapeIsAtom && init instanceof AtomNode an) {
+                    checkVolatileEscapes(an.init, false, false, loopStack, candidates, aliases, escaped);
                 } else if (aliases.containsKey(s) && init instanceof LocalNode) {
                     // Alias binding: escape is checked at uses of s
                 } else {
@@ -805,8 +864,10 @@ public final class TypeAnalyzer {
         } else if (n instanceof LoopNode lp) {
             for (int i = 0; i < lp.slots.length; i++) {
                 Node init = lp.inits[i];
-                if (candidates.contains(lp.slots[i]) && init instanceof VolatileNode vn) {
+                if (candidates.contains(lp.slots[i]) && !escapeIsAtom && init instanceof VolatileNode vn) {
                     checkVolatileEscapes(vn.init, false, false, loopStack, candidates, aliases, escaped);
+                } else if (candidates.contains(lp.slots[i]) && escapeIsAtom && init instanceof AtomNode an) {
+                    checkVolatileEscapes(an.init, false, false, loopStack, candidates, aliases, escaped);
                 } else {
                     checkVolatileEscapes(init, false, false, loopStack, candidates, aliases, escaped);
                 }
@@ -1100,6 +1161,8 @@ public final class TypeAnalyzer {
         res.resolvedFields.putAll(resolvedFields);
         res.scalarVolatileSlots.addAll(scalarVolatileSlots);
         res.scalarVolatileAliases.putAll(scalarVolatileAliases);
+        res.scalarAtomSlots.addAll(scalarAtomSlots);
+        res.scalarAtomAliases.putAll(scalarAtomAliases);
         return res;
     }
 
@@ -1116,6 +1179,9 @@ public final class TypeAnalyzer {
         if (n instanceof LocalNode ln) {
             if (scalarVolatileSlots.contains(ln.slot) || scalarVolatileAliases.containsKey(ln.slot)) {
                 return record(n, ValType.ref(Atom.Volatile.class, true));
+            }
+            if (scalarAtomSlots.contains(ln.slot) || scalarAtomAliases.containsKey(ln.slot)) {
+                return record(n, ValType.ref(Atom.class, true));
             }
             ValType base = slotTypes[ln.slot];
             ValType narrowed = ValType.narrow(base, ln.hint);
@@ -1165,7 +1231,17 @@ public final class TypeAnalyzer {
                     record(vn, ValType.ref(Atom.Volatile.class, true));
                     continue;
                 }
-                if (scalarVolatileAliases.containsKey(slot)) {
+                if (scalarAtomSlots.contains(slot) && init instanceof AtomNode an) {
+                    ValType initT = analyzeNode(an.init);
+                    ValType joined = ValType.join(slotTypes[slot], initT);
+                    if (!joined.equals(slotTypes[slot])) {
+                        slotTypes[slot] = joined;
+                        changed = true;
+                    }
+                    record(an, ValType.ref(Atom.class, true));
+                    continue;
+                }
+                if (scalarVolatileAliases.containsKey(slot) || scalarAtomAliases.containsKey(slot)) {
                     continue;
                 }
                 ValType initT = analyzeNode(init);
@@ -1193,6 +1269,17 @@ public final class TypeAnalyzer {
                     initTypes[i] = slotTypes[slot];
                     continue;
                 }
+                if (scalarAtomSlots.contains(slot) && init instanceof AtomNode an) {
+                    ValType initT = analyzeNode(an.init);
+                    ValType joined = ValType.join(slotTypes[slot], initT);
+                    if (!joined.equals(slotTypes[slot])) {
+                        slotTypes[slot] = joined;
+                        changed = true;
+                    }
+                    record(an, ValType.ref(Atom.class, true));
+                    initTypes[i] = slotTypes[slot];
+                    continue;
+                }
                 initTypes[i] = ValType.narrow(analyzeNode(init), hintForSlot(slot));
                 if (slotTypes[slot] == ValType.BOTTOM) {
                     slotTypes[slot] = initTypes[i];
@@ -1209,7 +1296,7 @@ public final class TypeAnalyzer {
 
             for (int i = 0; i < lp.slots.length; i++) {
                 int slot = lp.slots[i];
-                if (scalarVolatileSlots.contains(slot)) continue;
+                if (isScalarBoxSlot(slot)) continue;
                 ValType merged = ValType.narrow(lf.accumTypes[i], hintForSlot(slot));
                 if (!merged.equals(slotTypes[slot])) {
                     slotTypes[slot] = merged;
@@ -1578,6 +1665,10 @@ public final class TypeAnalyzer {
             if (root != -1) {
                 return record(n, slotTypes[root]);
             }
+            root = resolveScalarAtomRoot(dn.target);
+            if (root != -1) {
+                return record(n, slotTypes[root]);
+            }
             analyzeNode(dn.target);
             return record(n, ValType.ANY);
         }
@@ -1600,14 +1691,35 @@ public final class TypeAnalyzer {
             return record(n, ValType.ref(Atom.class, true));
         }
         if (n instanceof ResetBangNode rb) {
-            analyzeNode(rb.target);
             ValType vt = analyzeNode(rb.val);
+            int root = resolveScalarAtomRoot(rb.target);
+            if (root != -1) {
+                ValType joined = ValType.join(slotTypes[root], vt);
+                if (!joined.equals(slotTypes[root])) {
+                    slotTypes[root] = joined;
+                    changed = true;
+                }
+                return record(n, vt);
+            }
+            analyzeNode(rb.target);
             return record(n, vt);
         }
         if (n instanceof SwapBangNode sb) {
-            analyzeNode(sb.target);
             analyzeNode(sb.fn);
-            for (Node a : sb.extraArgs) analyzeNode(a);
+            ValType[] argTs = new ValType[sb.extraArgs.length];
+            for (int i = 0; i < sb.extraArgs.length; i++) argTs[i] = analyzeNode(sb.extraArgs[i]);
+            int root = resolveScalarAtomRoot(sb.target);
+            if (root != -1) {
+                ValType curT = slotTypes[root];
+                ValType resT = inferScalarSwapType(curT, sb.fn, argTs);
+                ValType joined = ValType.join(curT, resT);
+                if (!joined.equals(curT)) {
+                    slotTypes[root] = joined;
+                    changed = true;
+                }
+                return record(n, resT);
+            }
+            analyzeNode(sb.target);
             return record(n, ValType.ANY);
         }
 
@@ -1700,10 +1812,36 @@ public final class TypeAnalyzer {
             }
         } else {
             for (int i = 0; i < frame.slots.length && i < argTypes.length; i++) {
-                if (scalarVolatileSlots.contains(frame.slots[i])) continue;
+                if (isScalarBoxSlot(frame.slots[i])) continue;
                 frame.accumTypes[i] = ValType.join(frame.accumTypes[i], argTypes[i]);
             }
         }
+    }
+
+    private static ValType inferScalarSwapType(ValType curT, Node fnNode, ValType[] argTs) {
+        if (curT == ValType.BOTTOM) return ValType.BOTTOM;
+        if (fnNode instanceof VarRefNode vr && vr.var != null && vr.var.ns == RT.CLOJURE_NS) {
+            String name = vr.var.sym.name;
+            if (argTs.length == 0) {
+                if ("inc".equals(name) || "dec".equals(name)) {
+                    if (curT == ValType.LONG) return ValType.LONG;
+                    if (curT == ValType.DOUBLE) return ValType.DOUBLE;
+                } else if ("unchecked-inc".equals(name) || "unchecked-dec".equals(name)) {
+                    if (curT == ValType.LONG) return ValType.LONG;
+                }
+            } else if (argTs.length == 1) {
+                ValType at = argTs[0];
+                if ("+".equals(name) || "-".equals(name) || "*".equals(name)) {
+                    if (curT == ValType.LONG && at == ValType.LONG) return ValType.LONG;
+                    if ((curT == ValType.DOUBLE || curT == ValType.LONG) && (at == ValType.DOUBLE || at == ValType.LONG)) {
+                        return ValType.DOUBLE;
+                    }
+                } else if ("unchecked-add".equals(name) || "unchecked-subtract".equals(name) || "unchecked-multiply".equals(name)) {
+                    if (curT == ValType.LONG && at == ValType.LONG) return ValType.LONG;
+                }
+            }
+        }
+        return ValType.ANY;
     }
 
     private ValType checkSelfLocalCall(Node fnNode, ValType[] argTypes) {

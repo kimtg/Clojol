@@ -2169,7 +2169,10 @@ public final class StdLibMore {
         }
         void complete(boolean ok) {
             done.complete(ok);
-            if (callback != null) Thread.startVirtualThread(() -> callback.invoke(ok));
+            if (callback != null) {
+                Atom.markMultiThreaded();
+                Thread.startVirtualThread(() -> callback.invoke(ok));
+            }
             if (onSelect != null) onSelect.run();
         }
     }
@@ -2182,7 +2185,10 @@ public final class StdLibMore {
         TakeWaiter(Fn callback, Runnable onSelect) { this.callback = callback; this.onSelect = onSelect; }
         void complete(Object val) {
             done.complete(val);
-            if (callback != null) Thread.startVirtualThread(() -> callback.invoke(val));
+            if (callback != null) {
+                Atom.markMultiThreaded();
+                Thread.startVirtualThread(() -> callback.invoke(val));
+            }
             if (onSelect != null) onSelect.run();
         }
     }
@@ -2434,6 +2440,7 @@ public final class StdLibMore {
             Channel res = new Channel(new FixedBuffer(1), null, null);
             Fn fn = (Fn) f;
             Map<Var, Object> bindings = Var.cloneThreadBindings();
+            Atom.markMultiThreaded();
             Thread.startVirtualThread(() -> {
                 if (!bindings.isEmpty()) Var.pushThreadBindings(bindings);
                 try {

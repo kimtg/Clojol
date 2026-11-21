@@ -129,8 +129,21 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
         return false;
     }
 
+    private boolean isCoreArithVar() {
+        if (ns != RT.CLOJURE_NS || sym == null) return false;
+        return switch (sym.name) {
+            case "+", "-", "*", "inc", "dec",
+                 "unchecked-add", "unchecked-subtract", "unchecked-multiply",
+                 "unchecked-inc", "unchecked-dec" -> true;
+            default -> false;
+        };
+    }
+
     public Var bindRoot(Object val) {
         Object old = this.root;
+        if (old != UNBOUND && isCoreArithVar()) {
+            Core.coreRedefined = true;
+        }
         this.root = val;
         notifyWatches(old, val);
         return this;
@@ -166,6 +179,9 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
     }
 
     public Var setDynamic(boolean b) {
+        if (b && !this.dynamic && isCoreArithVar()) {
+            Core.coreRedefined = true;
+        }
         this.dynamic = b;
         return this;
     }

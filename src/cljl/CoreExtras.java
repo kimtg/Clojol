@@ -256,11 +256,16 @@ public final class CoreExtras {
         def(ns, "parse-uuid", new ExtraFn1(50, "parse-uuid"));
         def(ns, "random-uuid", new ExtraFn0(1, "random-uuid"));
 
-        def(ns, "unchecked-add", new ExtraFn2(10, "unchecked-add"));
-        def(ns, "unchecked-subtract", new ExtraFn2(11, "unchecked-subtract"));
-        def(ns, "unchecked-multiply", new ExtraFn2(12, "unchecked-multiply"));
-        def(ns, "unchecked-inc", new ExtraFn1(51, "unchecked-inc"));
-        def(ns, "unchecked-dec", new ExtraFn1(52, "unchecked-dec"));
+        Core.uncheckedAddFn = new ExtraFn2(10, "unchecked-add");
+        Core.uncheckedSubFn = new ExtraFn2(11, "unchecked-subtract");
+        Core.uncheckedMulFn = new ExtraFn2(12, "unchecked-multiply");
+        Core.uncheckedIncFn = new ExtraFn1(51, "unchecked-inc");
+        Core.uncheckedDecFn = new ExtraFn1(52, "unchecked-dec");
+        def(ns, "unchecked-add", Core.uncheckedAddFn);
+        def(ns, "unchecked-subtract", Core.uncheckedSubFn);
+        def(ns, "unchecked-multiply", Core.uncheckedMulFn);
+        def(ns, "unchecked-inc", Core.uncheckedIncFn);
+        def(ns, "unchecked-dec", Core.uncheckedDecFn);
         def(ns, "unchecked-negate", new ExtraFn1(53, "unchecked-negate"));
 
         def(ns, "max-key", new ExtraFnV(0, "max-key"));
@@ -1969,6 +1974,7 @@ public final class CoreExtras {
                 Object x = _a;
             CopyOnWriteArraySet<Fn> s = tapSet;
             if (s == null || s.isEmpty()) return Boolean.FALSE;
+            Atom.markMultiThreaded();
             TapExecutorHolder.EXECUTOR.execute(() -> {
                 for (Fn f : s) {
                     try { f.invoke(x); } catch (Throwable ignored) {}

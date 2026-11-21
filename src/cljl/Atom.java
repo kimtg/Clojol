@@ -5,6 +5,7 @@ import cljl.lang.IMeta;
 import cljl.lang.IReference;
 import cljl.lang.ISeq;
 import cljl.lang.PersistentHashMap;
+import cljl.lang.PersistentVector;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.Map;
@@ -17,9 +18,38 @@ import java.util.concurrent.*;
 public final class Atom implements IDeref, IMeta, IReference {
     public static final ExecutorService VIRTUAL_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
+    private static final boolean STRICT_ATOM = Boolean.getBoolean("cljl.atom.strict");
+    private static volatile Thread SINGLE_THREAD = null;
+
+    /**
+     * Enables single-thread biased fast path for the sole application main thread.
+     * Permanently revoked (set to null) BEFORE any second thread is started via
+     * FutureObj, Agent, tap>, core.async, or Java Thread/Executor interop.
+     */
+    public static void initMainThread() {
+        if (!STRICT_ATOM) {
+            SINGLE_THREAD = Thread.currentThread();
+        }
+    }
+
+    public static void markMultiThreaded() {
+        if (SINGLE_THREAD != null) {
+            SINGLE_THREAD = null;
+        }
+    }
+
+    public static boolean isSingleThreaded() {
+        return SINGLE_THREAD == Thread.currentThread();
+    }
+
     private static final Object UNBOXED = new Object();
     private static final long MIN_FAST = -(1L << 62);
     private static final long MAX_FAST = (1L << 62) - 1L;
+    private static final long MIN_XADD = -(1L << 60);
+    private static final long MAX_XADD = (1L << 60);
+    private static final long MIN_XADD_ENC = MIN_XADD << 1;
+    private static final long MAX_XADD_ENC = MAX_XADD << 1;
+    private static final long MAX_XADD_DELTA = 1L << 30;
 
     private static final VarHandle STATE_VH;
     private static final VarHandle FAST_VH;
@@ -140,6 +170,10 @@ public final class Atom implements IDeref, IMeta, IReference {
     public Object reset(Object newval) {
         if (newval instanceof Long nl && isFastLong(nl)) {
             long encoded = nl << 1;
+            if (SINGLE_THREAD == Thread.currentThread() && (this.fastVal & 1L) == 0L) {
+                FAST_VH.setRelease(this, encoded);
+                return newval;
+            }
             for (;;) {
                 long f = this.fastVal;
                 if ((f & 1L) != 0L) break;
@@ -149,6 +183,10 @@ public final class Atom implements IDeref, IMeta, IReference {
             ensureBoxed();
         }
         if (!this.hasHooks) {
+            if (SINGLE_THREAD == Thread.currentThread()) {
+                STATE_VH.setRelease(this, newval);
+                return newval;
+            }
             STATE_VH.getAndSet(this, newval);
             return newval;
         }
@@ -161,6 +199,10 @@ public final class Atom implements IDeref, IMeta, IReference {
     public long resetLong(long newval) {
         if (isFastLong(newval)) {
             long encoded = newval << 1;
+            if (SINGLE_THREAD == Thread.currentThread() && (this.fastVal & 1L) == 0L) {
+                FAST_VH.setRelease(this, encoded);
+                return newval;
+            }
             for (;;) {
                 long f = this.fastVal;
                 if ((f & 1L) != 0L) break;
@@ -178,6 +220,10 @@ public final class Atom implements IDeref, IMeta, IReference {
                 return false;
             }
             if (newv instanceof Long nl && isFastLong(nl)) {
+                if (SINGLE_THREAD == Thread.currentThread()) {
+                    FAST_VH.setRelease(this, nl << 1);
+                    return true;
+                }
                 if (FAST_VH.compareAndSet(this, f, nl << 1)) return true;
                 if ((this.fastVal & 1L) == 0L) return false;
             } else {
@@ -188,6 +234,13 @@ public final class Atom implements IDeref, IMeta, IReference {
             }
         }
         if (!this.hasHooks) {
+            if (SINGLE_THREAD == Thread.currentThread()) {
+                if (this.state == oldv) {
+                    STATE_VH.setRelease(this, newv);
+                    return true;
+                }
+                return false;
+            }
             return STATE_VH.compareAndSet(this, oldv, newv);
         }
         validate(newv);
@@ -196,172 +249,661 @@ public final class Atom implements IDeref, IMeta, IReference {
         return ret;
     }
 
-    public void swapDiscard(Fn f) {
-        if (f == Core.incFn) {
-            for (;;) {
-                long fv = this.fastVal;
-                if ((fv & 1L) != 0L) break;
-                long cur = fv >> 1;
-                if (cur < MAX_FAST) {
-                    if (FAST_VH.compareAndSet(this, fv, (cur + 1L) << 1)) return;
-                } else {
-                    ensureBoxed();
-                    break;
-                }
-            }
-        } else if (f == Core.decFn) {
-            for (;;) {
-                long fv = this.fastVal;
-                if ((fv & 1L) != 0L) break;
-                long cur = fv >> 1;
-                if (cur > MIN_FAST) {
-                    if (FAST_VH.compareAndSet(this, fv, (cur - 1L) << 1)) return;
-                } else {
-                    ensureBoxed();
-                    break;
-                }
-            }
-        }
-        swap(f);
+    private Object readBoxedState() {
+        Object s = this.state;
+        return (s != UNBOXED) ? s : ensureBoxed();
     }
 
-    public void swapDiscard(Fn f, long x) {
-        if (f == Core.addFn) {
+    public void resetLongDiscard(long newval) {
+        if (isFastLong(newval)) {
+            long encoded = newval << 1;
+            if (SINGLE_THREAD == Thread.currentThread() && (this.fastVal & 1L) == 0L) {
+                FAST_VH.setRelease(this, encoded);
+                return;
+            }
             for (;;) {
-                long fv = this.fastVal;
-                if ((fv & 1L) != 0L) break;
-                long cur = fv >> 1;
-                long nxt = cur + x;
-                if (((cur ^ nxt) & (x ^ nxt)) >= 0L && isFastLong(nxt)) {
-                    if (FAST_VH.compareAndSet(this, fv, nxt << 1)) return;
-                } else {
-                    ensureBoxed();
-                    break;
-                }
+                long f = this.fastVal;
+                if ((f & 1L) != 0L) break;
+                if (FAST_VH.compareAndSet(this, f, encoded)) return;
             }
         }
-        swap(f, Long.valueOf(x));
+        reset(Long.valueOf(newval));
     }
 
-    public Object swap(Fn f) {
-        if (f == Core.incFn) {
+    public Object resetVals(Object newval) {
+        if (newval instanceof Long nl && isFastLong(nl)) {
+            long encoded = nl << 1;
             for (;;) {
-                long fv = this.fastVal;
-                if ((fv & 1L) != 0L) break;
-                long cur = fv >> 1;
-                if (cur < MAX_FAST) {
-                    long nxt = cur + 1L;
-                    if (FAST_VH.compareAndSet(this, fv, nxt << 1)) return Long.valueOf(nxt);
-                } else {
-                    ensureBoxed();
-                    break;
-                }
-            }
-        } else if (f == Core.decFn) {
-            for (;;) {
-                long fv = this.fastVal;
-                if ((fv & 1L) != 0L) break;
-                long cur = fv >> 1;
-                if (cur > MIN_FAST) {
-                    long nxt = cur - 1L;
-                    if (FAST_VH.compareAndSet(this, fv, nxt << 1)) return Long.valueOf(nxt);
-                } else {
-                    ensureBoxed();
-                    break;
+                long f = this.fastVal;
+                if ((f & 1L) != 0L) break;
+                if (FAST_VH.compareAndSet(this, f, encoded)) {
+                    return PersistentVector.createOwning(Long.valueOf(f >> 1), newval);
                 }
             }
         } else {
             ensureBoxed();
         }
         if (!this.hasHooks) {
-            for (;;) {
-                Object v = getBoxedState();
-                Object newv = f.invoke(v);
-                if (STATE_VH.compareAndSet(this, v, newv)) return newv;
+            Object oldval = STATE_VH.getAndSet(this, newval);
+            return PersistentVector.createOwning(oldval, newval);
+        }
+        validate(newval);
+        Object oldval = STATE_VH.getAndSet(this, newval);
+        notifyWatches(oldval, newval);
+        return PersistentVector.createOwning(oldval, newval);
+    }
+
+    private boolean tryAddFastDiscard(long delta, boolean checked) {
+        if (SINGLE_THREAD == Thread.currentThread()) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return false;
+            long cur = fv >> 1;
+            long nxt = cur + delta;
+            if ((!checked || ((cur ^ nxt) & (delta ^ nxt)) >= 0L) && isFastLong(nxt)) {
+                FAST_VH.setRelease(this, nxt << 1);
+                return true;
+            }
+            ensureBoxed();
+            return false;
+        }
+        if (delta >= -MAX_XADD_DELTA && delta <= MAX_XADD_DELTA) {
+            long fv = this.fastVal;
+            if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
+                long prev = (long) FAST_VH.getAndAdd(this, delta << 1);
+                if ((prev & 1L) == 0L) {
+                    long nxt = (prev >> 1) + delta;
+                    if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                    return true;
+                }
+                return false;
             }
         }
         for (;;) {
-            Object v = getBoxedState();
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return false;
+            long cur = fv >> 1;
+            long nxt = cur + delta;
+            if ((!checked || ((cur ^ nxt) & (delta ^ nxt)) >= 0L) && isFastLong(nxt)) {
+                if (FAST_VH.compareAndSet(this, fv, nxt << 1)) return true;
+                Thread.onSpinWait();
+            } else {
+                ensureBoxed();
+                return false;
+            }
+        }
+    }
+
+    private boolean trySubFastDiscard(long x, boolean checked) {
+        if (SINGLE_THREAD == Thread.currentThread()) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return false;
+            long cur = fv >> 1;
+            long nxt = cur - x;
+            if ((!checked || ((cur ^ x) & (cur ^ nxt)) >= 0L) && isFastLong(nxt)) {
+                FAST_VH.setRelease(this, nxt << 1);
+                return true;
+            }
+            ensureBoxed();
+            return false;
+        }
+        if (x >= -MAX_XADD_DELTA && x <= MAX_XADD_DELTA) {
+            return tryAddFastDiscard(-x, checked);
+        }
+        for (;;) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return false;
+            long cur = fv >> 1;
+            long nxt = cur - x;
+            if ((!checked || ((cur ^ x) & (cur ^ nxt)) >= 0L) && isFastLong(nxt)) {
+                if (FAST_VH.compareAndSet(this, fv, nxt << 1)) return true;
+                Thread.onSpinWait();
+            } else {
+                ensureBoxed();
+                return false;
+            }
+        }
+    }
+
+    private boolean tryMulFastDiscard(long x, boolean checked) {
+        if (SINGLE_THREAD == Thread.currentThread()) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return false;
+            long cur = fv >> 1;
+            long nxt;
+            if (checked) {
+                try { nxt = Math.multiplyExact(cur, x); }
+                catch (ArithmeticException e) { ensureBoxed(); return false; }
+            } else {
+                nxt = cur * x;
+            }
+            if (isFastLong(nxt)) {
+                FAST_VH.setRelease(this, nxt << 1);
+                return true;
+            }
+            ensureBoxed();
+            return false;
+        }
+        for (;;) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return false;
+            long cur = fv >> 1;
+            long nxt;
+            if (checked) {
+                try {
+                    nxt = Math.multiplyExact(cur, x);
+                } catch (ArithmeticException e) {
+                    ensureBoxed();
+                    return false;
+                }
+            } else {
+                nxt = cur * x;
+            }
+            if (isFastLong(nxt)) {
+                if (FAST_VH.compareAndSet(this, fv, nxt << 1)) return true;
+                Thread.onSpinWait();
+            } else {
+                ensureBoxed();
+                return false;
+            }
+        }
+    }
+
+    private Object tryAddFastBoxed(long delta, boolean checked) {
+        if (SINGLE_THREAD == Thread.currentThread()) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return UNBOXED;
+            long cur = fv >> 1;
+            long nxt = cur + delta;
+            if ((!checked || ((cur ^ nxt) & (delta ^ nxt)) >= 0L) && isFastLong(nxt)) {
+                FAST_VH.setRelease(this, nxt << 1);
+                return Long.valueOf(nxt);
+            }
+            ensureBoxed();
+            return UNBOXED;
+        }
+        if (delta >= -MAX_XADD_DELTA && delta <= MAX_XADD_DELTA) {
+            long fv = this.fastVal;
+            if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
+                long prev = (long) FAST_VH.getAndAdd(this, delta << 1);
+                if ((prev & 1L) == 0L) {
+                    long nxt = (prev >> 1) + delta;
+                    if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                    return Long.valueOf(nxt);
+                }
+                return UNBOXED;
+            }
+        }
+        for (;;) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return UNBOXED;
+            long cur = fv >> 1;
+            long nxt = cur + delta;
+            if ((!checked || ((cur ^ nxt) & (delta ^ nxt)) >= 0L) && isFastLong(nxt)) {
+                if (FAST_VH.compareAndSet(this, fv, nxt << 1)) return Long.valueOf(nxt);
+                Thread.onSpinWait();
+            } else {
+                ensureBoxed();
+                return UNBOXED;
+            }
+        }
+    }
+
+    private Object trySubFastBoxed(long x, boolean checked) {
+        if (SINGLE_THREAD == Thread.currentThread()) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return UNBOXED;
+            long cur = fv >> 1;
+            long nxt = cur - x;
+            if ((!checked || ((cur ^ x) & (cur ^ nxt)) >= 0L) && isFastLong(nxt)) {
+                FAST_VH.setRelease(this, nxt << 1);
+                return Long.valueOf(nxt);
+            }
+            ensureBoxed();
+            return UNBOXED;
+        }
+        if (x >= -MAX_XADD_DELTA && x <= MAX_XADD_DELTA) {
+            return tryAddFastBoxed(-x, checked);
+        }
+        for (;;) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return UNBOXED;
+            long cur = fv >> 1;
+            long nxt = cur - x;
+            if ((!checked || ((cur ^ x) & (cur ^ nxt)) >= 0L) && isFastLong(nxt)) {
+                if (FAST_VH.compareAndSet(this, fv, nxt << 1)) return Long.valueOf(nxt);
+                Thread.onSpinWait();
+            } else {
+                ensureBoxed();
+                return UNBOXED;
+            }
+        }
+    }
+
+    private Object tryMulFastBoxed(long x, boolean checked) {
+        if (SINGLE_THREAD == Thread.currentThread()) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return UNBOXED;
+            long cur = fv >> 1;
+            long nxt;
+            if (checked) {
+                try { nxt = Math.multiplyExact(cur, x); }
+                catch (ArithmeticException e) { ensureBoxed(); return UNBOXED; }
+            } else {
+                nxt = cur * x;
+            }
+            if (isFastLong(nxt)) {
+                FAST_VH.setRelease(this, nxt << 1);
+                return Long.valueOf(nxt);
+            }
+            ensureBoxed();
+            return UNBOXED;
+        }
+        for (;;) {
+            long fv = this.fastVal;
+            if ((fv & 1L) != 0L) return UNBOXED;
+            long cur = fv >> 1;
+            long nxt;
+            if (checked) {
+                try {
+                    nxt = Math.multiplyExact(cur, x);
+                } catch (ArithmeticException e) {
+                    ensureBoxed();
+                    return UNBOXED;
+                }
+            } else {
+                nxt = cur * x;
+            }
+            if (isFastLong(nxt)) {
+                if (FAST_VH.compareAndSet(this, fv, nxt << 1)) return Long.valueOf(nxt);
+                Thread.onSpinWait();
+            } else {
+                ensureBoxed();
+                return UNBOXED;
+            }
+        }
+    }
+
+    private boolean trySwapFast0Slow(Fn f) {
+        if (f == Core.decFn) return tryAddFastDiscard(-1L, true);
+        if (f == Core.uncheckedIncFn) return tryAddFastDiscard(1L, false);
+        if (f == Core.uncheckedDecFn) return tryAddFastDiscard(-1L, false);
+        return false;
+    }
+
+    private boolean trySwapFastLong1(Fn f, long x) {
+        if (f == Core.addFn) return tryAddFastDiscard(x, true);
+        if (f == Core.subFn) return trySubFastDiscard(x, true);
+        if (f == Core.uncheckedAddFn) return tryAddFastDiscard(x, false);
+        if (f == Core.uncheckedSubFn) return trySubFastDiscard(x, false);
+        if (f == Core.mulFn) return tryMulFastDiscard(x, true);
+        if (f == Core.uncheckedMulFn) return tryMulFastDiscard(x, false);
+        return false;
+    }
+
+    private Object trySwapFastBoxed1(Fn f, long y) {
+        if (f == Core.addFn) return tryAddFastBoxed(y, true);
+        if (f == Core.subFn) return trySubFastBoxed(y, true);
+        if (f == Core.uncheckedAddFn) return tryAddFastBoxed(y, false);
+        if (f == Core.uncheckedSubFn) return trySubFastBoxed(y, false);
+        if (f == Core.mulFn) return tryMulFastBoxed(y, true);
+        if (f == Core.uncheckedMulFn) return tryMulFastBoxed(y, false);
+        return UNBOXED;
+    }
+
+    public void swapDiscard(Fn f) {
+        if (f == Core.incFn) {
+            long fv = this.fastVal;
+            if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv < MAX_XADD_ENC) {
+                if (SINGLE_THREAD == Thread.currentThread()) {
+                    FAST_VH.setRelease(this, fv + 2L);
+                    return;
+                }
+                long prev = (long) FAST_VH.getAndAdd(this, 2L);
+                if ((prev & 1L) == 0L) {
+                    long nxt = (prev >> 1) + 1L;
+                    if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                    return;
+                }
+            } else if ((fv & 1L) == 0L && tryAddFastDiscard(1L, true)) {
+                return;
+            }
+        } else if (this.state == UNBOXED && trySwapFast0Slow(f)) {
+            return;
+        }
+        swapBoxed0(f);
+    }
+
+    public void swapDiscard(Fn f, long x) {
+        Object s = this.state;
+        if (s == UNBOXED && trySwapFastLong1(f, x)) return;
+        swapBoxed1(f, Long.valueOf(x), s);
+    }
+
+    public void swapDiscard(Fn f, Object x) {
+        Object s = this.state;
+        if (s == UNBOXED && x instanceof Long lx && trySwapFastLong1(f, lx.longValue())) return;
+        swapBoxed1(f, x, s);
+    }
+
+    public long swapLong(Fn f) {
+        if (f == Core.incFn || f == Core.uncheckedIncFn) {
+            long fv = this.fastVal;
+            if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv < MAX_XADD_ENC) {
+                if (SINGLE_THREAD == Thread.currentThread()) {
+                    FAST_VH.setRelease(this, fv + 2L);
+                    return (fv >> 1) + 1L;
+                }
+                long prev = (long) FAST_VH.getAndAdd(this, 2L);
+                if ((prev & 1L) == 0L) {
+                    long nxt = (prev >> 1) + 1L;
+                    if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                    return nxt;
+                }
+            }
+        } else if (f == Core.decFn || f == Core.uncheckedDecFn) {
+            long fv = this.fastVal;
+            if ((fv & 1L) == 0L && fv > MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
+                if (SINGLE_THREAD == Thread.currentThread()) {
+                    FAST_VH.setRelease(this, fv - 2L);
+                    return (fv >> 1) - 1L;
+                }
+                long prev = (long) FAST_VH.getAndAdd(this, -2L);
+                if ((prev & 1L) == 0L) {
+                    long nxt = (prev >> 1) - 1L;
+                    if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                    return nxt;
+                }
+            }
+        }
+        return Numbers.longCast(swap(f));
+    }
+
+    public long swapLong(Fn f, long x) {
+        if (x >= -MAX_XADD_DELTA && x <= MAX_XADD_DELTA) {
+            if (f == Core.addFn || f == Core.uncheckedAddFn) {
+                long fv = this.fastVal;
+                if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
+                    if (SINGLE_THREAD == Thread.currentThread()) {
+                        long nxt = (fv >> 1) + x;
+                        FAST_VH.setRelease(this, nxt << 1);
+                        if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                        return nxt;
+                    }
+                    long prev = (long) FAST_VH.getAndAdd(this, x << 1);
+                    if ((prev & 1L) == 0L) {
+                        long nxt = (prev >> 1) + x;
+                        if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                        return nxt;
+                    }
+                }
+            } else if (f == Core.subFn || f == Core.uncheckedSubFn) {
+                long fv = this.fastVal;
+                if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
+                    if (SINGLE_THREAD == Thread.currentThread()) {
+                        long nxt = (fv >> 1) - x;
+                        FAST_VH.setRelease(this, nxt << 1);
+                        if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                        return nxt;
+                    }
+                    long prev = (long) FAST_VH.getAndAdd(this, (-x) << 1);
+                    if ((prev & 1L) == 0L) {
+                        long nxt = (prev >> 1) - x;
+                        if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                        return nxt;
+                    }
+                }
+            }
+        }
+        return Numbers.longCast(swap(f, Long.valueOf(x)));
+    }
+
+    private Object swapBoxed0(Fn f) {
+        if (this.hasHooks) return swapBoxed0WithHooks(f);
+        Object v = readBoxedState();
+        if (SINGLE_THREAD == Thread.currentThread()) {
+            Object newv = f.invoke(v);
+            if (this.state == v && SINGLE_THREAD == Thread.currentThread()) {
+                STATE_VH.setRelease(this, newv);
+                return newv;
+            }
+            v = this.state;
+        }
+        for (;;) {
+            Object newv = f.invoke(v);
+            if (STATE_VH.compareAndSet(this, v, newv)) return newv;
+            Thread.onSpinWait();
+            v = this.state;
+        }
+    }
+
+    private Object swapBoxed0WithHooks(Fn f) {
+        Object v = readBoxedState();
+        for (;;) {
             Object newv = f.invoke(v);
             validate(newv);
             if (STATE_VH.compareAndSet(this, v, newv)) {
                 notifyWatches(v, newv);
                 return newv;
             }
+            Thread.onSpinWait();
+            v = this.state;
         }
     }
 
-    public Object swap(Fn f, Object x) {
-        if (f == Core.addFn && x instanceof Long lx) {
-            long y = lx;
-            for (;;) {
-                long fv = this.fastVal;
-                if ((fv & 1L) != 0L) break;
-                long cur = fv >> 1;
-                long nxt = cur + y;
-                if (((cur ^ nxt) & (y ^ nxt)) >= 0L && isFastLong(nxt)) {
-                    if (FAST_VH.compareAndSet(this, fv, nxt << 1)) return Long.valueOf(nxt);
-                } else {
-                    ensureBoxed();
-                    break;
-                }
+    private Object swapBoxed1(Fn f, Object x, Object s) {
+        if (this.hasHooks) return swapBoxed1WithHooks(f, x);
+        Object v = (s != UNBOXED) ? s : ensureBoxed();
+        if (SINGLE_THREAD == Thread.currentThread()) {
+            Object newv = f.invoke(v, x);
+            if (this.state == v && SINGLE_THREAD == Thread.currentThread()) {
+                STATE_VH.setRelease(this, newv);
+                return newv;
             }
-        } else {
-            ensureBoxed();
-        }
-        if (!this.hasHooks) {
-            for (;;) {
-                Object v = getBoxedState();
-                Object newv = f.invoke(v, x);
-                if (STATE_VH.compareAndSet(this, v, newv)) return newv;
-            }
+            v = this.state;
         }
         for (;;) {
-            Object v = getBoxedState();
+            Object newv = f.invoke(v, x);
+            if (STATE_VH.compareAndSet(this, v, newv)) return newv;
+            Thread.onSpinWait();
+            v = this.state;
+        }
+    }
+
+    private Object swapBoxed1WithHooks(Fn f, Object x) {
+        Object v = readBoxedState();
+        for (;;) {
             Object newv = f.invoke(v, x);
             validate(newv);
             if (STATE_VH.compareAndSet(this, v, newv)) {
                 notifyWatches(v, newv);
                 return newv;
             }
+            Thread.onSpinWait();
+            v = this.state;
         }
     }
 
+    public Object swap(Fn f) {
+        if (this.state == UNBOXED) {
+            if (f == Core.incFn) {
+                Object r = tryAddFastBoxed(1L, true);
+                if (r != UNBOXED) return r;
+            } else if (f == Core.decFn) {
+                Object r = tryAddFastBoxed(-1L, true);
+                if (r != UNBOXED) return r;
+            } else if (f == Core.uncheckedIncFn) {
+                Object r = tryAddFastBoxed(1L, false);
+                if (r != UNBOXED) return r;
+            } else if (f == Core.uncheckedDecFn) {
+                Object r = tryAddFastBoxed(-1L, false);
+                if (r != UNBOXED) return r;
+            }
+        }
+        return swapBoxed0(f);
+    }
+
+    public Object swap(Fn f, Object x) {
+        Object s = this.state;
+        if (s == UNBOXED && x instanceof Long lx) {
+            Object r = trySwapFastBoxed1(f, lx.longValue());
+            if (r != UNBOXED) return r;
+        }
+        return swapBoxed1(f, x, s);
+    }
+
     public Object swap(Fn f, Object x, Object y) {
-        ensureBoxed();
+        Object v = readBoxedState();
         if (!this.hasHooks) {
             for (;;) {
-                Object v = getBoxedState();
                 Object newv = f.invoke(v, x, y);
-                if (STATE_VH.compareAndSet(this, v, newv)) return newv;
+                Object witness = STATE_VH.compareAndExchange(this, v, newv);
+                if (witness == v) return newv;
+                v = witness;
+                Thread.onSpinWait();
             }
         }
         for (;;) {
-            Object v = getBoxedState();
             Object newv = f.invoke(v, x, y);
             validate(newv);
-            if (STATE_VH.compareAndSet(this, v, newv)) {
+            Object witness = STATE_VH.compareAndExchange(this, v, newv);
+            if (witness == v) {
                 notifyWatches(v, newv);
                 return newv;
             }
+            v = witness;
+            Thread.onSpinWait();
         }
     }
 
     public Object swap(Fn f, Object x, Object y, Object[] args) {
-        ensureBoxed();
+        Object v = readBoxedState();
+        Object[] all = new Object[3 + args.length];
+        all[1] = x;
+        all[2] = y;
+        System.arraycopy(args, 0, all, 3, args.length);
         for (;;) {
-            Object v = getBoxedState();
-            Object[] all = new Object[3 + args.length];
             all[0] = v;
-            all[1] = x;
-            all[2] = y;
-            System.arraycopy(args, 0, all, 3, args.length);
             Object newv = f.applyTo(all);
             if (this.hasHooks) validate(newv);
-            if (STATE_VH.compareAndSet(this, v, newv)) {
+            Object witness = STATE_VH.compareAndExchange(this, v, newv);
+            if (witness == v) {
                 if (this.hasHooks) notifyWatches(v, newv);
                 return newv;
             }
+            v = witness;
+            Thread.onSpinWait();
+        }
+    }
+
+    public Object swapVals(Fn f) {
+        if (f == Core.incFn || f == Core.uncheckedIncFn) {
+            long fv = this.fastVal;
+            if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
+                long prev = (long) FAST_VH.getAndAdd(this, 2L);
+                if ((prev & 1L) == 0L) {
+                    long oldv = prev >> 1;
+                    long nxt = oldv + 1L;
+                    if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                    return PersistentVector.createOwning(Long.valueOf(oldv), Long.valueOf(nxt));
+                }
+            }
+        } else if (f == Core.decFn || f == Core.uncheckedDecFn) {
+            long fv = this.fastVal;
+            if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
+                long prev = (long) FAST_VH.getAndAdd(this, -2L);
+                if ((prev & 1L) == 0L) {
+                    long oldv = prev >> 1;
+                    long nxt = oldv - 1L;
+                    if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                    return PersistentVector.createOwning(Long.valueOf(oldv), Long.valueOf(nxt));
+                }
+            }
+        }
+        Object v = readBoxedState();
+        for (;;) {
+            Object newv = f.invoke(v);
+            if (this.hasHooks) validate(newv);
+            Object witness = STATE_VH.compareAndExchange(this, v, newv);
+            if (witness == v) {
+                if (this.hasHooks) notifyWatches(v, newv);
+                return PersistentVector.createOwning(v, newv);
+            }
+            v = witness;
+            Thread.onSpinWait();
+        }
+    }
+
+    public Object swapVals(Fn f, Object x) {
+        if (x instanceof Long lx) {
+            long y = lx.longValue();
+            if ((f == Core.addFn || f == Core.uncheckedAddFn) && y >= -MAX_XADD_DELTA && y <= MAX_XADD_DELTA) {
+                long fv = this.fastVal;
+                if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
+                    long prev = (long) FAST_VH.getAndAdd(this, y << 1);
+                    if ((prev & 1L) == 0L) {
+                        long oldv = prev >> 1;
+                        long nxt = oldv + y;
+                        if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                        return PersistentVector.createOwning(Long.valueOf(oldv), Long.valueOf(nxt));
+                    }
+                }
+            } else if ((f == Core.subFn || f == Core.uncheckedSubFn) && y >= -MAX_XADD_DELTA && y <= MAX_XADD_DELTA) {
+                long fv = this.fastVal;
+                if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
+                    long prev = (long) FAST_VH.getAndAdd(this, (-y) << 1);
+                    if ((prev & 1L) == 0L) {
+                        long oldv = prev >> 1;
+                        long nxt = oldv - y;
+                        if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
+                        return PersistentVector.createOwning(Long.valueOf(oldv), Long.valueOf(nxt));
+                    }
+                }
+            }
+        }
+        Object v = readBoxedState();
+        for (;;) {
+            Object newv = f.invoke(v, x);
+            if (this.hasHooks) validate(newv);
+            Object witness = STATE_VH.compareAndExchange(this, v, newv);
+            if (witness == v) {
+                if (this.hasHooks) notifyWatches(v, newv);
+                return PersistentVector.createOwning(v, newv);
+            }
+            v = witness;
+            Thread.onSpinWait();
+        }
+    }
+
+    public Object swapVals(Fn f, Object x, Object y) {
+        Object v = readBoxedState();
+        for (;;) {
+            Object newv = f.invoke(v, x, y);
+            if (this.hasHooks) validate(newv);
+            Object witness = STATE_VH.compareAndExchange(this, v, newv);
+            if (witness == v) {
+                if (this.hasHooks) notifyWatches(v, newv);
+                return PersistentVector.createOwning(v, newv);
+            }
+            v = witness;
+            Thread.onSpinWait();
+        }
+    }
+
+    public Object swapVals(Fn f, Object[] extra) {
+        Object v = readBoxedState();
+        Object[] all = new Object[1 + extra.length];
+        System.arraycopy(extra, 0, all, 1, extra.length);
+        for (;;) {
+            all[0] = v;
+            Object newv = f.applyTo(all);
+            if (this.hasHooks) validate(newv);
+            Object witness = STATE_VH.compareAndExchange(this, v, newv);
+            if (witness == v) {
+                if (this.hasHooks) notifyWatches(v, newv);
+                return PersistentVector.createOwning(v, newv);
+            }
+            v = witness;
+            Thread.onSpinWait();
         }
     }
 
@@ -1115,6 +1657,7 @@ public final class Atom implements IDeref, IMeta, IReference {
         private final Future<Object> fut;
 
         public FutureObj(Fn fn) {
+            Atom.markMultiThreaded();
             Map<Var, Object> bindings = Var.cloneThreadBindings();
             this.fut = VIRTUAL_EXECUTOR.submit(() -> {
                 if (bindings.isEmpty()) {

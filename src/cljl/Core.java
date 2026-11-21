@@ -28,9 +28,18 @@ public final class Core {
     private static volatile int doneMask = 0;
     private static int loadingMask = 0;
     private static final Set<String> LOADED_LIBS = ConcurrentHashMap.newKeySet();
-    static Fn addFn;
-    static Fn incFn;
-    static Fn decFn;
+    public static volatile boolean coreRedefined = false;
+    public static Fn addFn;
+    public static Fn subFn;
+    public static Fn mulFn;
+    public static Fn incFn;
+    public static Fn decFn;
+    public static Fn conjFn;
+    public static Fn uncheckedAddFn;
+    public static Fn uncheckedSubFn;
+    public static Fn uncheckedMulFn;
+    public static Fn uncheckedIncFn;
+    public static Fn uncheckedDecFn;
 
     private Core() {}
 
@@ -238,7 +247,7 @@ public final class Core {
             }
         });
 
-        def(ns, "-", new Fn.NamedFn("-") {
+        subFn = new Fn.NamedFn("-") {
             @Override public Object invoke(Object a) { return Numbers.minus(a); }
             @Override public Object invoke(Object a, Object b) { return Numbers.minus(a, b); }
             @Override public Object invoke(Object a, Object b, Object c) { return Numbers.minus(Numbers.minus(a, b), c); }
@@ -249,7 +258,8 @@ public final class Core {
                 for (int i = 1; i < args.length; i++) acc = Numbers.minus(acc, args[i]);
                 return acc;
             }
-        });
+        };
+        def(ns, "-", subFn);
 
         def(ns, "-'", new Fn.NamedFn("-'") {
             @Override public Object invoke(Object a) { return Numbers.minusP(a); }
@@ -263,7 +273,7 @@ public final class Core {
             }
         });
 
-        def(ns, "*", new Fn.NamedFn("*") {
+        mulFn = new Fn.NamedFn("*") {
             @Override public Object invoke() { return 1L; }
             @Override public Object invoke(Object a) { return a; }
             @Override public Object invoke(Object a, Object b) { return Numbers.multiply(a, b); }
@@ -275,7 +285,8 @@ public final class Core {
                 for (int i = 1; i < args.length; i++) acc = Numbers.multiply(acc, args[i]);
                 return acc;
             }
-        });
+        };
+        def(ns, "*", mulFn);
 
         def(ns, "*'", new Fn.NamedFn("*'") {
             @Override public Object invoke() { return 1L; }
@@ -364,7 +375,7 @@ public final class Core {
         def(ns, "butlast", new CoreFn1(70, "butlast"));
 
         def(ns, "cons", new CoreFn2(14, "cons"));
-        def(ns, "conj", new Fn.NamedFn("conj") {
+        conjFn = new Fn.NamedFn("conj") {
             @Override public Object invoke() { return PersistentVector.EMPTY; }
             @Override public Object invoke(Object coll) { return coll; }
             @Override public Object invoke(Object coll, Object x) { return RT.conj(coll, x); }
@@ -374,7 +385,8 @@ public final class Core {
                 for (int i = 1; i < args.length; i++) coll = RT.conj(coll, args[i]);
                 return coll;
             }
-        });
+        };
+        def(ns, "conj", conjFn);
 
         def(ns, "count", new CoreFn1(71, "count"));
         def(ns, "empty", new CoreFn1(72, "empty"));
@@ -3333,15 +3345,7 @@ public final class Core {
         
             }
             case 72: { Object a = _a; Object v = _b; return (((Atom) a).reset(v)); }
-            case 73: {
-                Object a = _a; Object v = _b;
-            Atom atom = (Atom) a;
-            for (;;) {
-                Object oldv = atom.deref();
-                if (atom.compareAndSet(oldv, v)) return PersistentVector.createOwning(oldv, v);
-            }
-        
-            }
+            case 73: { Object a = _a; Object v = _b; return (((Atom) a).resetVals(v)); }
             case 74: { Object v = _a; Object val = _b; return (((Atom.Volatile) v).reset(val)); }
             case 75: { Object p = _a; Object v = _b; return (((Atom.Promise) p).deliver(v)); }
             case 76: {
@@ -3956,17 +3960,14 @@ public final class Core {
             }
             case 56: {
                 Object[] args = _args;
-            Atom a = (Atom) args[0];
-            Fn f = (Fn) args[1];
-            for (;;) {
-                Object oldv = a.deref();
-                Object[] callArgs = new Object[args.length - 1];
-                callArgs[0] = oldv;
-                System.arraycopy(args, 2, callArgs, 1, args.length - 2);
-                Object newv = f.applyTo(callArgs);
-                if (a.compareAndSet(oldv, newv)) return PersistentVector.createOwning(oldv, newv);
-            }
-        
+                Atom a = (Atom) args[0];
+                Fn f = (Fn) args[1];
+                if (args.length == 2) return a.swapVals(f);
+                if (args.length == 3) return a.swapVals(f, args[2]);
+                if (args.length == 4) return a.swapVals(f, args[2], args[3]);
+                Object[] rest = new Object[args.length - 2];
+                System.arraycopy(args, 2, rest, 0, rest.length);
+                return a.swapVals(f, rest);
             }
             case 57: {
                 Object[] args = _args;

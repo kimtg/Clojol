@@ -1608,6 +1608,135 @@
         ;; Calling orig directly while #'rec-var-fib-test is redefined must take the guarded slow path
         (is (= 101 (orig 3)))))))
 
+(deftest atom-optimization-test
+  (testing "local scalar-replaced atom preserves exact semantics"
+    ;; Local while + inc
+    (let [f (fn [n]
+              (let [a (atom 0)]
+                (while (< @a n) (swap! a inc))
+                @a))]
+      (is (= 10000 (f 10000)))
+      (is (= 0 (f 0))))
+    ;; Tail-escaping local atom materializes cleanly as an Atom
+    (let [make-a (fn [n]
+                   (let [a (atom 0)]
+                     (dotimes [_ n] (swap! a inc))
+                     a))
+          a (make-a 500)]
+      (is (instance? cljl.Atom a))
+      (is (= 500 @a))
+      (is (= 501 (swap! a inc))))
+    ;; Loop-bound invariant atom + alias + reset! + arithmetic ops
+    (let [f (fn [n]
+              (loop [a (atom 10) i 0]
+                (if (< i n)
+                  (let [b a]
+                    (swap! b + 2)
+                    (swap! a - 1)
+                    (recur a (inc i)))
+                  @a)))]
+      (is (= 110 (f 100))))
+    ;; Local atom with collection swap! (conj)
+    (let [f (fn [n]
+              (let [a (atom [])]
+                (dotimes [i n] (swap! a conj i))
+                @a))]
+      (is (= [0 1 2 3 4] (f 5))))
+    ;; Exception inside swap! leaves local scalar atom unchanged
+    (let [f (fn []
+              (let [a (atom 42)]
+                (try
+                  (swap! a (fn [_] (throw (RuntimeException. "boom"))))
+                  (catch RuntimeException _))
+                @a))]
+      (is (= 42 (f))))
+    ;; Overflow detection on local scalar atom
+    (let [f (fn []
+              (let [a (atom Long/MAX_VALUE)]
+                (swap! a inc)))]
+      (is (thrown? ArithmeticException (f))))
+    ;; with-redefs on inc still intercepts local scalar atom swap!
+    (let [f (fn []
+              (let [a (atom 0)]
+                (swap! a inc)
+                @a))]
+      (is (= 1 (f)))
+      (with-redefs [inc (fn [x] (+ x 10))]
+        (is (= 10 (f))))))
+  (testing "escaping atom fast paths: xadd, sub, mul, unchecked, swapLong, swap-vals!, reset-vals!, conj"
+    (let [a (atom 10)]
+      (is (= 11 (swap! a inc)))
+      (is (= 10 (swap! a dec)))
+      (is (= 11 (swap! a unchecked-inc)))
+      (is (= 10 (swap! a unchecked-dec)))
+      (is (= 15 (swap! a + 5)))
+      (is (= 12 (swap! a - 3)))
+      (is (= 36 (swap! a * 3)))
+      (is (= 40 (swap! a unchecked-add 4)))
+      (is (= 30 (swap! a unchecked-subtract 10)))
+      (is (= 60 (swap! a unchecked-multiply 2)))
+      (is (= [60 61] (swap-vals! a inc)))
+      (is (= [61 59] (swap-vals! a - 2)))
+      (is (= [59 100] (reset-vals! a 100)))
+      (is (= 100 @a)))
+    ;; Used primitive long return from escaping atom swap!
+    (let [f (fn [a n]
+              (loop [i 0 s 0]
+                (if (< i n)
+                  (recur (inc i) (+ s (long (swap! a inc))))
+                  s)))
+          a (atom 0)]
+      (is (= 55 (f a 10)))
+      (is (= 10 @a)))
+    ;; Boundary crossing near 2^60 and Long/MAX_VALUE overflow
+    (let [a (atom (bit-shift-left 1 60))]
+      (is (= (+ (bit-shift-left 1 60) 1) (swap! a inc)))
+      (is (= (+ (bit-shift-left 1 60) 2) (swap! a + 1))))
+    (let [a (atom Long/MAX_VALUE)]
+      (is (thrown? ArithmeticException (swap! a inc)))
+      (is (= Long/MIN_VALUE (swap! a unchecked-inc))))
+    ;; Escaping collection swap! (conj fast path)
+    (let [a (atom [])]
+      (dotimes [i 100] (swap! a conj i))
+      (is (= 100 (count @a)))
+      (is (= 99 (peek @a))))
+    ;; Re-entrant swap! on the same thread must detect state change and retry
+    (let [a (atom 0)
+          res (swap! a (fn [v]
+                         (when (= v 0) (reset! a 99))
+                         (inc v)))]
+      (is (= 100 res))
+      (is (= 100 @a)))
+    ;; Raw Java Thread interop must revoke single-thread bias before the child thread runs
+    (let [a (atom 0)
+          t (Thread. ^Runnable (fn [] (dotimes [_ 25000] (swap! a inc))))]
+      (.start t)
+      (dotimes [_ 25000] (swap! a inc))
+      (.join t)
+      (is (= 50000 @a))
+      (is (false? (cljl.Atom/isSingleThreaded))))
+    ;; Multi-threaded contended wait-free xadd + concurrent transition to boxed mode
+    (let [a (atom 0)
+          futs (mapv (fn [_]
+                       (future
+                         (dotimes [_ 50000] (swap! a inc))))
+                     (range 4))]
+      (run! deref futs)
+      (is (= 200000 @a)))
+    ;; Concurrent xadd + add-watch (forces ensureBoxed mid-flight) must not lose any updates
+    (let [a (atom 0)
+          seen (atom 0)
+          futs (mapv (fn [tid]
+                       (future
+                         (dotimes [i 20000]
+                           (when (and (= tid 0) (= i 5000))
+                             (add-watch a :w (fn [_ _ _ _] (swap! seen inc))))
+                           (swap! a inc))))
+                     (range 4))]
+      (run! deref futs)
+      (is (= 80000 @a))
+      (is (pos? @seen)))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))
