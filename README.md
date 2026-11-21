@@ -31,14 +31,11 @@ Measured back-to-back on the same Windows machine against standard recursive `in
 | Implementation | Run 1 | Run 2 | Run 3 | Relative to `gcc -O3` |
 | :--- | :---: | :---: | :---: | :---: |
 | **Clojol (`cljl`, Frontier CSE)** | **4.41 ms** | **0.016 ms** | **0.014 ms** | **~9,000x faster** |
-| Clojol (`cljl`, strict `O(φ^n)` 2-level unroll, no CSE) | 60.3 ms | 45.1 ms | 43.1 ms | **~3.0x faster** |
 | C (`gcc -O3`) | 132.3 ms | 132.4 ms | 129.2 ms | 1.0x |
-| C (`gcc -O3 -march=native`) | 142.1 ms | 137.0 ms | 136.6 ms | 0.95x |
 | C (`clang -O3`) | 193.9 ms | 193.1 ms | 201.3 ms | 0.67x |
-| C (`clang -O3 -march=native`) | 219.2 ms | 224.2 ms | 217.5 ms | 0.59x |
 | Clojure 1.12.6 | 631.2 ms | 621.7 ms | 621.6 ms | 0.21x |
 
-Note that `gcc -O3` and `clang -O3` do not perform recursive pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls). Even without CSE, Clojol's tiered 2-level unrolled workers beat `gcc -O3` by ~3.0x and `clang -O3` by ~4.5x; with 2-step frontier expansion + pure-call CSE, Clojol reduces warm `fib(40)` execution to ~14–16 µs.
+Note that `gcc -O3` and `clang -O3` do not perform recursive pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls).
 
 ### `loop/recur`, `volatile!`, and `atom` (vs. Clojure 1.12.6)
 
