@@ -1533,6 +1533,16 @@
     n
     (+ (* 2 (rec-pell-test (- n 1))) (rec-pell-test (- n 2)))))
 
+(defn ^:private rec-sub-const-test [n]
+  (if (< n 2)
+    n
+    (+ (- (rec-sub-const-test (- n 1)) (rec-sub-const-test (- n 2))) 5)))
+
+(defn ^:private rec-double-same-test [n]
+  (if (< n 1)
+    1
+    (+ (rec-double-same-test (- n 1)) (rec-double-same-test (- n 1)))))
+
 (defn ^:private rec-tak-test [x y z]
   (if (<= x y)
     z
@@ -1570,6 +1580,15 @@
            (mapv rec-padovan-test (range 16))))
     (is (= [0 1 2 5 12 29 70 169 408 985 2378]
            (mapv rec-pell-test (range 11))))
+    ;; Canceling subtraction with constant addend: f(n) = f(n-1) - f(n-2) + 5
+    ;; 0, 1, 6, 10, 9, 4, 0, 1, 6, 10, 9, 4
+    (is (= [0 1 6 10 9 4 0 1 6 10 9 4]
+           (mapv rec-sub-const-test (range 12))))
+    ;; Duplicate-offset CSE: f(n) = f(n-1) + f(n-1) = 2^n
+    (is (= [1 2 4 8 16 32 64 128 256 512 1024]
+           (mapv rec-double-same-test (range 11))))
+    ;; Exact fib(40)
+    (is (= 102334155 (rec-fib-test 40)))
     (is (= 7 (rec-tak-test 18 12 6)))
     (is (= 55 (rec-var-fib-test 10)))
     ;; Overflow is still detected accurately in pure recursive functions (both small & large base)

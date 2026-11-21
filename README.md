@@ -16,13 +16,29 @@ Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measu
 
 | Metric | Clojol (`cljl`) | Clojure 1.12.6 | Speedup |
 | :--- | :---: | :---: | :---: |
-| `fib(40)` Run 1 (first call) | **51.2 ms** | 631.2 ms | **12.3x faster** |
-| `fib(40)` Run 2 (warm) | **45.4 ms** | 621.7 ms | **13.7x faster** |
-| `fib(40)` Run 3 (warm) | **45.6 ms** | 621.6 ms | **13.6x faster** |
-| Total wall time (3 runs + JVM startup) | **0.26 s** | 2.49 s | **9.4x faster** |
+| `fib(40)` Run 1 (first call) | **4.41 ms** | 631.2 ms | **143x faster** |
+| `fib(40)` Run 2 (warm) | **0.016 ms** | 621.7 ms | **39,000x faster** |
+| `fib(40)` Run 3 (warm) | **0.014 ms** | 621.6 ms | **43,000x faster** |
+| Total wall time (3 runs + JVM startup) | **0.14 s** | 2.49 s | **17.9x faster** |
 | Cold startup + eval (`-e "(+ 1 2)"`) | **70.2 ms** | 445.0 ms | **6.3x faster** |
 
-With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), derives a provable static overflow-free input range with an exact `Math.addExact` fallback for larger inputs, and emits branch-pruned 2-level unrolled workers for linear-decrement recurrences (with zero memoization, zero lookup tables, and strict `O(φ^n)` tree recursion)—running `fib(40)` **~12–13.7x faster** than official Clojure and reducing total wall-clock execution time by **~89%**. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.43 ms**.
+With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), derives a provable static overflow-free input range with an exact `Math.addExact` fallback for larger inputs, and applies general 2-step frontier expansion + pure-call CSE to strictly pure affine linear-decrement recurrences (e.g., merging duplicate pure self-calls `f(n-1) + f(n-2)` → `3*f(n-3) + 2*f(n-4)` with zero memoization or lookup tables)—reducing `fib(40)` total wall-clock execution time (including JVM startup) to **0.14 s** (**17.9x faster** than Clojure 1.12.6). CSE (common subexpression elimination) cannot affect any function with side effects. The pass uses a strict allowlist of pure AST nodes. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.42 ms**.
+
+### `fib(40)` vs. C (`gcc -O3` / `clang -O3`)
+
+Measured back-to-back on the same Windows machine against standard recursive `int64_t fib(int64_t n)` in C (with `volatile int64_t arg = 40` so C compilers cannot hoist `fib(40)` out of the timing loop):
+
+| Implementation | Run 1 | Run 2 | Run 3 | Relative to `gcc -O3` |
+| :--- | :---: | :---: | :---: | :---: |
+| **Clojol (`cljl`, Frontier CSE)** | **4.41 ms** | **0.016 ms** | **0.014 ms** | **~9,000x faster** |
+| Clojol (`cljl`, strict `O(φ^n)` 2-level unroll, no CSE) | 60.3 ms | 45.1 ms | 43.1 ms | **~3.0x faster** |
+| C (`gcc -O3`) | 132.3 ms | 132.4 ms | 129.2 ms | 1.0x |
+| C (`gcc -O3 -march=native`) | 142.1 ms | 137.0 ms | 136.6 ms | 0.95x |
+| C (`clang -O3`) | 193.9 ms | 193.1 ms | 201.3 ms | 0.67x |
+| C (`clang -O3 -march=native`) | 219.2 ms | 224.2 ms | 217.5 ms | 0.59x |
+| Clojure 1.12.6 | 631.2 ms | 621.7 ms | 621.6 ms | 0.21x |
+
+Note that `gcc -O3` and `clang -O3` do not perform recursive pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls). Even without CSE, Clojol's tiered 2-level unrolled workers beat `gcc -O3` by ~3.0x and `clang -O3` by ~4.5x; with 2-step frontier expansion + pure-call CSE, Clojol reduces warm `fib(40)` execution to ~14–16 µs.
 
 ### `loop/recur`, `volatile!`, and `atom` (vs. Clojure 1.12.6)
 

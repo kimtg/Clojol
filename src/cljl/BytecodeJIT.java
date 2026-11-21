@@ -765,11 +765,14 @@ public final class BytecodeJIT {
         final long cMin;
         final long cMax;
         final long t1;            // B + cMax
-        final long t2;            // T1 + 2 * cMin
         final long safeMaxInput;  // provably overflow-free upper bound
+        final int[] expOffsets;   // frontier-expanded + CSE'd distinct self-call offsets
+        final long[] expWeights;  // corresponding signed coefficients
+        final long expConst;      // expanded constant addend
 
         LinearRecSpec(Node baseBranch, Node recBranch, int paramSlot, Var ownerVar, int selfSlot,
-                      long baseThreshold, long cMin, long cMax, long t1, long t2, long safeMaxInput) {
+                      long baseThreshold, long cMin, long cMax, long t1, long safeMaxInput,
+                      int[] expOffsets, long[] expWeights, long expConst) {
             this.baseBranch = baseBranch;
             this.recBranch = recBranch;
             this.paramSlot = paramSlot;
@@ -779,8 +782,10 @@ public final class BytecodeJIT {
             this.cMin = cMin;
             this.cMax = cMax;
             this.t1 = t1;
-            this.t2 = t2;
             this.safeMaxInput = safeMaxInput;
+            this.expOffsets = expOffsets;
+            this.expWeights = expWeights;
+            this.expConst = expConst;
         }
     }
 
@@ -1026,31 +1031,167 @@ public final class BytecodeJIT {
         }
 
         long t1 = baseThreshold + cMax;
-        long t2 = t1 + 2L * cMin;
-        long mult = Math.max(2L, growth[0]);
-        long constAdd = growth[1];
+        long origMult = Math.max(2L, growth[0]);
+        long origConstAdd = growth[1];
 
-        // Prove overflow-free upper bound: (baseBound + constAdd) * mult^(steps + 1) <= Long.MAX_VALUE / 4
-        long limit = (Long.MAX_VALUE / 4L) / Math.max(1L, baseBound + constAdd);
+        // Extract exact affine linear form: f(n) = sum(origCoeff[c] * f(n - c)) + origConst
+        long[] origCoeff = new long[16];
+        long[] origConstOut = new long[1];
+        extractAffineRec(recBranch, paramSlot, ce.ownerVar, m.selfSlot, origCoeff, origConstOut, 1L);
+        long origConst = origConstOut[0];
+
+        // General 2-step frontier expansion + pure-call CSE (valid for all n >= t1 = B + cMax):
+        // Expand the minimum active offset dMin <= cMax and combine like self-call offsets.
+        long[] expCoeff = origCoeff.clone();
+        long expConst = origConst;
+        for (int step = 0; step < 2; step++) {
+            int dMin = -1;
+            for (int d = 1; d < expCoeff.length; d++) {
+                if (expCoeff[d] != 0L) { dMin = d; break; }
+            }
+            if (dMin < 0 || dMin > cMax) break;
+            long w = expCoeff[dMin];
+            long[] nextCoeff = expCoeff.clone();
+            nextCoeff[dMin] = 0L;
+            boolean ok = true;
+            for (int c = 1; c <= 4; c++) {
+                long oc = origCoeff[c];
+                if (oc == 0L) continue;
+                int nd = dMin + c;
+                if (nd >= nextCoeff.length) { ok = false; break; }
+                nextCoeff[nd] += w * oc;
+            }
+            if (!ok) break;
+            long nextConst = expConst + w * origConst;
+            int distinct = 0;
+            long sumAbsW = 0L;
+            for (int d = 1; d < nextCoeff.length; d++) {
+                if (nextCoeff[d] != 0L) {
+                    distinct++;
+                    sumAbsW += Math.abs(nextCoeff[d]);
+                }
+            }
+            if (distinct > 3 || sumAbsW > 64L || Math.abs(nextConst) > 100_000L) break;
+            expCoeff = nextCoeff;
+            expConst = nextConst;
+        }
+
+        int distinct = 0;
+        long expSumAbsW = 0L;
+        for (int d = 1; d < expCoeff.length; d++) {
+            if (expCoeff[d] != 0L) {
+                distinct++;
+                expSumAbsW += Math.abs(expCoeff[d]);
+            }
+        }
+        int[] expOffsets = new int[distinct];
+        long[] expWeights = new long[distinct];
+        int idx = 0;
+        for (int d = 1; d < expCoeff.length; d++) {
+            if (expCoeff[d] != 0L) {
+                expOffsets[idx] = d;
+                expWeights[idx] = expCoeff[d];
+                idx++;
+            }
+        }
+
+        // Prove overflow-free upper bound for both original & expanded terms:
+        // expSumAbsW * (baseBound + origConstAdd) * origMult^steps + |expConst| <= Long.MAX_VALUE / 4
+        long denom = Math.max(1L, Math.max(1L, expSumAbsW) * (baseBound + origConstAdd) + Math.abs(expConst));
+        long limit = (Long.MAX_VALUE / 4L) / denom;
         long prod = 1L;
         int maxSteps = 0;
-        while (prod <= limit / mult) {
-            prod *= mult;
+        while (prod <= limit / origMult) {
+            prod *= origMult;
             maxSteps++;
         }
-        long safeMaxInput = (maxSteps >= 3) ? (baseThreshold + (long) (maxSteps - 2) * cMin) : -1L;
-        if (safeMaxInput < t2) return null;
+        long safeMaxInput = (maxSteps >= 2) ? (baseThreshold + (long) (maxSteps - 1) * cMin) : -1L;
+        if (safeMaxInput < t1) return null;
 
         return new LinearRecSpec(baseBranch, recBranch, paramSlot, ce.ownerVar, m.selfSlot,
-                baseThreshold, cMin, cMax, t1, t2, safeMaxInput);
+                baseThreshold, cMin, cMax, t1, safeMaxInput, expOffsets, expWeights, expConst);
+    }
+
+    private static void extractAffineRec(
+            Node expr, int paramSlot, Var ownerVar, int selfSlot,
+            long[] coeff, long[] constOut, long scale) {
+        Node selfArg = getLinearSelfCallArg(expr, ownerVar, selfSlot);
+        if (selfArg != null) {
+            int dec = (int) extractLinearDecrement(selfArg, paramSlot);
+            coeff[dec] += scale;
+            return;
+        }
+        if (expr instanceof ConstNode cn) {
+            constOut[0] += scale * ((Long) cn.val).longValue();
+            return;
+        }
+        if (expr instanceof Add2Node a) {
+            extractAffineRec(a.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
+            extractAffineRec(a.b, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
+            return;
+        }
+        if (expr instanceof UncheckedAdd2Node a) {
+            extractAffineRec(a.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
+            extractAffineRec(a.b, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
+            return;
+        }
+        if (expr instanceof Sub2Node a) {
+            extractAffineRec(a.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
+            extractAffineRec(a.b, paramSlot, ownerVar, selfSlot, coeff, constOut, -scale);
+            return;
+        }
+        if (expr instanceof UncheckedSub2Node a) {
+            extractAffineRec(a.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
+            extractAffineRec(a.b, paramSlot, ownerVar, selfSlot, coeff, constOut, -scale);
+            return;
+        }
+        if (expr instanceof Mul2Node m) {
+            if (m.a instanceof ConstNode cn) {
+                extractAffineRec(m.b, paramSlot, ownerVar, selfSlot, coeff, constOut, scale * ((Long) cn.val).longValue());
+            } else {
+                extractAffineRec(m.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale * ((Long) ((ConstNode) m.b).val).longValue());
+            }
+            return;
+        }
+        if (expr instanceof UncheckedMul2Node m) {
+            if (m.a instanceof ConstNode cn) {
+                extractAffineRec(m.b, paramSlot, ownerVar, selfSlot, coeff, constOut, scale * ((Long) cn.val).longValue());
+            } else {
+                extractAffineRec(m.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale * ((Long) ((ConstNode) m.b).val).longValue());
+            }
+            return;
+        }
+        if (expr instanceof IncNode u) {
+            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
+            constOut[0] += scale;
+            return;
+        }
+        if (expr instanceof UncheckedIncNode u) {
+            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
+            constOut[0] += scale;
+            return;
+        }
+        if (expr instanceof DecNode u) {
+            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
+            constOut[0] -= scale;
+            return;
+        }
+        if (expr instanceof UncheckedDecNode u) {
+            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, scale);
+            constOut[0] -= scale;
+            return;
+        }
+        if (expr instanceof NegateNode u) {
+            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, -scale);
+            return;
+        }
+        if (expr instanceof UncheckedNegateNode u) {
+            extractAffineRec(u.a, paramSlot, ownerVar, selfSlot, coeff, constOut, -scale);
+        }
     }
 
     private static final int LINEAR_MODE_ALL_BASE = 0;
     private static final int LINEAR_MODE_SMALL1 = 1;
-    private static final int LINEAR_MODE_EXPAND_TO_S1 = 2;
-    private static final int LINEAR_MODE_CALL_S1 = 3;
-    private static final int LINEAR_MODE_EXPAND_TO_CORE = 4;
-    private static final int LINEAR_MODE_CORE_LEAF = 5;
 
     private static void emitLinearParamMinus(CodeGen cg, int paramJvmSlot, long offset) {
         cg.lload(paramJvmSlot);
@@ -1070,73 +1211,39 @@ public final class BytecodeJIT {
 
     private static void emitLinearExpr(
             CodeGen cg, Node expr, LinearRecSpec spec, int paramJvmSlot, long paramOffset, int tmpSlot,
-            int mode, String className, String s1Name, String s2Name, String coreName) {
+            int mode, String className, String s1Name) {
         Node selfArg = getLinearSelfCallArg(expr, spec.ownerVar, spec.selfSlot);
         if (selfArg != null) {
             long dec = extractLinearDecrement(selfArg, spec.paramSlot);
             long totalOff = paramOffset + dec;
-            switch (mode) {
-                case LINEAR_MODE_ALL_BASE -> emitLinearBase(cg, spec, paramJvmSlot, totalOff);
-                case LINEAR_MODE_SMALL1 -> {
-                    if (spec.t1 - totalOff <= spec.baseThreshold) {
-                        // Provably < baseThreshold: emit base directly with zero branches
-                        emitLinearBase(cg, spec, paramJvmSlot, totalOff);
-                    } else {
-                        int stackAtBranch = cg.curStack;
-                        emitLinearParamMinus(cg, paramJvmSlot, totalOff);
-                        cg.lstore(tmpSlot);
-                        Label recLbl = new Label();
-                        Label doneLbl = new Label();
-                        cg.lload(tmpSlot);
-                        cg.ldcLong(spec.baseThreshold);
-                        cg.lcmp();
-                        cg.ifge(recLbl);
-                        emitLinearBase(cg, spec, tmpSlot, 0L);
-                        cg.gotoLabel(doneLbl);
-                        cg.curStack = stackAtBranch;
-                        cg.markLabel(recLbl);
-                        if (spec.t1 - totalOff - spec.cMin <= spec.baseThreshold) {
-                            // Inner calls are all provably < baseThreshold
-                            emitLinearExpr(cg, spec.recBranch, spec, tmpSlot, 0L, tmpSlot,
-                                    LINEAR_MODE_ALL_BASE, className, s1Name, s2Name, coreName);
-                        } else {
-                            cg.lload(tmpSlot);
-                            cg.invokestatic(className, s1Name, "(J)J", 2, 2);
-                        }
-                        cg.markLabel(doneLbl);
-                        cg.curStack = stackAtBranch + 2;
-                    }
-                }
-                case LINEAR_MODE_EXPAND_TO_S1 ->
-                        emitLinearExpr(cg, spec.recBranch, spec, paramJvmSlot, totalOff, tmpSlot,
-                                LINEAR_MODE_CALL_S1, className, s1Name, s2Name, coreName);
-                case LINEAR_MODE_CALL_S1 -> {
-                    emitLinearParamMinus(cg, paramJvmSlot, totalOff);
+            if (mode == LINEAR_MODE_ALL_BASE) {
+                emitLinearBase(cg, spec, paramJvmSlot, totalOff);
+            } else if (spec.t1 - totalOff <= spec.baseThreshold) {
+                // Provably < baseThreshold: emit base directly with zero branches
+                emitLinearBase(cg, spec, paramJvmSlot, totalOff);
+            } else {
+                int stackAtBranch = cg.curStack;
+                emitLinearParamMinus(cg, paramJvmSlot, totalOff);
+                cg.lstore(tmpSlot);
+                Label recLbl = new Label();
+                Label doneLbl = new Label();
+                cg.lload(tmpSlot);
+                cg.ldcLong(spec.baseThreshold);
+                cg.lcmp();
+                cg.ifge(recLbl);
+                emitLinearBase(cg, spec, tmpSlot, 0L);
+                cg.gotoLabel(doneLbl);
+                cg.curStack = stackAtBranch;
+                cg.markLabel(recLbl);
+                if (spec.t1 - totalOff - spec.cMin <= spec.baseThreshold) {
+                    emitLinearExpr(cg, spec.recBranch, spec, tmpSlot, 0L, tmpSlot,
+                            LINEAR_MODE_ALL_BASE, className, s1Name);
+                } else {
+                    cg.lload(tmpSlot);
                     cg.invokestatic(className, s1Name, "(J)J", 2, 2);
                 }
-                case LINEAR_MODE_EXPAND_TO_CORE ->
-                        emitLinearExpr(cg, spec.recBranch, spec, paramJvmSlot, totalOff, tmpSlot,
-                                LINEAR_MODE_CORE_LEAF, className, s1Name, s2Name, coreName);
-                case LINEAR_MODE_CORE_LEAF -> {
-                    int stackAtBranch = cg.curStack;
-                    emitLinearParamMinus(cg, paramJvmSlot, totalOff);
-                    cg.lstore(tmpSlot);
-                    Label recLbl = new Label();
-                    Label doneLbl = new Label();
-                    cg.lload(tmpSlot);
-                    cg.ldcLong(spec.t2);
-                    cg.lcmp();
-                    cg.ifge(recLbl);
-                    cg.lload(tmpSlot);
-                    cg.invokestatic(className, s2Name, "(J)J", 2, 2);
-                    cg.gotoLabel(doneLbl);
-                    cg.curStack = stackAtBranch;
-                    cg.markLabel(recLbl);
-                    cg.lload(tmpSlot);
-                    cg.invokestatic(className, coreName, "(J)J", 2, 2);
-                    cg.markLabel(doneLbl);
-                    cg.curStack = stackAtBranch + 2;
-                }
+                cg.markLabel(doneLbl);
+                cg.curStack = stackAtBranch + 2;
             }
             return;
         }
@@ -1145,72 +1252,72 @@ public final class BytecodeJIT {
             return;
         }
         if (expr instanceof Add2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
+            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.ladd();
             return;
         }
         if (expr instanceof UncheckedAdd2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
+            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.ladd();
             return;
         }
         if (expr instanceof Sub2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
+            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.lsub();
             return;
         }
         if (expr instanceof UncheckedSub2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
+            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.lsub();
             return;
         }
         if (expr instanceof Mul2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
+            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.lmul();
             return;
         }
         if (expr instanceof UncheckedMul2Node a) {
-            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
-            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, a.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
+            emitLinearExpr(cg, a.b, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.lmul();
             return;
         }
         if (expr instanceof IncNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.ldcLong(1L);
             cg.ladd();
             return;
         }
         if (expr instanceof UncheckedIncNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.ldcLong(1L);
             cg.ladd();
             return;
         }
         if (expr instanceof DecNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.ldcLong(1L);
             cg.lsub();
             return;
         }
         if (expr instanceof UncheckedDecNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.ldcLong(1L);
             cg.lsub();
             return;
         }
         if (expr instanceof NegateNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.lneg();
             return;
         }
         if (expr instanceof UncheckedNegateNode u) {
-            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, u.a, spec, paramJvmSlot, paramOffset, tmpSlot, mode, className, s1Name);
             cg.lneg();
         }
     }
@@ -1218,7 +1325,6 @@ public final class BytecodeJIT {
     private static void emitLinearDecrementWorkers(
             ClassEmitter ce, FnMethod m, PrimSpec ps, String fastName, LinearRecSpec spec) {
         String s1Name = fastName + "_s1";
-        String s2Name = fastName + "_s2";
         String coreName = fastName + "_core";
 
         // 1. s1(long n): handles n < T1 with dead-branch pruning
@@ -1233,38 +1339,61 @@ public final class BytecodeJIT {
             cg.emitReturnInstruction(ValType.LONG);
             cg.curStack = 0;
             cg.markLabel(recLbl);
-            emitLinearExpr(cg, spec.recBranch, spec, 0, 0L, 2, LINEAR_MODE_SMALL1, ce.className, s1Name, s2Name, coreName);
+            emitLinearExpr(cg, spec.recBranch, spec, 0, 0L, 2, LINEAR_MODE_SMALL1, ce.className, s1Name);
             cg.emitReturnInstruction(ValType.LONG);
             cg.finish();
         }
 
-        // 2. s2(long n): handles n < T2 via 2-level branch-free expansion calling s1
-        {
-            CodeGen cg = ce.beginStaticMethod(s2Name, "(J)J", 2);
-            Label recLbl = new Label();
-            cg.lload(0);
-            cg.ldcLong(spec.t1);
-            cg.lcmp();
-            cg.ifge(recLbl);
-            cg.lload(0);
-            cg.invokestatic(ce.className, s1Name, "(J)J", 2, 2);
-            cg.emitReturnInstruction(ValType.LONG);
-            cg.curStack = 0;
-            cg.markLabel(recLbl);
-            emitLinearExpr(cg, spec.recBranch, spec, 0, 0L, 2, LINEAR_MODE_EXPAND_TO_S1, ce.className, s1Name, s2Name, coreName);
-            cg.emitReturnInstruction(ValType.LONG);
-            cg.finish();
-        }
-
-        // 3. core(long n): precondition T2 <= n <= safeMaxInput; 2-level branch-free unroll
+        // 2. core(long n): precondition T1 <= n <= safeMaxInput; frontier-expanded + CSE'd pure calls
         {
             CodeGen cg = ce.beginStaticMethod(coreName, "(J)J", 4);
-            emitLinearExpr(cg, spec.recBranch, spec, 0, 0L, 2, LINEAR_MODE_EXPAND_TO_CORE, ce.className, s1Name, s2Name, coreName);
+            if (spec.expOffsets.length == 0) {
+                cg.ldcLong(spec.expConst);
+            } else {
+                for (int i = 0; i < spec.expOffsets.length; i++) {
+                    int off = spec.expOffsets[i];
+                    long w = spec.expWeights[i];
+                    int stackAtBranch = cg.curStack;
+                    emitLinearParamMinus(cg, 0, off);
+                    cg.lstore(2);
+                    Label recLbl = new Label();
+                    Label doneLbl = new Label();
+                    cg.lload(2);
+                    cg.ldcLong(spec.t1);
+                    cg.lcmp();
+                    cg.ifge(recLbl);
+                    cg.lload(2);
+                    cg.invokestatic(ce.className, s1Name, "(J)J", 2, 2);
+                    cg.gotoLabel(doneLbl);
+                    cg.curStack = stackAtBranch;
+                    cg.markLabel(recLbl);
+                    cg.lload(2);
+                    cg.invokestatic(ce.className, coreName, "(J)J", 2, 2);
+                    cg.markLabel(doneLbl);
+                    cg.curStack = stackAtBranch + 2;
+                    if (w == -1L) {
+                        cg.lneg();
+                    } else if (w == 2L) {
+                        cg.dup2();
+                        cg.ladd();
+                    } else if (w != 1L) {
+                        cg.ldcLong(w);
+                        cg.lmul();
+                    }
+                    if (i > 0) {
+                        cg.ladd();
+                    }
+                }
+                if (spec.expConst != 0L) {
+                    cg.ldcLong(spec.expConst);
+                    cg.ladd();
+                }
+            }
             cg.emitReturnInstruction(ValType.LONG);
             cg.finish();
         }
 
-        // 4. fast(long n): provably overflow-free range dispatch + exact checked fallback for n > safeMaxInput
+        // 3. fast(long n): provably overflow-free range dispatch + exact checked fallback for n > safeMaxInput
         {
             SlotLayout layout = new SlotLayout(m, ps.analysis.slotTypes, 2);
             layout.jvmSlot[m.paramSlots[0]] = 0;
@@ -1283,11 +1412,11 @@ public final class BytecodeJIT {
 
             Label coreLbl = new Label();
             cg.lload(0);
-            cg.ldcLong(spec.t2);
+            cg.ldcLong(spec.t1);
             cg.lcmp();
             cg.ifge(coreLbl);
             cg.lload(0);
-            cg.invokestatic(ce.className, s2Name, "(J)J", 2, 2);
+            cg.invokestatic(ce.className, s1Name, "(J)J", 2, 2);
             cg.emitReturnInstruction(ValType.LONG);
 
             cg.curStack = 0;
