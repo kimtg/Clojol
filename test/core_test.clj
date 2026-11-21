@@ -1513,6 +1513,26 @@
     n
     (+ (rec-fib-test (- n 1)) (rec-fib-test (- n 2)))))
 
+(defn ^:private rec-fib-lte-test [n]
+  (if (<= n 1)
+    n
+    (+ (rec-fib-lte-test (dec n)) (rec-fib-lte-test (- n 2)))))
+
+(defn ^:private rec-fib-gte-test [n]
+  (if (>= n 2)
+    (+ (rec-fib-gte-test (- n 1)) (rec-fib-gte-test (- n 2)))
+    n))
+
+(defn ^:private rec-padovan-test [n]
+  (if (< n 3)
+    1
+    (+ (rec-padovan-test (- n 2)) (rec-padovan-test (- n 3)))))
+
+(defn ^:private rec-pell-test [n]
+  (if (< n 2)
+    n
+    (+ (* 2 (rec-pell-test (- n 1))) (rec-pell-test (- n 2)))))
+
 (defn ^:private rec-tak-test [x y z]
   (if (<= x y)
     z
@@ -1528,22 +1548,41 @@
       (+ (rec-var-fib-test (- n 1)) (rec-var-fib-test (- n 2))))))
 
 (deftest pure-self-recursion-optimization-test
-  (testing "pure self-recursive static worker & depth-2 inlining preserve exact semantics"
+  (testing "pure self-recursive static worker, linear-decrement range unrolling, and depth-2 inlining preserve exact semantics"
     (is (= 0 (rec-fib-test 0)))
     (is (= 1 (rec-fib-test 1)))
     (is (= 1 (rec-fib-test 2)))
     (is (= 2 (rec-fib-test 3)))
+    (is (= 3 (rec-fib-test 4)))
+    (is (= 5 (rec-fib-test 5)))
+    (is (= 8 (rec-fib-test 6)))
+    (is (= 13 (rec-fib-test 7)))
     (is (= 55 (rec-fib-test 10)))
     (is (= 6765 (rec-fib-test 20)))
     (is (= -5 (rec-fib-test -5)))
+    (is (= Long/MIN_VALUE (rec-fib-test Long/MIN_VALUE)))
+    ;; Alternative guard orientations (<=, >=) and dec
+    (doseq [k [-3 0 1 2 3 4 5 6 7 10 20]]
+      (is (= (rec-fib-test k) (rec-fib-lte-test k)))
+      (is (= (rec-fib-test k) (rec-fib-gte-test k))))
+    ;; Padovan (B=3, cMin=2, cMax=3) and weighted Pell (K=3)
+    (is (= [1 1 1 2 2 3 4 5 7 9 12 16 21 28 37 49]
+           (mapv rec-padovan-test (range 16))))
+    (is (= [0 1 2 5 12 29 70 169 408 985 2378]
+           (mapv rec-pell-test (range 11))))
     (is (= 7 (rec-tak-test 18 12 6)))
     (is (= 55 (rec-var-fib-test 10)))
-    ;; Overflow is still detected accurately in pure recursive functions
+    ;; Overflow is still detected accurately in pure recursive functions (both small & large base)
     (let [f (fn ovf [n]
               (if (< n 1)
                 Long/MAX_VALUE
                 (+ 1 (ovf (- n 1)))))]
-      (is (thrown? ArithmeticException (f 1)))))
+      (is (thrown? ArithmeticException (f 1))))
+    (let [f (fn ovf2 [n]
+              (if (< n 2)
+                5000000000000000000
+                (+ (ovf2 (- n 1)) (ovf2 (- n 2)))))]
+      (is (thrown? ArithmeticException (f 2)))))
   (testing "with-redefs still intercepts Var-recursive defns"
     (let [orig rec-var-fib-test]
       (with-redefs [rec-var-fib-test (fn [n] (if (= n 2) 100 (orig n)))]

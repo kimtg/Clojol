@@ -16,13 +16,13 @@ Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measu
 
 | Metric | Clojol (`cljl`) | Clojure 1.12.6 | Speedup |
 | :--- | :---: | :---: | :---: |
-| `fib(40)` Run 1 (first call) | **184.0 ms** | 631.2 ms | **3.43x faster** |
-| `fib(40)` Run 2 (warm) | **186.6 ms** | 621.7 ms | **3.33x faster** |
-| `fib(40)` Run 3 (warm) | **179.2 ms** | 621.6 ms | **3.47x faster** |
-| Total wall time (3 runs + JVM startup) | **0.67 s** | 2.49 s | **3.72x faster** |
-| Cold startup + eval (`-e "(+ 1 2)"`) | **70.2 ms** | 445.0 ms | **6.34x faster** |
+| `fib(40)` Run 1 (first call) | **51.2 ms** | 631.2 ms | **12.3x faster** |
+| `fib(40)` Run 2 (warm) | **45.4 ms** | 621.7 ms | **13.7x faster** |
+| `fib(40)` Run 3 (warm) | **45.6 ms** | 621.6 ms | **13.6x faster** |
+| Total wall time (3 runs + JVM startup) | **0.26 s** | 2.49 s | **9.4x faster** |
+| Cold startup + eval (`-e "(+ 1 2)"`) | **70.2 ms** | 445.0 ms | **6.3x faster** |
 
-With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), eliminates provably underflow-free subtraction overflow checks via non-negative lower-bound tracking, and applies bounded depth-2 self-inlining with base-case short-circuiting while preserving exact `Math.addExact` overflow semantics—running `fib(40)` **~3.4x faster** than official Clojure and reducing total wall-clock execution time by **~73%**. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.43 ms**.
+With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), derives a provable static overflow-free input range with an exact `Math.addExact` fallback for larger inputs, and emits branch-pruned 2-level unrolled workers for linear-decrement recurrences (with zero memoization, zero lookup tables, and strict `O(φ^n)` tree recursion)—running `fib(40)` **~12–13.7x faster** than official Clojure and reducing total wall-clock execution time by **~89%**. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.43 ms**.
 
 ### `loop/recur`, `volatile!`, and `atom` (vs. Clojure 1.12.6)
 
