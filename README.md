@@ -7,7 +7,7 @@ Clojol is an independent, clean-room implementation of the Clojure language and 
 ## Why Clojol?
 
 - Faster Startup
-- Faster Numeric Computation with Type Inference
+- Faster Numeric Computation
 - Easier Build
 
 ## Performance (`fib(40)` vs. Official Clojure)
