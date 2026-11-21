@@ -29,6 +29,10 @@ public final class PersistentTreeSet extends Fn
         return new PersistentTreeSet(null, m);
     }
 
+    public PersistentTreeSet cons(Object o) {
+        return conj(o);
+    }
+
     public PersistentTreeSet conj(Object o) {
         PersistentTreeMap nm = impl.assoc(o, o);
         return nm == impl ? this : new PersistentTreeSet(meta, nm);

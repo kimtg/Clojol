@@ -118,6 +118,9 @@ public final class Interop {
     }
 
     public static boolean hasStaticMethod(Class<?> clazz, String methodName) {
+        if (clazz == java.math.BigInteger.class && ("fromBigInteger".equals(methodName) || "fromLong".equals(methodName))) {
+            return true;
+        }
         for (Method m : clazz.getMethods()) {
             if (m.getName().equals(methodName) && Modifier.isStatic(m.getModifiers())) return true;
         }
@@ -240,7 +243,9 @@ public final class Interop {
             case "clojure.lang.IPending" -> cljl.lang.IPending.class;
             case "clojure.lang.IMeta" -> cljl.lang.IMeta.class;
             case "clojure.lang.IObj" -> cljl.lang.IObj.class;
-            case "clojure.lang.IReference" -> cljl.lang.IReference.class;
+            case "clojure.lang.IReference", "clojure.lang.AReference", "clojure.lang.IRef" -> cljl.lang.IReference.class;
+            case "clojure.lang.IAtom", "clojure.lang.IAtom2" -> Atom.class;
+            case "clojure.lang.DynamicClassLoader" -> TypeFactory.DynamicClassLoader.class;
             case "clojure.lang.ISeq" -> cljl.lang.ISeq.class;
             case "clojure.lang.ASeq" -> cljl.lang.ASeq.class;
             case "clojure.lang.Seqable" -> cljl.lang.Seqable.class;
@@ -261,9 +266,30 @@ public final class Interop {
             case "clojure.lang.IPersistentVector" -> cljl.lang.IPersistentVector.class;
             case "clojure.lang.IPersistentSet" -> cljl.lang.IPersistentSet.class;
             case "clojure.lang.IPersistentList" -> cljl.lang.IPersistentList.class;
+            case "clojure.lang.IPersistentStack" -> cljl.lang.PersistentColl.class;
             case "clojure.lang.IPersistentCollection" -> cljl.lang.Seqable.class;
             case "clojure.lang.PersistentHashMap", "clojure.lang.PersistentArrayMap", "clojure.lang.APersistentMap" -> cljl.lang.PersistentHashMap.class;
-            case "clojure.lang.PersistentVector", "clojure.lang.APersistentVector" -> cljl.lang.PersistentVector.class;
+            case "clojure.lang.PersistentHashMap$NodeSeq", "clojure.lang.PersistentArrayMap$Seq" -> cljl.lang.PersistentHashMap.NodeSeq.class;
+            case "clojure.lang.PersistentVector", "clojure.lang.APersistentVector", "clojure.lang.LazilyPersistentVector" -> cljl.lang.PersistentVector.class;
+            case "clojure.lang.PersistentVector$ChunkedSeq" -> cljl.lang.PersistentVector.VecSeq.class;
+            case "clojure.lang.PersistentVector$Node" -> cljl.lang.PersistentVector.Node.class;
+            case "clojure.lang.PersistentVector$TransientVector" -> cljl.lang.PersistentVector.TransientVector.class;
+            case "clojure.lang.APersistentVector$RSeq" -> cljl.lang.PersistentVector.RVecSeq.class;
+            case "clojure.lang.APersistentVector$SubVector" -> cljl.lang.PersistentVector.SubVec.class;
+            case "clojure.lang.Cons" -> cljl.lang.Cons.class;
+            case "clojure.lang.Box" -> cljl.lang.Box.class;
+            case "clojure.lang.Util" -> cljl.lang.Util.class;
+            case "clojure.lang.Murmur3" -> cljl.lang.Murmur3.class;
+            case "clojure.lang.Reflector" -> Interop.class;
+            case "clojure.lang.ArityException" -> IllegalArgumentException.class;
+            case "clojure.lang.IType" -> cljl.lang.IType.class;
+            case "clojure.lang.IRecord" -> cljl.lang.PersistentRecord.class;
+            case "clojure.lang.IEditableCollection" -> cljl.lang.IEditableCollection.class;
+            case "clojure.lang.IHashEq" -> cljl.lang.IHashEq.class;
+            case "clojure.lang.ITransientSet" -> cljl.lang.PersistentHashSet.TransientHashSet.class;
+            case "clojure.lang.ITransientVector" -> cljl.lang.PersistentVector.TransientVector.class;
+            case "clojure.lang.ITransientAssociative" -> cljl.lang.PersistentHashMap.TransientHashMap.class;
+            case "clojure.lang.ITransientCollection" -> Object.class;
             case "clojure.lang.PersistentHashSet", "clojure.lang.APersistentSet" -> cljl.lang.PersistentHashSet.class;
             case "clojure.lang.PersistentList" -> cljl.lang.PersistentList.class;
             case "clojure.lang.PersistentQueue" -> cljl.lang.PersistentQueue.class;
@@ -281,7 +307,7 @@ public final class Interop {
             case "clojure.lang.ExceptionInfo" -> Core.ExceptionInfo.class;
             case "clojure.lang.IExceptionInfo" -> cljl.lang.IExceptionInfo.class;
             case "clojure.lang.IFn" -> clojure.lang.IFn.class;
-            case "clojure.lang.AFn", "clojure.lang.AFunction" -> Fn.class;
+            case "clojure.lang.AFn", "clojure.lang.AFunction", "clojure.lang.RestFn" -> Fn.class;
             case "clojure.lang.MultiFn" -> MultiFn.class;
             case "clojure.lang.Var" -> Var.class;
             case "clojure.lang.Atom" -> Atom.class;
@@ -295,7 +321,11 @@ public final class Interop {
             case "clojure.lang.RT" -> RT.class;
             case "clojure.lang.Numbers" -> Numbers.class;
             case "clojure.lang.Compiler" -> Compiler.class;
+            case "clojure.lang.Compiler$CompilerException" -> Compiler.CompilerException.class;
+            case "clojure.lang.LineNumberingPushbackReader" -> cljl.lang.LineNumberingPushbackReader.class;
+            case "clojure.lang.LispReader$ReaderException" -> Reader.ReaderException.class;
             case "clojure.lang.LispReader$StringReader" -> Reader.StringReaderFn.class;
+            case "clojure.lang.LispReader$RegexReader" -> Reader.RegexReaderFn.class;
             default -> null;
         };
 
@@ -442,11 +472,24 @@ public final class Interop {
     }
 
     public static Object invokeStaticMethod(Class<?> clazz, String methodName, Object[] args) {
+        if (clazz == java.math.BigInteger.class) {
+            if ("fromBigInteger".equals(methodName) && args != null && args.length == 1) {
+                return args[0] instanceof java.math.BigInteger bi ? bi : java.math.BigInteger.valueOf(Numbers.toLong(args[0]));
+            }
+            if ("fromLong".equals(methodName) && args != null && args.length == 1) {
+                return java.math.BigInteger.valueOf(Numbers.toLong(args[0]));
+            }
+        }
         if (isConcurrencyClass(clazz)) Atom.markMultiThreaded();
         try {
             int arity = args == null ? 0 : args.length;
             Method best = findBestMethod(clazz, methodName, args, true);
             if (best == null) {
+                Method classMethod = findBestMethod(Class.class, methodName, args, false);
+                if (classMethod != null) {
+                    Object[] coerced = coerceArgs(classMethod.getParameterTypes(), classMethod.isVarArgs(), args);
+                    return boxResult(classMethod.invoke(clazz, coerced));
+                }
                 if (arity == 0) {
                     return getStaticField(clazz, methodName);
                 }

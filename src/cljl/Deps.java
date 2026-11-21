@@ -566,6 +566,10 @@ public final class Deps {
                     if (seenRoots.add(ov)) allRoots.add(ov);
                     continue;
                 }
+                // Clojol provides the Clojure runtime itself; do not put org.clojure/clojure JAR on classpath.
+                if ("org.clojure".equals(lib.ns) && "clojure".equals(lib.name)) {
+                    continue;
+                }
                 List<String> libPaths = extractNodePaths(e.getValue());
                 for (String lp : libPaths) {
                     if (seenRoots.add(lp)) allRoots.add(lp);

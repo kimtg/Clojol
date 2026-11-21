@@ -145,6 +145,13 @@ public final class Protocol {
         }
     }
 
+    // Reverse lookup: generated protocol JVM interface -> Protocol
+    private static final ConcurrentHashMap<Class<?>, Protocol> BY_INTERFACE = new ConcurrentHashMap<>();
+
+    public static Protocol findByInterface(Class<?> iface) {
+        return iface != null ? BY_INTERFACE.get(iface) : null;
+    }
+
     public Protocol(Symbol name, String doc, Class<?> onInterface) {
         this(name, doc, onInterface, null);
     }
@@ -154,6 +161,9 @@ public final class Protocol {
         this.doc = doc;
         this.onInterface = onInterface;
         this.interfaceMethodArities = interfaceMethodArities;
+        if (onInterface != null) {
+            BY_INTERFACE.put(onInterface, this);
+        }
     }
 
     public void addImpl(Class<?> type, Map<Keyword, Fn> methods) {

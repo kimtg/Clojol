@@ -939,6 +939,7 @@ public final class CoreExtras {
         def(ns, "print-dup", printDup);
 
         def(ns, "print-simple", new ExtraFn2(60, "print-simple"));
+        def(ns, "pr-on", new ExtraFn2(62, "pr-on"));
         def(ns, "print-ctor", new ExtraFn3(18, "print-ctor"));
         def(ns, "PrintWriter-on", new ExtraFn23(61, 19, "PrintWriter-on"));
 
@@ -971,7 +972,7 @@ public final class CoreExtras {
             for (Map.Entry<Keyword, List<Object>> e : methods.entrySet()) {
                 kvs.add(e.getKey());
                 ISeq body = (ISeq) e.getValue().get(0);
-                kvs.add(RT.cons(Symbol.intern("fn"), body));
+                kvs.add(RT.cons(Symbol.intern("clojure.core", "fn"), body));
             }
             forms.add(PersistentList.createFromArray(
                     Symbol.intern("clojure.core", "extend"),
@@ -1315,9 +1316,9 @@ public final class CoreExtras {
 
     private static ISeq buildMethodFnForm(List<ISeq> arities) {
         if (arities.size() == 1) {
-            return RT.cons(Symbol.intern("fn"), arities.get(0));
+            return RT.cons(Symbol.intern("clojure.core", "fn"), arities.get(0));
         }
-        return RT.cons(Symbol.intern("fn"), PersistentList.create(arities));
+        return RT.cons(Symbol.intern("clojure.core", "fn"), PersistentList.create(arities));
     }
 
     private static Object expandReify(Object[] args) {
@@ -1365,7 +1366,9 @@ public final class CoreExtras {
     private static Class<?>[] resolveInterfaces(Object coll) {
         Set<Class<?>> ifaces = new LinkedHashSet<>();
         for (ISeq s = RT.seq(coll); s != null; s = s.next()) {
-            if (s.first() instanceof Class<?> c && c.isInterface()) ifaces.add(c);
+            Object item = s.first();
+            if (item instanceof Class<?> c && c.isInterface()) ifaces.add(c);
+            else if (item instanceof Protocol p && p.onInterface != null) ifaces.add(p.onInterface);
         }
         return ifaces.toArray(new Class<?>[0]);
     }
@@ -1495,7 +1498,10 @@ public final class CoreExtras {
         Map<Protocol, Map<Keyword, Fn>> ret = new HashMap<>();
         if (mapObj instanceof Map<?, ?> mp) {
             for (Map.Entry<?, ?> e : mp.entrySet()) {
-                if (e.getKey() instanceof Protocol p && e.getValue() instanceof Map<?, ?> pm) {
+                Protocol p = null;
+                if (e.getKey() instanceof Protocol proto) p = proto;
+                else if (e.getKey() instanceof Class<?> c) p = Protocol.findByInterface(c);
+                if (p != null && e.getValue() instanceof Map<?, ?> pm) {
                     Map<Keyword, Fn> m = new HashMap<>();
                     for (Map.Entry<?, ?> me : pm.entrySet()) m.put((Keyword) me.getKey(), (Fn) me.getValue());
                     ret.put(p, m);
@@ -2436,6 +2442,15 @@ public final class CoreExtras {
                 Object o = _a; Object w = _b; RT.printSimple(o, (Writer) w); return null; 
             }
             case 61: { Object flushFn = _a; Object closeFn = _b; return (makePrintWriter((Fn) flushFn, (Fn) closeFn, false)); }
+            case 62: {
+                Object x = _a; Object w = _b;
+                if (RT.truthy(RT.PRINT_DUP.deref())) {
+                    RT.PRINT_DUP_FN.invoke(x, w);
+                } else {
+                    RT.PRINT_METHOD_FN.invoke(x, w);
+                }
+                return null;
+            }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
         }
     }
@@ -2776,9 +2791,70 @@ public final class CoreExtras {
             }
             case 25: {
                 Object[] args = _args;
-            // Define as standard defn so calls work everywhere
-            return RT.cons(Symbol.intern("clojure.core", "defn"), PersistentList.createFromArray(args));
-        
+                // (definline name doc? attr-map? [params*] body*)
+                Symbol nameSym = (Symbol) args[0];
+                int idx = 1;
+                String doc = null;
+                if (idx < args.length && args[idx] instanceof String s) {
+                    doc = s;
+                    idx++;
+                }
+                PersistentHashMap attrMap = null;
+                if (idx < args.length && args[idx] instanceof PersistentHashMap pm) {
+                    attrMap = pm;
+                    idx++;
+                }
+                PersistentVector params = (PersistentVector) args[idx++];
+                List<Object> bodyForms = new ArrayList<>();
+                for (int i = idx; i < args.length; i++) bodyForms.add(args[i]);
+                Object inlineFnForm = RT.cons(Symbol.intern("clojure.core", "fn"),
+                        RT.cons(params, PersistentList.create(bodyForms)));
+
+                // Strip & if variadic for non-inlined wrapper; collect clean param syms
+                boolean variadic = false;
+                List<Object> paramSyms = new ArrayList<>();
+                for (int i = 0; i < params.count(); i++) {
+                    Object p = params.nth(i);
+                    if (p instanceof Symbol s && "&".equals(s.name)) { variadic = true; continue; }
+                    paramSyms.add(p);
+                }
+                Symbol ifnSym = Symbol.intern("inline_fn__" + RT.nextID());
+                Object quotedParams = PersistentList.createFromArray(Symbol.intern("quote"), params);
+                Object quotedArgSyms = PersistentList.createFromArray(Symbol.intern("quote"), PersistentVector.create(paramSyms));
+                Object evalFnForm = PersistentList.createFromArray(
+                        Symbol.intern("clojure.core", "eval"),
+                        PersistentList.createFromArray(
+                                Symbol.intern("clojure.core", "list"),
+                                PersistentList.createFromArray(Symbol.intern("quote"), Symbol.intern("clojure.core", "fn")),
+                                quotedParams,
+                                PersistentList.createFromArray(Symbol.intern("clojure.core", "apply"), ifnSym, quotedArgSyms)));
+                List<Object> metaUpdates = new ArrayList<>();
+                metaUpdates.add(Symbol.intern("clojure.core", "alter-meta!"));
+                metaUpdates.add(PersistentList.createFromArray(Symbol.intern("var"), nameSym));
+                metaUpdates.add(Symbol.intern("clojure.core", "assoc"));
+                metaUpdates.add(Keyword.intern("inline"));
+                metaUpdates.add(ifnSym);
+                if (!variadic) {
+                    metaUpdates.add(Keyword.intern("inline-arities"));
+                    metaUpdates.add(PersistentHashSet.create((long) paramSyms.size()));
+                }
+                if (doc != null) {
+                    metaUpdates.add(Keyword.intern("doc"));
+                    metaUpdates.add(doc);
+                }
+                if (attrMap != null) {
+                    for (ISeq s = attrMap.seq(); s != null; s = s.next()) {
+                        PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                        metaUpdates.add(me.key);
+                        metaUpdates.add(me.val);
+                    }
+                }
+                return PersistentList.createFromArray(
+                        Symbol.intern("clojure.core", "let"),
+                        PersistentVector.createOwning(ifnSym, inlineFnForm),
+                        PersistentList.createFromArray(Symbol.intern("def"), nameSym, evalFnForm),
+                        PersistentList.create(metaUpdates),
+                        PersistentList.createFromArray(Symbol.intern("var"), nameSym));
             }
             case 26: {
                 Object[] args = _args;
@@ -2894,7 +2970,7 @@ public final class CoreExtras {
             }
             case 35: { Object[] args = _args; return (PersistentList.createFromArray(
                         Symbol.intern("clojure.core", "bound-fn*"),
-                        RT.cons(Symbol.intern("fn"), PersistentList.createFromArray(args)))); }
+                        RT.cons(Symbol.intern("clojure.core", "fn"), PersistentList.createFromArray(args)))); }
             case 36: {
                 Object[] args = _args;
             PersistentVector bindings = (PersistentVector) args[0];
@@ -3314,7 +3390,7 @@ public final class CoreExtras {
             for (Map.Entry<String, List<Object>> e : grouped.entrySet()) {
                 mapKVs.add(e.getKey());
                 List<Object> fnClauses = new ArrayList<>();
-                fnClauses.add(Symbol.intern("fn"));
+                fnClauses.add(Symbol.intern("clojure.core", "fn"));
                 for (Object clause : e.getValue()) {
                     ISeq cs = (ISeq) clause;
                     if (cs.first() instanceof PersistentVector pv) {
@@ -3363,12 +3439,23 @@ public final class CoreExtras {
                     implMethodNames.add(mn);
                 }
                 List<Protocol> directProtos = new ArrayList<>();
+                Set<Class<?>> directProtoIfaces = new HashSet<>();
                 for (ISeq s = RT.seq(args[2]); s != null; s = s.next()) {
-                    if (s.first() instanceof Protocol p && p.onInterface != null && p.interfaceMethodArities != null) {
+                    Object item = s.first();
+                    Protocol p = item instanceof Protocol pr ? pr : (item instanceof Class<?> c ? Protocol.findByInterface(c) : null);
+                    if (p != null && p.onInterface != null && p.interfaceMethodArities != null && !p.interfaceMethodArities.isEmpty()) {
                         if (implMethodNames.containsAll(p.interfaceMethodArities.keySet())) {
                             directProtos.add(p);
+                            directProtoIfaces.add(p.onInterface);
                         }
                     }
+                }
+                if (!directProtoIfaces.isEmpty() && ifaces.length > 0) {
+                    List<Class<?>> filtered = new ArrayList<>(ifaces.length);
+                    for (Class<?> ic : ifaces) {
+                        if (!directProtoIfaces.contains(ic)) filtered.add(ic);
+                    }
+                    ifaces = filtered.toArray(new Class<?>[0]);
                 }
                 char[] fieldTypes = new char[fields.length];
                 Arrays.fill(fieldTypes, 'O');
@@ -3439,10 +3526,9 @@ public final class CoreExtras {
                         for (int i = 0; i < arr.length; i++) arr[i] = (int) Numbers.toLong(avec.nth(i));
                         aritiesMap.put(mn, arr);
                     }
-                    if (!aritiesMap.isEmpty()) {
-                        onIface = TypeFactory.defineProtocolInterface(nameSym.name, aritiesMap);
-                    }
                 }
+                String ifaceBinaryName = RT.currentNS().name.name.replace('-', '_') + "." + nameSym.name;
+                onIface = TypeFactory.defineProtocolInterface(ifaceBinaryName, aritiesMap);
                 return new Protocol(nameSym, doc, onIface, aritiesMap);
             }
             case 71: {

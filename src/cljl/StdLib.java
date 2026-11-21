@@ -227,21 +227,34 @@ public final class StdLib {
 
         ns.intern("union", Fn.ofVarargs("union", args -> {
             if (args.length == 0) return PersistentHashSet.EMPTY;
-            PersistentHashSet.TransientHashSet t = ((PersistentHashSet) args[0]).asTransient();
-            for (int i = 1; i < args.length; i++) {
+            if (args.length == 1) return args[0];
+            PersistentHashSet.TransientHashSet t;
+            int startIdx = 0;
+            if (args[0] instanceof PersistentHashSet phs) {
+                t = phs.asTransient();
+                startIdx = 1;
+            } else {
+                t = PersistentHashSet.EMPTY.asTransient();
+            }
+            for (int i = startIdx; i < args.length; i++) {
                 for (ISeq s = RT.seq(args[i]); s != null; s = s.next()) t = t.conj(s.first());
             }
             return t.persistent();
         }));
         ns.intern("intersection", Fn.ofVarargs("intersection", args -> {
             if (args.length == 0) return PersistentHashSet.EMPTY;
-            PersistentHashSet first = (PersistentHashSet) args[0];
+            if (args.length == 1) return args[0];
+            if (args[0] == null) return PersistentHashSet.EMPTY;
+            for (int i = 1; i < args.length; i++) {
+                if (args[i] == null) return PersistentHashSet.EMPTY;
+            }
             PersistentHashSet.TransientHashSet t = PersistentHashSet.EMPTY.asTransient();
-            for (ISeq s = first.seq(); s != null; s = s.next()) {
+            for (ISeq s = RT.seq(args[0]); s != null; s = s.next()) {
                 Object elem = s.first();
                 boolean inAll = true;
                 for (int i = 1; i < args.length; i++) {
-                    if (!((PersistentHashSet) args[i]).contains(elem)) {
+                    boolean has = (args[i] instanceof Set<?> set) ? set.contains(elem) : RT.contains(args[i], elem);
+                    if (!has) {
                         inAll = false;
                         break;
                     }
@@ -252,10 +265,17 @@ public final class StdLib {
         }));
         ns.intern("difference", Fn.ofVarargs("difference", args -> {
             if (args.length == 0) return PersistentHashSet.EMPTY;
-            PersistentHashSet result = (PersistentHashSet) args[0];
+            if (args[0] == null) return null;
+            Object result = args[0];
             for (int i = 1; i < args.length; i++) {
                 for (ISeq s = RT.seq(args[i]); s != null; s = s.next()) {
-                    result = result.disjoin(s.first());
+                    if (result instanceof PersistentHashSet phs) {
+                        result = phs.disjoin(s.first());
+                    } else if (result instanceof PersistentTreeSet pts) {
+                        result = pts.disjoin(s.first());
+                    } else {
+                        break;
+                    }
                 }
             }
             return result;
@@ -270,20 +290,22 @@ public final class StdLib {
             return t.persistent();
         }));
         ns.intern("subset?", Fn.of2("subset?", (s1, s2) -> {
-            PersistentHashSet a = (PersistentHashSet) s1;
-            PersistentHashSet b = (PersistentHashSet) s2;
-            if (a.count() > b.count()) return Boolean.FALSE;
-            for (ISeq s = a.seq(); s != null; s = s.next()) {
-                if (!b.contains(s.first())) return Boolean.FALSE;
+            if (s1 == null) return Boolean.TRUE;
+            if (s2 == null) return RT.count(s1) == 0 ? Boolean.TRUE : Boolean.FALSE;
+            if (RT.count(s1) > RT.count(s2)) return Boolean.FALSE;
+            for (ISeq s = RT.seq(s1); s != null; s = s.next()) {
+                boolean has = (s2 instanceof Set<?> set) ? set.contains(s.first()) : RT.contains(s2, s.first());
+                if (!has) return Boolean.FALSE;
             }
             return Boolean.TRUE;
         }));
         ns.intern("superset?", Fn.of2("superset?", (s1, s2) -> {
-            PersistentHashSet a = (PersistentHashSet) s1;
-            PersistentHashSet b = (PersistentHashSet) s2;
-            if (a.count() < b.count()) return Boolean.FALSE;
-            for (ISeq s = b.seq(); s != null; s = s.next()) {
-                if (!a.contains(s.first())) return Boolean.FALSE;
+            if (s2 == null) return Boolean.TRUE;
+            if (s1 == null) return RT.count(s2) == 0 ? Boolean.TRUE : Boolean.FALSE;
+            if (RT.count(s1) < RT.count(s2)) return Boolean.FALSE;
+            for (ISeq s = RT.seq(s2); s != null; s = s.next()) {
+                boolean has = (s1 instanceof Set<?> set) ? set.contains(s.first()) : RT.contains(s1, s.first());
+                if (!has) return Boolean.FALSE;
             }
             return Boolean.TRUE;
         }));
@@ -718,6 +740,8 @@ public final class StdLib {
 
     private static InputStream openInputStream(Object x) throws IOException {
         if (x instanceof InputStream is) return is instanceof BufferedInputStream ? is : new BufferedInputStream(is);
+        if (x instanceof java.net.Socket sock) return new BufferedInputStream(sock.getInputStream());
+        if (x instanceof java.nio.channels.ReadableByteChannel ch) return new BufferedInputStream(java.nio.channels.Channels.newInputStream(ch));
         if (x instanceof byte[] bytes) return new ByteArrayInputStream(bytes);
         if (x instanceof File f) return new BufferedInputStream(new FileInputStream(f));
         if (x instanceof Path p) return new BufferedInputStream(Files.newInputStream(p));
@@ -734,6 +758,8 @@ public final class StdLib {
 
     private static OutputStream openOutputStream(Object x, boolean append) throws IOException {
         if (x instanceof OutputStream os) return os instanceof BufferedOutputStream ? os : new BufferedOutputStream(os);
+        if (x instanceof java.net.Socket sock) return new BufferedOutputStream(sock.getOutputStream());
+        if (x instanceof java.nio.channels.WritableByteChannel ch) return new BufferedOutputStream(java.nio.channels.Channels.newOutputStream(ch));
         if (x instanceof File f) return new BufferedOutputStream(new FileOutputStream(f, append));
         if (x instanceof Path p) return new BufferedOutputStream(new FileOutputStream(p.toFile(), append));
         File f = asFileImpl(x);
@@ -748,6 +774,7 @@ public final class StdLib {
         Var testingContexts = ns.intern(Symbol.intern("*testing-contexts*")).bindRoot(PersistentList.EMPTY).setDynamic();
         Var loadTests = ns.intern(Symbol.intern("*load-tests*")).bindRoot(Boolean.TRUE).setDynamic();
         Var stackTraceDepth = ns.intern(Symbol.intern("*stack-trace-depth*")).bindRoot(null).setDynamic();
+        ns.intern(Symbol.intern("*test-out*")).bindRoot(RT.OUT.deref()).setDynamic();
 
         Keyword kTest = Keyword.intern("test");
         Keyword kPass = Keyword.intern("pass");

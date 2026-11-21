@@ -482,6 +482,9 @@ public final class Reducers {
 
         Protocol collReduceProto = new Protocol(Symbol.intern("clojure.core.reducers", "CollReduce"),
                 "Protocol for reducible collections", null);
+        ns.intern("pool", new cljl.lang.IDeref() {
+            @Override public Object deref() { return ForkJoinPool.commonPool(); }
+        });
         ns.intern("CollReduce", collReduceProto);
         ns.intern("coll-reduce", new Fn.NamedFn("coll-reduce") {
             @Override public Object invoke(Object coll, Object f) {

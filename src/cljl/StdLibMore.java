@@ -360,6 +360,75 @@ public final class StdLibMore {
             StdLib.errWriter().flush();
             return null;
         }));
+        ns.intern("root-cause", Fn.of1("root-cause", tObj -> {
+            Throwable t = (Throwable) tObj;
+            while (t != null && t.getCause() != null && t.getCause() != t) {
+                t = t.getCause();
+            }
+            return t;
+        }));
+        ns.intern("skip-if-eol", Fn.of1("skip-if-eol", s -> {
+            try {
+                java.io.PushbackReader pr = (java.io.PushbackReader) s;
+                int c = pr.read();
+                if (c == '\n') return Keyword.intern("line-start");
+                if (c == -1) return Keyword.intern("stream-end");
+                pr.unread(c);
+                return Keyword.intern("body");
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        }));
+        ns.intern("skip-whitespace", Fn.of1("skip-whitespace", s -> {
+            try {
+                java.io.PushbackReader pr = (java.io.PushbackReader) s;
+                while (true) {
+                    int c = pr.read();
+                    if (c == '\n') return Keyword.intern("line-start");
+                    if (c == -1) return Keyword.intern("stream-end");
+                    if (c == ';') {
+                        while (c != -1 && c != '\n') c = pr.read();
+                        return c == -1 ? Keyword.intern("stream-end") : Keyword.intern("line-start");
+                    }
+                    if (!Character.isWhitespace(c) && c != ',') {
+                        pr.unread(c);
+                        return Keyword.intern("body");
+                    }
+                }
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        }));
+        ns.intern("with-read-known", Fn.ofVarargs("with-read-known", args -> {
+            // (binding [*read-eval* (if (= :unknown *read-eval*) true *read-eval*)] & body)
+            Symbol re = Symbol.intern("clojure.core", "*read-eval*");
+            Object valExpr = PersistentList.createFromArray(
+                    Symbol.intern("if"),
+                    PersistentList.createFromArray(Symbol.intern("clojure.core", "="), Keyword.intern("unknown"), re),
+                    Boolean.TRUE,
+                    re);
+            List<Object> form = new ArrayList<>();
+            form.add(Symbol.intern("clojure.core", "binding"));
+            form.add(PersistentVector.createOwning(re, valExpr));
+            for (int i = 2; i < args.length; i++) form.add(args[i]);
+            return PersistentList.create(form);
+        })).setMacro();
+        ns.intern("with-bindings", Fn.ofVarargs("with-bindings", args -> {
+            List<Object> bvec = new ArrayList<>();
+            String[] dynVars = {"*ns*", "*warn-on-reflection*", "*unchecked-math*", "*data-readers*",
+                    "*default-data-reader-fn*", "*read-eval*", "*print-meta*", "*print-length*",
+                    "*print-level*", "*print-namespace-maps*", "*1", "*2", "*3", "*e"};
+            for (String v : dynVars) {
+                Symbol sym = Symbol.intern("clojure.core", v);
+                bvec.add(sym);
+                bvec.add(sym);
+            }
+            List<Object> form = new ArrayList<>();
+            form.add(Symbol.intern("clojure.core", "binding"));
+            form.add(PersistentVector.create(bvec));
+            for (int i = 2; i < args.length; i++) form.add(args[i]);
+            return PersistentList.create(form);
+        })).setMacro();
         ns.intern("load-script", Fn.of1("load-script", path -> {
             try {
                 Main.loadScriptOrResource(String.valueOf(path));

@@ -13,14 +13,27 @@ public final class MultiFn extends Fn implements IObj {
     public final String name;
     public final Fn dispatchFn;
     public final Object defaultDispatchVal;
+    public final cljl.lang.IDeref hierarchy;
     private final ConcurrentHashMap<Object, Fn> methodTable = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Object, Object> preferTable = new ConcurrentHashMap<>();
     private volatile PersistentHashMap cachedMethodTable = PersistentHashMap.EMPTY;
 
     public MultiFn(String name, Fn dispatchFn, Object defaultDispatchVal) {
+        this(name, dispatchFn, defaultDispatchVal, null);
+    }
+
+    public MultiFn(String name, Fn dispatchFn, Object defaultDispatchVal, cljl.lang.IDeref hierarchy) {
         this.name = name;
         this.dispatchFn = dispatchFn;
         this.defaultDispatchVal = defaultDispatchVal;
+        this.hierarchy = hierarchy;
+    }
+
+    private boolean isA(Object child, Object parent) {
+        if (hierarchy != null) {
+            return CoreExtras.isa(hierarchy.deref(), child, parent);
+        }
+        return Core.isa(child, parent);
     }
 
     public synchronized MultiFn addMethod(Object dispatchVal, Fn method) {
@@ -80,12 +93,12 @@ public final class MultiFn extends Fn implements IObj {
         Map.Entry<Object, Fn> best = null;
         for (Map.Entry<Object, Fn> e : methodTable.entrySet()) {
             Object k = e.getKey() == NULL_KEY ? null : e.getKey();
-            if (k != null && !RT.equiv(k, defaultDispatchVal) && Core.isa(dispatchVal, k)) {
+            if (k != null && !RT.equiv(k, defaultDispatchVal) && isA(dispatchVal, k)) {
                 if (best == null) {
                     best = e;
                 } else {
                     Object bk = best.getKey() == NULL_KEY ? null : best.getKey();
-                    if (isPreferred(k, bk) || (!isPreferred(bk, k) && Core.isa(k, bk))) {
+                    if (isPreferred(k, bk) || (!isPreferred(bk, k) && isA(k, bk))) {
                         best = e;
                     }
                 }

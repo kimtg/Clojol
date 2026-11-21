@@ -164,12 +164,12 @@ public final class Reader {
 
         Symbol getArg(int n) {
             if (n > maxArg) maxArg = n;
-            return args.computeIfAbsent(n, k -> Symbol.intern("p__" + k + "__" + RT.nextID()));
+            return args.computeIfAbsent(n, k -> Symbol.intern("p" + k + "__" + RT.nextID() + "#"));
         }
 
         Symbol getRest() {
             hasRest = true;
-            if (restSym == null) restSym = Symbol.intern("rest__" + RT.nextID());
+            if (restSym == null) restSym = Symbol.intern("rest__" + RT.nextID() + "#");
             return restSym;
         }
     }
@@ -649,6 +649,14 @@ public final class Reader {
             }
             case ':' -> readNamespacedMap();
             case '#' -> readSymbolicValue();
+            case '=' -> {
+                if (ednMode) throw readerError("No EDN dispatch macro for: =");
+                yield readEval();
+            }
+            case '^' -> {
+                if (ednMode) throw readerError("No EDN dispatch macro for: ^");
+                yield readMeta();
+            }
             default -> {
                 if (Character.isLetter(c) || c == '_' || c == '*' || c == '+' || c == '!' || c == '-' || c == '?') {
                     yield readTaggedLiteral((char) c);
@@ -658,12 +666,27 @@ public final class Reader {
         };
     }
 
+    private Object readEval() {
+        if (suppressReadDepth > 0 || RT.truthy(RT.SUPPRESS_READ.get())) {
+            readForm(true, null);
+            return null;
+        }
+        if (!RT.truthy(RT.READ_EVAL.get())) {
+            throw readerError("EvalReader not allowed when *read-eval* is false.");
+        }
+        Object form = readForm(true, null);
+        return Compiler.eval(form);
+    }
+
     private Object readTaggedLiteral(char firstChar) {
         Object tagObj = readToken(firstChar);
         if (!(tagObj instanceof Symbol tag)) {
             throw readerError("Reader tag must be a symbol");
         }
         Object form = readForm(true, null);
+        if (suppressReadDepth > 0 || RT.truthy(RT.SUPPRESS_READ.get())) {
+            return TaggedLiteral.create(tag, form);
+        }
         if (ednMode) {
             Object readerFn = (customReaders != null) ? customReaders.get(tag) : null;
             if (readerFn == null) {
@@ -746,6 +769,8 @@ public final class Reader {
         }
     }
 
+    private int suppressReadDepth = 0;
+
     private Object readConditional() {
         boolean splicing = false;
         if (peek() == '@') {
@@ -756,37 +781,59 @@ public final class Reader {
         if (readChar() != '(') {
             throw readerError("Reader conditional body must be a list");
         }
-        List<Object> pairs = readDelimited(')');
-        if ((pairs.size() & 1) != 0) {
-            throw readerError("Reader conditional requires an even number of forms");
-        }
         if (!readCondAllowed) {
             throw readerError("Conditional read not allowed");
         }
         if (readCondPreserve) {
+            List<Object> pairs = readDelimited(')');
+            if ((pairs.size() & 1) != 0) {
+                throw readerError("Reader conditional requires an even number of forms");
+            }
             return ReaderConditional.create(PersistentList.create(pairs), splicing);
         }
         Keyword cljlKw = Keyword.intern("cljl");
         Keyword cljKw = Keyword.intern("clj");
         Keyword defKw = Keyword.intern("default");
-        for (int i = 0; i < pairs.size(); i += 2) {
-            Object feat = pairs.get(i);
-            Object expr = pairs.get(i + 1);
-            boolean match = (features != null)
+        boolean found = false;
+        Object matchedExpr = DISCARD;
+        while (true) {
+            skipWhitespaceAndComments();
+            if (peek() == -1) throw readerError("EOF while reading reader conditional");
+            if (peek() == ')') {
+                readChar();
+                break;
+            }
+            Object feat = readNext(true, null);
+            if (feat == DISCARD) continue;
+            skipWhitespaceAndComments();
+            if (peek() == -1 || peek() == ')') {
+                throw readerError("Reader conditional requires an even number of forms");
+            }
+            boolean match = !found && ((features != null)
                     ? (features.contains(feat) || feat == defKw)
-                    : (feat == cljlKw || feat == cljKw || feat == defKw);
+                    : (feat == cljlKw || feat == cljKw || feat == defKw));
             if (match) {
-                if (splicing) {
-                    List<Object> items = new ArrayList<>();
-                    for (ISeq s = RT.seq(expr); s != null; s = s.next()) {
-                        items.add(s.first());
-                    }
-                    return new SpliceResult(items);
+                Object expr = readForm(true, null);
+                found = true;
+                matchedExpr = expr;
+            } else {
+                suppressReadDepth++;
+                try {
+                    readForm(true, null);
+                } finally {
+                    suppressReadDepth--;
                 }
-                return expr;
             }
         }
-        return DISCARD;
+        if (!found) return DISCARD;
+        if (splicing) {
+            List<Object> items = new ArrayList<>();
+            for (ISeq s = RT.seq(matchedExpr); s != null; s = s.next()) {
+                items.add(s.first());
+            }
+            return new SpliceResult(items);
+        }
+        return matchedExpr;
     }
 
     private Object readSymbolicValue() {
@@ -892,7 +939,7 @@ public final class Reader {
 
     private ISeq sqExpandList(ISeq seq) {
         List<Object> parts = new ArrayList<>();
-        for (; seq != null; seq = seq.next()) {
+        for (seq = RT.seq(seq); seq != null; seq = seq.next()) {
             Object item = seq.first();
             if (isUnquote(item)) {
                 parts.add(PersistentList.createFromArray(LIST, RT.second(item)));
@@ -942,6 +989,13 @@ public final class Reader {
         }
         if (mapped instanceof Class<?> c) {
             return Symbol.intern(null, c.getName());
+        }
+        if (sym.name.indexOf('.') >= 0) {
+            return sym;
+        }
+        Class<?> cls = Interop.resolveClass(cur, sym.name);
+        if (cls != null) {
+            return Symbol.intern(null, cls.getName());
         }
         return Symbol.intern(cur.name.name, sym.name);
     }
@@ -1160,7 +1214,53 @@ public final class Reader {
         }
     }
 
+    public static final class RegexReaderFn extends Fn {
+        public RegexReaderFn() {}
+
+        @Override
+        public Object invoke(Object rdrObj, Object doublequote) {
+            return invoke(rdrObj, doublequote, null);
+        }
+
+        @Override
+        public Object invoke(Object rdrObj, Object doublequote, Object opts, Object pendingForms) {
+            return invoke(rdrObj, doublequote, opts);
+        }
+
+        @Override
+        public Object invoke(Object rdrObj, Object doublequote, Object opts) {
+            java.io.Reader r = (java.io.Reader) rdrObj;
+            StringBuilder sb = new StringBuilder();
+            try {
+                while (true) {
+                    int c = r.read();
+                    if (c == -1) throw new RuntimeException("EOF while reading regex");
+                    if (c == '"') return Pattern.compile(sb.toString());
+                    sb.append((char) c);
+                    if (c == '\\') {
+                        int next = r.read();
+                        if (next == -1) throw new RuntimeException("EOF while reading regex");
+                        sb.append((char) next);
+                    }
+                }
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        }
+    }
+
+    public static class ReaderException extends RuntimeException {
+        public final int line;
+        public final int column;
+
+        public ReaderException(int line, int column, String msg) {
+            super(msg);
+            this.line = line;
+            this.column = column;
+        }
+    }
+
     private RuntimeException readerError(String msg) {
-        return new RuntimeException(msg + " [" + filename + ":" + line + ":" + col + "]");
+        return new ReaderException(line, col, msg + " [" + filename + ":" + line + ":" + col + "]");
     }
 }

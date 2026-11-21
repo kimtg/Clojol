@@ -49,7 +49,9 @@ public final class Namespace implements IMeta, IReference {
             Symbol.intern("Comparable"), Comparable.class,
             Symbol.intern("Iterable"), Iterable.class,
             Symbol.intern("BigInteger"), java.math.BigInteger.class,
-            Symbol.intern("BigDecimal"), java.math.BigDecimal.class
+            Symbol.intern("BigDecimal"), java.math.BigDecimal.class,
+            Symbol.intern("Callable"), java.util.concurrent.Callable.class,
+            Symbol.intern("Compiler"), Compiler.class
     };
 
     private static final class MacroAdapterFn extends Fn.NamedFn {
@@ -235,7 +237,10 @@ public final class Namespace implements IMeta, IReference {
     }
 
     public Class<?> importClass(Class<?> c) {
-        return importClass(Symbol.intern(c.getSimpleName()), c);
+        String cname = c.getName();
+        int dot = cname.lastIndexOf('.');
+        String shortName = dot >= 0 ? cname.substring(dot + 1) : cname;
+        return importClass(Symbol.intern(shortName), c);
     }
 
     public void addAlias(Symbol alias, Namespace ns) {

@@ -23,6 +23,24 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class Compiler {
 
     public static final Object RECUR_SENTINEL = new Object();
+    public static final Var LOADER = Var.create(null).setDynamic();
+
+    public static class CompilerException extends RuntimeException {
+        public final String source;
+        public final int line;
+
+        public CompilerException(String source, int line, Throwable cause) {
+            super("Syntax error compiling at (" + source + ":" + line + ")", cause);
+            this.source = source;
+            this.line = line;
+        }
+
+        public CompilerException(String message, Throwable cause) {
+            super(message, cause);
+            this.source = null;
+            this.line = -1;
+        }
+    }
 
     private static final Set<Symbol> SPECIALS = Set.of(
             Symbol.intern("quote"),
@@ -57,6 +75,10 @@ public final class Compiler {
     // ========================================================================
 
     public static Object eval(Object form) {
+        return eval(form, false);
+    }
+
+    public static Object eval(Object form, boolean freshLoader) {
         RT.ensureInit();
         form = macroexpand(form, null);
         if (form instanceof ISeq seq) {
@@ -91,6 +113,11 @@ public final class Compiler {
 
     public static Object load(java.io.Reader rdr, String filename) {
         return loadReader(new Reader(rdr, filename, null), filename);
+    }
+
+    public static Object load(java.io.Reader rdr, String sourcePath, String sourceName) {
+        String fname = sourcePath != null ? sourcePath : sourceName;
+        return loadReader(new Reader(rdr, fname, null), fname);
     }
 
     private static Object loadReader(Reader reader, String filename) {
@@ -386,6 +413,8 @@ public final class Compiler {
 
     private static final Keyword TAG_KW = Keyword.intern("tag");
     private static final Keyword PARAM_TAGS_KW = Keyword.intern("param-tags");
+    private static final Keyword INLINE_KW = Keyword.intern("inline");
+    private static final Keyword INLINE_ARITIES_KW = Keyword.intern("inline-arities");
 
     private static Class<?>[] extractParamTags(Symbol sym, Namespace ns) {
         if (sym != null && sym.meta() != null) {
@@ -806,6 +835,21 @@ public final class Compiler {
             if (!shadowed) {
                 Var targetVar = lookupVar(RT.currentNS(), sym, false);
                 if (targetVar != null) {
+                    PersistentHashMap vmeta = targetVar.meta();
+                    if (vmeta != null) {
+                        Object inlineObj = vmeta.valAt(INLINE_KW);
+                        if (inlineObj instanceof Fn inlineFn) {
+                            int argc = RT.count(args);
+                            Object aritiesObj = vmeta.valAt(INLINE_ARITIES_KW);
+                            if (aritiesObj == null || (aritiesObj instanceof Fn af && RT.truthy(af.invoke((long) argc)))) {
+                                Object[] rawArgs = new Object[argc];
+                                int k = 0;
+                                for (ISeq it = args; it != null; it = it.next()) rawArgs[k++] = it.first();
+                                Object inlined = inlineFn.applyTo(rawArgs);
+                                return compile(inlined, scope, inTail);
+                            }
+                        }
+                    }
                     Node[] argNodes = compileArgs(args, scope);
                     // Emit specialized intrinsic AST nodes for core hot-path operations
                     if (targetVar.ns == RT.CLOJURE_NS && !targetVar.isDynamic()) {

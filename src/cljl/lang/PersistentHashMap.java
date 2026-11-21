@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 32-way Hash Array Mapped Trie (HAMT) persistent map with MapEntry and TransientHashMap.
  */
 public final class PersistentHashMap extends Fn
-        implements IPersistentMap, IObj, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
+        implements IPersistentMap, IObj, IEditableCollection, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
 
     private static final Object NOT_FOUND = new Object();
     public static final PersistentHashMap EMPTY = new PersistentHashMap(null, 0, null, false, null);
@@ -50,6 +50,26 @@ public final class PersistentHashMap extends Fn
             t = t.assoc(init[i], init[i + 1]);
         }
         return t.persistent();
+    }
+
+    public static PersistentHashMap createWithCheck(Object... init) {
+        if (init == null || init.length == 0) return EMPTY;
+        if ((init.length & 1) != 0) {
+            throw new IllegalArgumentException("No value supplied for key: " + init[init.length - 1]);
+        }
+        TransientHashMap t = EMPTY.asTransient();
+        for (int i = 0; i < init.length; i += 2) {
+            if (t.valAt(init[i], NOT_FOUND) != NOT_FOUND) {
+                throw new IllegalArgumentException("Duplicate key: " + init[i]);
+            }
+            t = t.assoc(init[i], init[i + 1]);
+        }
+        return t.persistent();
+    }
+
+    public static PersistentHashMap createWithCheck(List<?> init) {
+        if (init == null || init.isEmpty()) return EMPTY;
+        return createWithCheck(init.toArray());
     }
 
     public static PersistentHashMap createFromMap(Map<?, ?> m) {
@@ -146,6 +166,14 @@ public final class PersistentHashMap extends Fn
                 .assoc(0, RT.hash(key), key, val, addedLeaf);
         if (newroot == root) return this;
         return new PersistentHashMap(meta, addedLeaf.val == null ? count : count + 1, newroot, hasNull, nullValue);
+    }
+
+    public PersistentHashMap cons(Object o) {
+        return (PersistentHashMap) RT.conj(this, o);
+    }
+
+    public PersistentHashMap empty() {
+        return EMPTY;
     }
 
     public PersistentHashMap without(Object key) {
@@ -669,7 +697,7 @@ public final class PersistentHashMap extends Fn
         }
     }
 
-    static final class NodeSeq extends ASeq {
+    public static final class NodeSeq extends ASeq {
         final Object[] array;
         final int i;
         final ISeq s;

@@ -326,6 +326,7 @@ public final class RT {
                 Object k = s.first();
                 ISeq n = s.next();
                 if (n == null) {
+                    if (k == null) break;
                     if (k instanceof Map<?, ?> m) {
                         for (Map.Entry<?, ?> e : m.entrySet()) {
                             tm.assoc(e.getKey(), e.getValue());
@@ -860,6 +861,22 @@ public final class RT {
         });
     }
 
+    public static PersistentHashMap map(Object... init) {
+        return PersistentHashMap.create(init);
+    }
+
+    public static PersistentHashMap mapUniqueKeys(Object... init) {
+        return PersistentHashMap.createWithCheck(init);
+    }
+
+    public static PersistentVector vector(Object... init) {
+        return PersistentVector.createOwning(init);
+    }
+
+    public static PersistentHashSet set(Object... init) {
+        return PersistentHashSet.create(init);
+    }
+
     public static Object[] toArray(Object coll) {
         if (coll == null) return Fn.EMPTY_ARGS;
         if (coll instanceof Object[] arr) return arr;
@@ -1116,6 +1133,24 @@ public final class RT {
             return;
         }
         sb.append(x.toString());
+    }
+
+    public static Class<?> classForName(String name) throws ClassNotFoundException {
+        Class<?> c = Interop.findClass(name);
+        if (c != null) return c;
+        return Class.forName(name, true, baseLoader());
+    }
+
+    public static Class<?> classForName(String name, boolean doInit, ClassLoader loader) throws ClassNotFoundException {
+        Class<?> c = Interop.findClass(name);
+        if (c != null) return c;
+        return Class.forName(name, doInit, loader != null ? loader : baseLoader());
+    }
+
+    public static Class<?> classForNameNonLoading(String name) throws ClassNotFoundException {
+        Class<?> c = Interop.findClass(name);
+        if (c != null) return c;
+        return Class.forName(name, false, baseLoader());
     }
 
     @SuppressWarnings("unchecked")

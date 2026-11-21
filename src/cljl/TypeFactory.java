@@ -42,9 +42,18 @@ public final class TypeFactory {
         return LOADER.define(binaryName, bytes);
     }
 
-    public static final class DynamicClassLoader extends ClassLoader {
-        DynamicClassLoader() {
-            super(TypeFactory.class.getClassLoader());
+    public static final class DynamicClassLoader extends java.net.URLClassLoader {
+        public DynamicClassLoader() {
+            super(new java.net.URL[0], TypeFactory.class.getClassLoader());
+        }
+
+        public DynamicClassLoader(ClassLoader parent) {
+            super(new java.net.URL[0], parent);
+        }
+
+        @Override
+        public void addURL(java.net.URL url) {
+            super.addURL(url);
         }
 
         Class<?> define(String binaryName, byte[] bytes) {
@@ -57,6 +66,9 @@ public final class TypeFactory {
 
         @Override
         protected Class<?> findClass(String name) throws ClassNotFoundException {
+            try {
+                return super.findClass(name);
+            } catch (ClassNotFoundException ignored) {}
             ClassLoader rt = RT.baseLoader();
             if (rt != null && rt != this && rt != getParent()) {
                 return rt.loadClass(name);
@@ -128,35 +140,97 @@ public final class TypeFactory {
         return sb.toString();
     }
 
-    public static synchronized Class<?> defineProtocolInterface(String protoName, Map<String, int[]> methodArities) {
-        if (methodArities == null || methodArities.isEmpty()) return null;
-        int id = PROTO_IFACE_ID.incrementAndGet();
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < protoName.length() && sb.length() < 32; i++) {
-            char c = protoName.charAt(i);
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') sb.append(c);
-            else sb.append('_');
-        }
-        String safe = sb.length() > 0 ? sb.toString() : "Proto";
-        String binaryName = "cljl.proto.I$" + safe + "$" + id;
-        String internalName = binaryName.replace('.', '/');
+    private static final ConcurrentHashMap<String, String> PROTO_MANGLED_TO_NAME = new ConcurrentHashMap<>();
 
-        ClassWriter cw = new ClassWriter(internalName, "java/lang/Object", new String[0], 0x0601); // PUBLIC | INTERFACE | ABSTRACT
-        for (Map.Entry<String, int[]> e : methodArities.entrySet()) {
-            String jm = mangleProtoMethod(e.getKey());
-            for (int arity : e.getValue()) {
-                if (arity < 1 || arity > 4) continue;
-                StringBuilder desc = new StringBuilder("(");
-                for (int i = 1; i < arity; i++) desc.append("Ljava/lang/Object;");
-                desc.append(")Ljava/lang/Object;");
-                cw.addAbstractMethod(jm, desc.toString());
-                if (arity == 2) {
-                    cw.addAbstractMethod(jm + "_J", "(J)J");
-                    cw.addAbstractMethod(jm + "_JO", "(J)Ljava/lang/Object;");
+    private static final Set<String> RESERVED_PROTO_IFACE_NAMES = Set.of(
+            "toString", "hashCode", "equals", "getClass", "notify", "notifyAll", "wait", "clone", "finalize",
+            "meta", "withMeta", "valAt", "assoc", "without", "count", "seq", "empty", "cons", "conj", "equiv",
+            "containsKey", "entryAt", "get", "size", "isEmpty", "keySet", "values", "entrySet",
+            "put", "remove", "putAll", "clear", "containsValue", "iterator", "invoke", "applyTo",
+            "__protocolFn", "__satisfies", "__getMappings", "__setMappings"
+    );
+
+    private static String standardProtoMethodName(String origName) {
+        if (origName == null || origName.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder(origName.length());
+        for (int i = 0; i < origName.length(); i++) {
+            char c = origName.charAt(i);
+            switch (c) {
+                case '-' -> sb.append('_');
+                case '?' -> sb.append("_QMARK_");
+                case '!' -> sb.append("_BANG_");
+                case '*' -> sb.append("_STAR_");
+                case '+' -> sb.append("_PLUS_");
+                case '>' -> sb.append("_GT_");
+                case '<' -> sb.append("_LT_");
+                case '=' -> sb.append("_EQ_");
+                case '/' -> sb.append("_SLASH_");
+                default -> {
+                    if (Character.isJavaIdentifierPart(c) && (i > 0 || Character.isJavaIdentifierStart(c))) {
+                        sb.append(c);
+                    } else {
+                        sb.append('_').append(Integer.toHexString(c)).append('_');
+                    }
                 }
             }
         }
-        return LOADER.define(binaryName, cw.toByteArray());
+        String munged = sb.toString();
+        if (munged.isEmpty() || RESERVED_PROTO_IFACE_NAMES.contains(munged)) return null;
+        return munged;
+    }
+
+    public static synchronized Class<?> defineProtocolInterface(String desiredBinaryName, Map<String, int[]> methodArities) {
+        if (desiredBinaryName == null || desiredBinaryName.isEmpty()) return null;
+        String binaryName = desiredBinaryName;
+        if (LOADER.findAlreadyLoaded(binaryName) != null) {
+            binaryName = desiredBinaryName + "$" + PROTO_IFACE_ID.incrementAndGet();
+        }
+        String internalName = binaryName.replace('.', '/');
+
+        ClassWriter cw = new ClassWriter(internalName, "java/lang/Object", new String[0], 0x0601); // PUBLIC | INTERFACE | ABSTRACT
+        if (methodArities != null) {
+            Set<String> emittedSigs = new HashSet<>();
+            for (Map.Entry<String, int[]> e : methodArities.entrySet()) {
+                String origName = e.getKey();
+                String jm = mangleProtoMethod(origName);
+                String stdName = standardProtoMethodName(origName);
+                PROTO_MANGLED_TO_NAME.put(jm, origName);
+                if (stdName != null && !stdName.equals(jm)) {
+                    PROTO_MANGLED_TO_NAME.put(stdName, origName);
+                }
+                for (int arity : e.getValue()) {
+                    if (arity < 1 || arity > 4) continue;
+                    StringBuilder desc = new StringBuilder("(");
+                    for (int i = 1; i < arity; i++) desc.append("Ljava/lang/Object;");
+                    desc.append(")Ljava/lang/Object;");
+                    String descStr = desc.toString();
+                    if (emittedSigs.add(jm + descStr)) {
+                        cw.addAbstractMethod(jm, descStr);
+                    }
+                    if (stdName != null && !stdName.equals(jm) && emittedSigs.add(stdName + descStr)) {
+                        cw.addAbstractMethod(stdName, descStr);
+                    }
+                    if (arity == 2) {
+                        if (emittedSigs.add(jm + "_J(J)J")) {
+                            cw.addAbstractMethod(jm + "_J", "(J)J");
+                        }
+                        if (emittedSigs.add(jm + "_JO(J)Ljava/lang/Object;")) {
+                            cw.addAbstractMethod(jm + "_JO", "(J)Ljava/lang/Object;");
+                        }
+                        PROTO_MANGLED_TO_NAME.put(jm + "_J", origName);
+                        PROTO_MANGLED_TO_NAME.put(jm + "_JO", origName);
+                    }
+                }
+            }
+        }
+        byte[] bytes = cw.toByteArray();
+        GenClass.writeClassFileIfCompiling(binaryName, bytes);
+        Class<?> iface = LOADER.define(binaryName, bytes);
+        Interop.registerClass(desiredBinaryName, iface);
+        if (!desiredBinaryName.equals(binaryName)) {
+            Interop.registerClass(binaryName, iface);
+        }
+        return iface;
     }
 
     private static boolean containsArity(int[] arities, int a) {
@@ -313,16 +387,28 @@ public final class TypeFactory {
         if (!activeDirectProtos.isEmpty()) {
             pmHolderBinary = binaryName + "$__pm$" + PROTO_HOLDER_ID.incrementAndGet();
             String pmHolderInternal = pmHolderBinary.replace('.', '/');
+            Set<String> emittedRecProtos = new HashSet<>();
             for (Protocol p : activeDirectProtos) {
                 for (Map.Entry<String, int[]> e : p.interfaceMethodArities.entrySet()) {
-                    String jm = mangleProtoMethod(e.getKey());
+                    String origName = e.getKey();
+                    String jm = mangleProtoMethod(origName);
+                    String stdName = standardProtoMethodName(origName);
                     String fnField = "__pm_" + jm;
                     for (int arity : e.getValue()) {
                         if (arity < 1 || arity > 4) continue;
-                        cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm, arity, false, false);
+                        if (emittedRecProtos.add(jm + "/" + arity)) {
+                            cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm, arity, false, false);
+                        }
+                        if (stdName != null && !stdName.equals(jm) && emittedRecProtos.add(stdName + "/" + arity)) {
+                            cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, stdName, arity, false, false);
+                        }
                         if (arity == 2) {
-                            cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm + "_J", 2, true, true);
-                            cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm + "_JO", 2, true, false);
+                            if (emittedRecProtos.add(jm + "_J/2")) {
+                                cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm + "_J", 2, true, true);
+                            }
+                            if (emittedRecProtos.add(jm + "_JO/2")) {
+                                cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm + "_JO", 2, true, false);
+                            }
                         }
                     }
                 }
@@ -399,8 +485,13 @@ public final class TypeFactory {
             Class<?>[] interfaces,
             Map<String, Fn> methodImpls) {
         String internalName = binaryName.replace('.', '/');
-        String[] ifaceInternals = new String[interfaces.length];
+        boolean hasIType = false;
+        for (Class<?> iface : interfaces) {
+            if (iface == IType.class) { hasIType = true; break; }
+        }
+        String[] ifaceInternals = new String[interfaces.length + (hasIType ? 0 : 1)];
         for (int i = 0; i < interfaces.length; i++) ifaceInternals[i] = interfaces[i].getName().replace('.', '/');
+        if (!hasIType) ifaceInternals[interfaces.length] = "cljl/lang/IType";
 
         ConcurrentHashMap<String, Fn> cm = new ConcurrentHashMap<>();
         for (Map.Entry<String, Fn> e : methodImpls.entrySet()) {
@@ -427,12 +518,18 @@ public final class TypeFactory {
             ClassWriter cw, String binaryName, Class<?>[] interfaces, Map<String, Fn> methodImpls) {
         Set<String> emitted = new HashSet<>();
         for (Class<?> iface : interfaces) {
+            boolean isProtoIface = Protocol.findByInterface(iface) != null;
             for (Method m : iface.getMethods()) {
                 if (Modifier.isStatic(m.getModifiers())) continue;
                 String desc = methodDesc(m.getReturnType(), m.getParameterTypes());
                 String sigKey = m.getName() + desc;
                 if (!emitted.add(sigKey)) continue;
-                cw.emitDispatchBridge(binaryName, m.getName(), m.getReturnType(), m.getParameterTypes());
+                if (isProtoIface) {
+                    String origName = PROTO_MANGLED_TO_NAME.getOrDefault(m.getName(), m.getName());
+                    cw.emitDispatchBridgeWithKey(binaryName, m.getName(), origName, m.getReturnType(), m.getParameterTypes());
+                } else {
+                    cw.emitDispatchBridge(binaryName, m.getName(), m.getReturnType(), m.getParameterTypes());
+                }
             }
         }
         // Also emit Object methods (toString/equals/hashCode) if explicitly overridden in methodImpls
@@ -482,6 +579,10 @@ public final class TypeFactory {
                     return protocolImpls.containsKey((Protocol) args[0]);
                 }
                 Fn impl = javaMethodImpls.get(mname);
+                if (impl == null) {
+                    String orig = PROTO_MANGLED_TO_NAME.get(mname);
+                    if (orig != null) impl = javaMethodImpls.get(orig);
+                }
                 if (impl != null) {
                     Object[] callArgs = new Object[1 + (args != null ? args.length : 0)];
                     callArgs[0] = proxy;
@@ -1246,6 +1347,10 @@ public final class TypeFactory {
         }
 
         void emitDispatchBridge(String binaryName, String mname, Class<?> retType, Class<?>[] paramTypes) {
+            emitDispatchBridgeWithKey(binaryName, mname, mname, retType, paramTypes);
+        }
+
+        void emitDispatchBridgeWithKey(String binaryName, String mname, String dispatchKey, Class<?> retType, Class<?>[] paramTypes) {
             String desc = methodDesc(retType, paramTypes);
             MethodAssembler ma = new MethodAssembler(this);
             int nextSlot = 1;
@@ -1255,7 +1360,7 @@ public final class TypeFactory {
                 nextSlot += (paramTypes[i] == long.class || paramTypes[i] == double.class) ? 2 : 1;
             }
             ma.ldcString(binaryName);
-            ma.ldcString(mname);
+            ma.ldcString(dispatchKey);
             ma.aload(0);
             ma.emitBoxedArray(paramTypes, paramSlots);
             ma.invokestatic("cljl/TypeFactory", "dispatchMethod",

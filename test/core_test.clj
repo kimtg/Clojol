@@ -2030,7 +2030,104 @@
               (invoke [_ x] (* x 2))
               (invoke [_ x y] (+ x y)))]
       (is (= 10 (f 5)))
-      (is (= 9 (f 4 5))))))
+      (is (= 9 (f 4 5)))))
+
+  (testing "Wave 2 ecosystem compatibility regressions"
+    ;; Inner-class $ import, return value, and ClassNotFoundException
+    (is (= java.util.Map$Entry (import 'java.util.Map$Entry)))
+    (is (= java.util.Map$Entry (resolve 'Map$Entry)))
+    (is (thrown? ClassNotFoundException (import 'no.such.pkg.NonExistentClojolClass)))
+    (is (= clojure.lang.MapEntry (import '[clojure.lang MapEntry])))
+    (is (= clojure.lang.MapEntry (resolve 'MapEntry)))
+
+    ;; Reader: #(...) in syntax-quote, empty `{}, #=(...), #^meta, suppressed #?(:cljs #js ...)
+    (let [f (eval `(let [k# 10] #(+ % k#)))]
+      (is (= 15 (f 5))))
+    (is (= {} (eval `{})))
+    (is (= 7 (read-string "#=(+ 3 4)")))
+    (is (thrown? RuntimeException (binding [*read-eval* false] (read-string "#=(+ 1 2)"))))
+    (is (= {:tag 'String} (meta (read-string "#^{:tag String} x"))))
+    (is (= :clj-ok (read-string {:read-cond :allow} "#?(:cljs #js [1 2] :clj :clj-ok)")))
+
+    ;; definline & :inline expansion
+    (eval '(do
+             (definline __w2-add1 [x] `(+ ~x 1))
+             (assert (= 42 (__w2-add1 41)))
+             (assert (= [2 3 4] (mapv __w2-add1 [1 2 3])))))
+
+    ;; defmulti with custom :hierarchy
+    (let [h (atom (-> (make-hierarchy) (derive ::dog ::animal)))]
+      (eval `(do
+               (defmulti ~'__w2-speak identity :hierarchy ~h)
+               (defmethod ~'__w2-speak ::animal [_#] :generic-animal)
+               (assert (= :generic-animal (~'__w2-speak ::dog))))))
+
+    ;; defprotocol JVM interface, instance?, direct (.method ...) interop, and shadowed local `fn`
+    (eval '(do
+             (defprotocol W2Transport
+               (w2-recv [this] [this timeout])
+               (w2-send [this msg]))
+             (deftype W2Dummy [v]
+               W2Transport
+               (w2-recv [this] (.w2_recv this 99))
+               (w2-recv [_ timeout] [v timeout])
+               (w2-send [this msg] [v msg]))
+             (let [d (W2Dummy. :x)]
+               (assert (instance? cljl.core_test.W2Transport d))
+               (assert (instance? clojure.lang.IType d))
+               (assert (= [:x 99] (w2-recv d)))
+               (assert (= [:x 7] (.w2_recv d 7)))
+               (assert (= [:x :hi] (.w2_send d :hi))))
+             (let [fn (fn [x] (* x 10))
+                   r (reify W2Transport
+                       (w2-recv [_] (fn 3))
+                       (w2-recv [_ t] (fn t))
+                       (w2-send [_ m] m))]
+               (assert (instance? cljl.core_test.W2Transport r))
+               (assert (= 30 (w2-recv r)))
+               (assert (= 40 (.w2_recv r 4))))))
+
+    ;; Tail-position recur in cond->, cond->>, some->, some->>, as->
+    (let [step (fn [acc n] (cond-> acc (pos? n) (recur (dec n))))]
+      (is (= :done (step :done 5))))
+    (let [step (fn [n acc] (cond->> acc (pos? n) (recur (dec n))))]
+      (is (= :done (step 5 :done))))
+    (let [step (fn [n] (as-> n x (if (pos? x) (recur (dec x)) x)))]
+      (is (= 0 (step 4))))
+    (let [step (fn [n] (some-> n (#(if (pos? %) (dec %) nil)) (recur)))]
+      (is (nil? (step 3))))
+
+    ;; clojure.lang.* standalone runtime bridge & stdlib fixes
+    (is (= (Class/forName "[B") (clojure.lang.RT/classForName "[B")))
+    (is (= {:a 1 :b 2} (clojure.lang.RT/map (into-array Object [:a 1 :b 2]))))
+    (is (= 123N (clojure.lang.BigInt/fromBigInteger (java.math.BigInteger. "123"))))
+    (is (= #{1 2} (clojure.lang.PersistentHashSet/createWithCheck (into-array Object [1 2]))))
+    (is (= {:a 1} (clojure.lang.PersistentHashMap/createWithCheck (into-array Object [:a 1]))))
+    (is (= [1 2 3] (.cons [1 2] 3)))
+    (is (instance? clojure.lang.IPersistentVector (subvec [1 2 3 4] 1 3)))
+    (is (clojure.lang.Util/equiv 1 1N))
+    (is (integer? (clojure.lang.Murmur3/hashInt 42)))
+    (is (= :val (.-val (clojure.lang.Box. :val))))
+    (is (= 42 (Compiler/eval '(+ 40 2) true)))
+    (is (some? (.getDeclaredField String "CASE_INSENSITIVE_ORDER")))
+    (let [lnr (clojure.lang.LineNumberingPushbackReader. (java.io.StringReader. "a\nb"))]
+      (is (= 1 (.getLineNumber lnr)))
+      (is (= (int \a) (.read lnr)))
+      (is (= (int \newline) (.read lnr)))
+      (is (= 2 (.getLineNumber lnr))))
+    (let [sw (java.io.StringWriter.)]
+      (#'clojure.core/pr-on {:a 1} sw)
+      (is (= "{:a 1}" (.toString sw))))
+    (is (some? @(requiring-resolve 'clojure.core.reducers/pool)))
+    (is (some? (resolve 'clojure.test/*test-out*)))
+    (require 'clojure.set 'clojure.main)
+    (is (= #{:a} (clojure.set/union nil #{:a})))
+    (is (= #{} (clojure.set/intersection nil #{:a})))
+    (is (nil? (clojure.set/difference nil #{:a})))
+    (is (= 42 (clojure.main/with-read-known 42)))
+    (let [r (IllegalArgumentException. "inner")
+          w (RuntimeException. "outer" r)]
+      (is (identical? r (clojure.main/root-cause w))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

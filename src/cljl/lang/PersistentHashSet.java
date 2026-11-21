@@ -5,7 +5,7 @@ import cljl.RT;
 import java.util.*;
 
 public final class PersistentHashSet extends Fn
-        implements IPersistentSet, IObj, Set<Object> {
+        implements IPersistentSet, IObj, IEditableCollection, Set<Object> {
 
     public static final PersistentHashSet EMPTY = new PersistentHashSet(null, PersistentHashMap.EMPTY);
 
@@ -26,6 +26,26 @@ public final class PersistentHashSet extends Fn
         return t.persistent();
     }
 
+    public static PersistentHashSet createWithCheck(Object... init) {
+        if (init == null || init.length == 0) return EMPTY;
+        TransientHashSet t = EMPTY.asTransient();
+        for (Object o : init) {
+            if (t.contains(o)) throw new IllegalArgumentException("Duplicate key: " + o);
+            t = t.conj(o);
+        }
+        return t.persistent();
+    }
+
+    public static PersistentHashSet createWithCheck(List<?> init) {
+        if (init == null || init.isEmpty()) return EMPTY;
+        TransientHashSet t = EMPTY.asTransient();
+        for (Object o : init) {
+            if (t.contains(o)) throw new IllegalArgumentException("Duplicate key: " + o);
+            t = t.conj(o);
+        }
+        return t.persistent();
+    }
+
     public static PersistentHashSet createFromColl(Iterable<?> init) {
         if (init == null) return EMPTY;
         TransientHashSet t = EMPTY.asTransient();
@@ -38,6 +58,14 @@ public final class PersistentHashSet extends Fn
         TransientHashSet t = EMPTY.asTransient();
         for (ISeq s = seq; s != null; s = s.next()) t = t.conj(s.first());
         return t.persistent();
+    }
+
+    public PersistentHashSet cons(Object key) {
+        return conj(key);
+    }
+
+    public PersistentHashSet empty() {
+        return EMPTY;
     }
 
     public PersistentHashSet conj(Object key) {

@@ -2367,7 +2367,14 @@ public final class Core {
         defMacro(ns, "ns", new CoreFnV(117, "ns"));
 
         // Multimethod macros: defmulti, defmethod
-        def(ns, "create-multi", new CoreFn3(18, "create-multi"));
+        def(ns, "create-multi", new Fn.NamedFn("create-multi") {
+            @Override public Object invoke(Object name, Object dispatchFn, Object defaultVal) {
+                return new MultiFn(name.toString(), (Fn) dispatchFn, defaultVal);
+            }
+            @Override public Object invoke(Object name, Object dispatchFn, Object defaultVal, Object hierarchy) {
+                return new MultiFn(name.toString(), (Fn) dispatchFn, defaultVal, (cljl.lang.IDeref) hierarchy);
+            }
+        });
         def(ns, "add-method!", new CoreFn3(19, "add-method!"));
 
         defMacro(ns, "defmulti", new CoreFnV(118, "defmulti"));
@@ -4421,25 +4428,31 @@ public final class Core {
             case 63: {
                 Object[] args = _args;
             Namespace cur = RT.currentNS();
+            Class<?> last = null;
             for (Object spec : args) {
                 if (spec instanceof Symbol s) {
                     Class<?> c = Interop.findClass(s.name);
-                    if (c == null) throw new RuntimeException("Class not found: " + s);
-                    cur.importClass(c);
+                    if (c == null) throw RT.sneakyThrow(new ClassNotFoundException(s.name));
+                    int dot = s.name.lastIndexOf('.');
+                    String alias = dot >= 0 ? s.name.substring(dot + 1) : s.name;
+                    cur.importClass(Symbol.intern(alias), c);
+                    last = c;
                 } else if (spec instanceof ISeq || spec instanceof PersistentVector) {
                     ISeq seq = RT.seq(spec);
                     if (seq != null) {
                         String pkg = seq.first().toString();
                         for (ISeq s = seq.next(); s != null; s = s.next()) {
-                            String clsName = pkg + "." + s.first();
+                            String shortName = s.first().toString();
+                            String clsName = pkg + "." + shortName;
                             Class<?> c = Interop.findClass(clsName);
-                            if (c == null) throw new RuntimeException("Class not found: " + clsName);
-                            cur.importClass(c);
+                            if (c == null) throw RT.sneakyThrow(new ClassNotFoundException(clsName));
+                            cur.importClass(Symbol.intern(shortName), c);
+                            last = c;
                         }
                     }
                 }
             }
-            return null;
+            return last;
         
             }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
@@ -4806,38 +4819,50 @@ public final class Core {
             List<Object> bindings = new ArrayList<>();
             bindings.add(name);
             bindings.add(expr);
-            for (int i = 2; i < args.length; i++) {
+            if (args.length == 2) {
+                return PersistentList.createFromArray(letStar, PersistentVector.create(bindings), name);
+            }
+            for (int i = 2; i < args.length - 1; i++) {
                 bindings.add(name);
                 bindings.add(args[i]);
             }
-            return PersistentList.createFromArray(letStar, PersistentVector.create(bindings), name);
+            return PersistentList.createFromArray(letStar, PersistentVector.create(bindings), args[args.length - 1]);
         
             }
             case 93: {
                 Object[] args = _args;
+            if (args.length == 1) return args[0];
             Symbol g = Symbol.intern("some__" + RT.nextID());
             List<Object> steps = new ArrayList<>();
             steps.add(g);
             steps.add(args[0]);
+            Object lastExpr = g;
             for (int i = 1; i < args.length; i++) {
                 Object form = args[i];
                 Object step = (form instanceof ISeq s)
                         ? RT.cons(s.first(), RT.cons(g, s.next()))
                         : PersistentList.createFromArray(form, g);
-                steps.add(g);
-                steps.add(PersistentList.createFromArray(ifSym,
+                Object condExpr = PersistentList.createFromArray(ifSym,
                         PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), g),
-                        null, step));
+                        null, step);
+                if (i == args.length - 1) {
+                    lastExpr = condExpr;
+                } else {
+                    steps.add(g);
+                    steps.add(condExpr);
+                }
             }
-            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
+            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), lastExpr);
         
             }
             case 94: {
                 Object[] args = _args;
+            if (args.length == 1) return args[0];
             Symbol g = Symbol.intern("some__" + RT.nextID());
             List<Object> steps = new ArrayList<>();
             steps.add(g);
             steps.add(args[0]);
+            Object lastExpr = g;
             for (int i = 1; i < args.length; i++) {
                 Object form = args[i];
                 Object step;
@@ -4849,30 +4874,43 @@ public final class Core {
                 } else {
                     step = PersistentList.createFromArray(form, g);
                 }
-                steps.add(g);
-                steps.add(PersistentList.createFromArray(ifSym,
+                Object condExpr = PersistentList.createFromArray(ifSym,
                         PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), g),
-                        null, step));
+                        null, step);
+                if (i == args.length - 1) {
+                    lastExpr = condExpr;
+                } else {
+                    steps.add(g);
+                    steps.add(condExpr);
+                }
             }
-            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
+            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), lastExpr);
         
             }
             case 95: {
                 Object[] args = _args;
+            if (args.length == 1) return args[0];
+            if (((args.length - 1) & 1) != 0) throw new IllegalArgumentException("cond-> requires an even number of forms");
             Symbol g = Symbol.intern("cond__" + RT.nextID());
             List<Object> steps = new ArrayList<>();
             steps.add(g);
             steps.add(args[0]);
+            Object lastExpr = g;
             for (int i = 1; i < args.length; i += 2) {
                 Object test = args[i];
                 Object form = args[i + 1];
                 Object step = (form instanceof ISeq s)
                         ? RT.cons(s.first(), RT.cons(g, s.next()))
                         : PersistentList.createFromArray(form, g);
-                steps.add(g);
-                steps.add(PersistentList.createFromArray(ifSym, test, step, g));
+                Object condExpr = PersistentList.createFromArray(ifSym, test, step, g);
+                if (i + 2 >= args.length) {
+                    lastExpr = condExpr;
+                } else {
+                    steps.add(g);
+                    steps.add(condExpr);
+                }
             }
-            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
+            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), lastExpr);
         
             }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
@@ -4884,10 +4922,13 @@ public final class Core {
         switch (_id) {
             case 96: {
                 Object[] args = _args;
+            if (args.length == 1) return args[0];
+            if (((args.length - 1) & 1) != 0) throw new IllegalArgumentException("cond->> requires an even number of forms");
             Symbol g = Symbol.intern("cond__" + RT.nextID());
             List<Object> steps = new ArrayList<>();
             steps.add(g);
             steps.add(args[0]);
+            Object lastExpr = g;
             for (int i = 1; i < args.length; i += 2) {
                 Object test = args[i];
                 Object form = args[i + 1];
@@ -4900,10 +4941,15 @@ public final class Core {
                 } else {
                     step = PersistentList.createFromArray(form, g);
                 }
-                steps.add(g);
-                steps.add(PersistentList.createFromArray(ifSym, test, step, g));
+                Object condExpr = PersistentList.createFromArray(ifSym, test, step, g);
+                if (i + 2 >= args.length) {
+                    lastExpr = condExpr;
+                } else {
+                    steps.add(g);
+                    steps.add(condExpr);
+                }
             }
-            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), g);
+            return PersistentList.createFromArray(letStar, PersistentVector.create(steps), lastExpr);
         
             }
             case 97: {
@@ -5258,8 +5304,15 @@ public final class Core {
             if (idx < args.length && args[idx] instanceof PersistentHashMap) idx++;
             Object dispatchFn = args[idx++];
             Object defaultVal = Keyword.intern("default");
-            for (int i = idx; i < args.length; i += 2) {
+            Object hierarchyVal = null;
+            for (int i = idx; i + 1 < args.length; i += 2) {
                 if (Keyword.intern("default").equals(args[i])) defaultVal = args[i + 1];
+                else if (Keyword.intern("hierarchy").equals(args[i])) hierarchyVal = args[i + 1];
+            }
+            if (hierarchyVal != null) {
+                return PersistentList.createFromArray(defSym, name,
+                        PersistentList.createFromArray(Symbol.intern("clojure.core", "create-multi"),
+                                name.name, dispatchFn, defaultVal, hierarchyVal));
             }
             return PersistentList.createFromArray(defSym, name,
                     PersistentList.createFromArray(Symbol.intern("clojure.core", "create-multi"),

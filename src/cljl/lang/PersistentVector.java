@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * and TransientVector support for O(1) amortized batch construction.
  */
 public final class PersistentVector extends Fn
-        implements IPersistentVector, IObj, IReduceInit, List<Object>, RandomAccess, Comparable<Object> {
+        implements IPersistentVector, IObj, IEditableCollection, IReduceInit, List<Object>, RandomAccess, Comparable<Object> {
 
     private static final AtomicReference<Thread> NO_EDIT = new AtomicReference<>(null);
     public static final Node EMPTY_NODE = new Node(NO_EDIT, new Object[32]);
@@ -179,6 +179,14 @@ public final class PersistentVector extends Fn
             ret.array[subidx] = doAssoc(level - 5, (Node) node.array[subidx], i, val);
         }
         return ret;
+    }
+
+    public PersistentVector cons(Object val) {
+        return conj(val);
+    }
+
+    public PersistentVector empty() {
+        return EMPTY;
     }
 
     public PersistentVector conj(Object val) {
@@ -633,7 +641,7 @@ public final class PersistentVector extends Fn
     }
 
     public static final class SubVec extends Fn
-            implements Associative, IObj, Reversible, IReduceInit, PersistentColl, List<Object>, RandomAccess, Comparable<Object> {
+            implements IPersistentVector, IObj, IReduceInit, PersistentColl, List<Object>, RandomAccess, Comparable<Object> {
         public final PersistentVector v;
         public final int start;
         public final int end;

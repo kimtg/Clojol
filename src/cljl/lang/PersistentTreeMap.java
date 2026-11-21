@@ -202,6 +202,10 @@ public final class PersistentTreeMap extends Fn
         }
     }
 
+    public PersistentTreeMap cons(Object o) {
+        return (PersistentTreeMap) RT.conj(this, o);
+    }
+
     @Override
     public PersistentTreeMap assoc(Object key, Object val) {
         boolean[] added = new boolean[1];
