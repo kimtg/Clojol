@@ -104,8 +104,37 @@ public final class LongRange extends ASeq implements IChunkedSeq, Counted, IRedu
         return n == null ? PersistentList.EMPTY : n;
     }
 
+    public Object reduce2(Fn f) {
+        if (count == 1) return Long.valueOf(start);
+        if (count >= 32 && f instanceof cljl.Compiler.CompiledFn cf) {
+            f = cf.ensureJit();
+        }
+        if (f.isUnboxedLong2()) {
+            long acc = start;
+            long v = start + step;
+            int rem = count - 1;
+            for (int i = 0; i < rem; i++) {
+                acc = f.invokePrim_JJ_J(acc, v);
+                v += step;
+            }
+            return Long.valueOf(acc);
+        }
+        Object acc = Long.valueOf(start);
+        long v = start + step;
+        int rem = count - 1;
+        for (int i = 0; i < rem; i++) {
+            acc = f.invokePrim_OJ_O(acc, v);
+            if (acc instanceof Reduced r) return r.deref();
+            v += step;
+        }
+        return acc;
+    }
+
     @Override
     public Object reduce(Fn f, Object init) {
+        if (count >= 32 && f instanceof cljl.Compiler.CompiledFn cf) {
+            f = cf.ensureJit();
+        }
         if (f.isUnboxedLong2() && init instanceof Long l) {
             long acc = l.longValue();
             long v = start;

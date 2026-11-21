@@ -646,7 +646,7 @@ public final class Core {
     }
 
     private static final class Map1LazySeq extends LazySeq {
-        private final Fn f;
+        private Fn f;
         private ISeq src;
         Map1LazySeq(Fn f, ISeq src) {
             super((PersistentHashMap) null);
@@ -659,46 +659,59 @@ public final class Core {
             this.src = null;
             ISeq sq = s.seq();
             if (sq == null) return null;
+            Fn fn = this.f;
+            if (fn instanceof Compiler.CompiledFn cf) {
+                fn = cf.ensureJit();
+                this.f = fn;
+            }
             if (sq instanceof LongRange lr) {
                 int len = Math.min(LongRange.CHUNK_SIZE, lr.count());
-                Object[] arr = new Object[len];
                 long v = lr.start;
                 long step = lr.step;
-                if (f.isUnboxedLong1()) {
+                if (fn.isUnboxedLong1()) {
+                    long[] larr = new long[len];
                     for (int i = 0; i < len; i++) {
-                        arr[i] = Long.valueOf(f.invokePrim_J_J(v));
+                        larr[i] = fn.invokePrim_J_J(v);
                         v += step;
                     }
-                } else {
-                    for (int i = 0; i < len; i++) {
-                        arr[i] = f.invoke(Long.valueOf(v));
-                        v += step;
-                    }
+                    return new ChunkedCons(new LongArrayChunk(larr, 0, len), map1Seq(fn, lr.chunkedNext()));
                 }
-                return new ChunkedCons(new ArrayChunk(arr, 0, len), map1Seq(f, lr.chunkedNext()));
+                Object[] arr = new Object[len];
+                for (int i = 0; i < len; i++) {
+                    arr[i] = fn.invoke(Long.valueOf(v));
+                    v += step;
+                }
+                return new ChunkedCons(new ArrayChunk(arr, 0, len), map1Seq(fn, lr.chunkedNext()));
             }
             if (sq instanceof IChunkedSeq cs) {
                 IChunk c = cs.chunkedFirst();
                 int n = c.count();
+                if (c instanceof LongArrayChunk lac && fn.isUnboxedLong1()) {
+                    long[] larr = new long[n];
+                    long[] srcArr = lac.array;
+                    int off = lac.off;
+                    for (int i = 0; i < n; i++) larr[i] = fn.invokePrim_J_J(srcArr[off + i]);
+                    return new ChunkedCons(new LongArrayChunk(larr, 0, n), map1Seq(fn, cs.chunkedNext()));
+                }
                 Object[] arr = new Object[n];
                 if (c instanceof ArrayChunk ac && ac.array instanceof Object[] srcArr) {
                     int off = ac.off;
-                    if (f.isUnboxedLong1()) {
+                    if (fn.isUnboxedLong1()) {
                         for (int i = 0; i < n; i++) {
                             Object elem = srcArr[off + i];
                             arr[i] = (elem instanceof Long lv)
-                                    ? Long.valueOf(f.invokePrim_J_J(lv.longValue()))
-                                    : f.invoke(elem);
+                                    ? Long.valueOf(fn.invokePrim_J_J(lv.longValue()))
+                                    : fn.invoke(elem);
                         }
                     } else {
-                        for (int i = 0; i < n; i++) arr[i] = f.invoke(srcArr[off + i]);
+                        for (int i = 0; i < n; i++) arr[i] = fn.invoke(srcArr[off + i]);
                     }
                 } else {
-                    for (int i = 0; i < n; i++) arr[i] = f.invoke(c.nth(i));
+                    for (int i = 0; i < n; i++) arr[i] = fn.invoke(c.nth(i));
                 }
-                return new ChunkedCons(new ArrayChunk(arr, 0, n), map1Seq(f, cs.chunkedNext()));
+                return new ChunkedCons(new ArrayChunk(arr, 0, n), map1Seq(fn, cs.chunkedNext()));
             }
-            return new Cons(f.invoke(sq.first()), map1Seq(f, sq.next()));
+            return new Cons(fn.invoke(sq.first()), map1Seq(fn, sq.next()));
         }
     }
 
@@ -788,7 +801,7 @@ public final class Core {
     }
 
     private static final class FilterLazySeq extends LazySeq {
-        private final Fn pred;
+        private Fn pred;
         private ISeq src;
         private final boolean invert;
         FilterLazySeq(Fn pred, ISeq src, boolean invert) {
@@ -801,12 +814,50 @@ public final class Core {
         protected Object compute() {
             ISeq sq = this.src;
             this.src = null;
+            Fn p = this.pred;
+            if (p instanceof Compiler.CompiledFn cf) {
+                p = cf.ensureJit();
+                this.pred = p;
+            }
             while (sq != null) {
                 sq = sq.seq();
                 if (sq == null) return null;
+                if (sq instanceof LongRange lr) {
+                    int len = Math.min(LongRange.CHUNK_SIZE, lr.count());
+                    long[] lbuf = new long[len];
+                    int cnt = 0;
+                    long v = lr.start;
+                    long step = lr.step;
+                    for (int i = 0; i < len; i++) {
+                        if (p.invokePrim_J_Z(v) ^ invert) lbuf[cnt++] = v;
+                        v += step;
+                    }
+                    ISeq more = lr.chunkedNext();
+                    if (cnt > 0) {
+                        return new ChunkedCons(new LongArrayChunk(lbuf, 0, cnt), filterSeq(p, more, invert));
+                    }
+                    sq = more;
+                    continue;
+                }
                 if (sq instanceof IChunkedSeq cs) {
                     IChunk c = cs.chunkedFirst();
                     int n = c.count();
+                    if (c instanceof LongArrayChunk lac) {
+                        long[] lbuf = new long[n];
+                        int cnt = 0;
+                        long[] srcArr = lac.array;
+                        int off = lac.off;
+                        for (int i = 0; i < n; i++) {
+                            long lv = srcArr[off + i];
+                            if (p.invokePrim_J_Z(lv) ^ invert) lbuf[cnt++] = lv;
+                        }
+                        ISeq more = cs.chunkedNext();
+                        if (cnt > 0) {
+                            return new ChunkedCons(new LongArrayChunk(lbuf, 0, cnt), filterSeq(p, more, invert));
+                        }
+                        sq = more;
+                        continue;
+                    }
                     Object[] buf = new Object[n];
                     int cnt = 0;
                     if (c instanceof ArrayChunk ac && ac.array instanceof Object[] srcArr) {
@@ -814,30 +865,30 @@ public final class Core {
                         for (int i = 0; i < n; i++) {
                             Object v = srcArr[off + i];
                             boolean ok = (v instanceof Long lv)
-                                    ? pred.invokePrim_J_Z(lv.longValue())
-                                    : RT.truthy(pred.invoke(v));
+                                    ? p.invokePrim_J_Z(lv.longValue())
+                                    : RT.truthy(p.invoke(v));
                             if (ok ^ invert) buf[cnt++] = v;
                         }
                     } else {
                         for (int i = 0; i < n; i++) {
                             Object v = c.nth(i);
                             boolean ok = (v instanceof Long lv)
-                                    ? pred.invokePrim_J_Z(lv.longValue())
-                                    : RT.truthy(pred.invoke(v));
+                                    ? p.invokePrim_J_Z(lv.longValue())
+                                    : RT.truthy(p.invoke(v));
                             if (ok ^ invert) buf[cnt++] = v;
                         }
                     }
                     ISeq more = cs.chunkedNext();
                     if (cnt > 0) {
-                        return new ChunkedCons(new ArrayChunk(buf, 0, cnt), filterSeq(pred, more, invert));
+                        return new ChunkedCons(new ArrayChunk(buf, 0, cnt), filterSeq(p, more, invert));
                     }
                     sq = more;
                     continue;
                 }
                 Object v = sq.first();
-                boolean keep = RT.truthy(pred.invoke(v)) ^ invert;
+                boolean keep = RT.truthy(p.invoke(v)) ^ invert;
                 if (keep) {
-                    return new Cons(v, filterSeq(pred, sq.next(), invert));
+                    return new Cons(v, filterSeq(p, sq.next(), invert));
                 }
                 sq = sq.next();
             }
@@ -997,6 +1048,12 @@ public final class Core {
             if (sv.count() == 0) return f.invoke();
             return reduceVectorRange(f, sv.nth(0), sv.v, sv.start + 1, sv.end);
         }
+        if (coll instanceof LongRange lr) {
+            return lr.reduce2(f);
+        }
+        if (coll instanceof ChunkedCons cc) {
+            return cc.reduce2(f);
+        }
         if (coll instanceof PersistentList pl) {
             Object acc = pl.first;
             if (pl.rest instanceof PersistentList nextPl) {
@@ -1008,13 +1065,17 @@ public final class Core {
             }
             return acc;
         }
-        if (coll instanceof PersistentList.EmptyList) {
+        if (coll instanceof PersistentList.EmptyList || coll == null) {
             return f.invoke();
         }
         ISeq s = RT.seq(coll);
         if (s == null) return f.invoke();
+        if (s instanceof LongRange lr) return lr.reduce2(f);
+        if (s instanceof ChunkedCons cc) return cc.reduce2(f);
         Object acc = s.first();
         s = s.next();
+        if (s == null) return acc;
+        if (s instanceof IReduceInit ri) return ri.reduce(f, acc);
         while (s != null) {
             acc = f.invoke(acc, s.first());
             if (acc instanceof Reduced r) return r.deref();

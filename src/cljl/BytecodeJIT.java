@@ -273,6 +273,7 @@ public final class BytecodeJIT {
         if (n instanceof IncNode a) return canCompileNode(a.a, false);
         if (n instanceof DecNode a) return canCompileNode(a.a, false);
         if (n instanceof Rem2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
+        if (n instanceof Mod2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
         if (n instanceof Quot2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
         if (n instanceof UncheckedAdd2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
         if (n instanceof UncheckedSub2Node a) return canCompileNode(a.a, false) && canCompileNode(a.b, false);
@@ -592,6 +593,7 @@ public final class BytecodeJIT {
         if (n instanceof Mul2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
         if (n instanceof Div2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
         if (n instanceof Rem2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
+        if (n instanceof Mod2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
         if (n instanceof Quot2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
         if (n instanceof UncheckedAdd2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
         if (n instanceof UncheckedSub2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
@@ -687,6 +689,7 @@ public final class BytecodeJIT {
         if (n instanceof Mul2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
         if (n instanceof Div2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
         if (n instanceof Rem2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
+        if (n instanceof Mod2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
         if (n instanceof Quot2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
         if (n instanceof UncheckedAdd2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
         if (n instanceof UncheckedSub2Node a) return isPureSelfRecursiveBody(a.a, ownerVar, selfSlot, arity, analysis, ps, stats) && isPureSelfRecursiveBody(a.b, ownerVar, selfSlot, arity, analysis, ps, stats);
@@ -2500,6 +2503,12 @@ public final class BytecodeJIT {
                 lrem();
                 return false;
             }
+            if (node instanceof Mod2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
+                if (emitLong(a.a)) return true;
+                if (emitLong(a.b)) return true;
+                invokestatic("java/lang/Math", "floorMod", "(JJ)J", 4, 2);
+                return false;
+            }
             if (node instanceof Quot2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
                 if (emitLong(a.a)) return true;
                 if (emitLong(a.b)) return true;
@@ -3243,6 +3252,10 @@ public final class BytecodeJIT {
                 }
             }
             if (test instanceof ZeroPNode z) {
+                if (z.a instanceof Mod2Node m && typeOf(m.a) == ValType.LONG && typeOf(m.b) == ValType.LONG) {
+                    // For all longs a, b != 0: floorMod(a, b) == 0 iff (a % b) == 0
+                    emitLong(m.a); emitLong(m.b); lrem(); ldcLong(0L); lcmp(); ifne(falseLabel); return;
+                }
                 ValType ta = typeOf(z.a);
                 if (ta == ValType.LONG) {
                     emitLong(z.a); ldcLong(0L); lcmp(); ifne(falseLabel); return;
@@ -3291,6 +3304,18 @@ public final class BytecodeJIT {
                 emitBoxed(id.b);
                 ifAcmpEq(trueLabel);
                 return;
+            }
+            if (test instanceof ZeroPNode z) {
+                if (z.a instanceof Mod2Node m && typeOf(m.a) == ValType.LONG && typeOf(m.b) == ValType.LONG) {
+                    emitLong(m.a); emitLong(m.b); lrem(); ldcLong(0L); lcmp(); ifeq(trueLabel); return;
+                }
+                ValType ta = typeOf(z.a);
+                if (ta == ValType.LONG) {
+                    emitLong(z.a); ldcLong(0L); lcmp(); ifeq(trueLabel); return;
+                }
+                if (ta == ValType.DOUBLE) {
+                    emitDouble(z.a); ldcDouble(0.0); dcmpl(); ifeq(trueLabel); return;
+                }
             }
             emitBoolean(test);
             ifne(trueLabel);
@@ -4844,6 +4869,12 @@ public final class BytecodeJIT {
                 emitBoxed(a.a);
                 emitBoxed(a.b);
                 invokestatic("cljl/Numbers", "remainder", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
+                return false;
+            }
+            if (node instanceof Mod2Node a) {
+                emitBoxed(a.a);
+                emitBoxed(a.b);
+                invokestatic("cljl/Numbers", "mod", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Number;", 2, 1);
                 return false;
             }
             if (node instanceof Quot2Node a) {

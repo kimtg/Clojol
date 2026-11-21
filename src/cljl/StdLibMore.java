@@ -52,6 +52,15 @@ public final class StdLibMore {
             case "flatland.ordered.set" -> { initFlatlandOrderedSet(); yield true; }
             case "flatland.useful.map" -> { initFlatlandUsefulMap(); yield true; }
             case "clojure.core.async" -> { initCoreAsync(); yield true; }
+            case "clojure.core.reducers" -> {
+                synchronized (StdLibMore.class) {
+                    if (!LOADED.contains("clojure.core.reducers")) {
+                        Reducers.initNamespace();
+                        LOADED.add("clojure.core.reducers");
+                    }
+                }
+                yield true;
+            }
             case "clojure.tools.deps.cli.api" -> { Deps.ensureDepsCliApiLoaded(); yield true; }
             default -> false;
         };

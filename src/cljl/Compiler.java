@@ -2491,6 +2491,22 @@ public final class Compiler {
         }
     }
 
+    public static final class Mod2Node extends Node {
+        public final Node a, b;
+        public Mod2Node(Node a, Node b) { this.a = a; this.b = b; }
+        @Override
+        public Object eval(Object[] frame) {
+            Object va = a.eval(frame);
+            Object vb = b.eval(frame);
+            if (va instanceof Long la && vb instanceof Long lb) return Math.floorMod(la.longValue(), lb.longValue());
+            return Numbers.mod(va, vb);
+        }
+        @Override
+        public long evalLong(Object[] frame) {
+            return Math.floorMod(a.evalLong(frame), b.evalLong(frame));
+        }
+    }
+
     public static final class Quot2Node extends Node {
         public final Node a, b;
         public Quot2Node(Node a, Node b) { this.a = a; this.b = b; }

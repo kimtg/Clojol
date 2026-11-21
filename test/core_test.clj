@@ -1748,6 +1748,8 @@
   IPicTest
   (pic-op [_ x] (- x)))
 
+(require '[clojure.core.reducers :as r])
+
 (deftest phase1-to-5-improvements-test
   (testing "Phase 1: Protocol PIC dispatch works with defrecord, extend-type, nil, reify, and cache invalidation"
     (let [a (->PicRecA 10)
@@ -1847,7 +1849,37 @@
     (is (= [nil 1 2.0 3] (vec (sort [3 nil 2.0 1]))))
     (is (= ["a" "b" "c"] (vec (sort ["c" "a" "b"]))))
     (is (= [{:k "a" :i 1} {:k "a" :i 2} {:k "b" :i 0}]
-           (vec (sort-by :k [{:k "b" :i 0} {:k "a" :i 1} {:k "a" :i 2}]))))))
+           (vec (sort-by :k [{:k "b" :i 0} {:k "a" :i 1} {:k "a" :i 2}])))))
+  (testing "Project Euler 1, mod intrinsic, LongArrayChunk, and clojure.core.reducers"
+    (let [mult35? (fn [x] (or (zero? (rem x 3)) (zero? (rem x 5))))
+          mult35-mod? (fn [x] (or (zero? (mod x 3)) (zero? (mod x 5))))]
+      (is (= 2 (mod -1 3)))
+      (is (= -2 (mod 1 -3)))
+      (is (= -1 (mod -1 -3)))
+      (is (= 0 (mod 0 3)))
+      (is (= 233168 (reduce + (filter mult35? (range 1000)))))
+      (is (= 233168 (reduce + 0 (filter mult35-mod? (range 1000)))))
+      (is (= 233168 (transduce (filter mult35?) + 0 (range 1000))))
+      (is (= 233168 (r/reduce + 0 (r/filter mult35? (range 1000)))))
+      (is (= 233168 (r/fold + (r/filter mult35? (range 1000)))))
+      (is (= 233168 (r/fold + (r/filter mult35? (vec (range 1000))))))
+      ;; Larger parallel fold exceeding default n=512
+      (is (= 23331668 (r/fold + (r/filter mult35? (range 10000)))))
+      (is (= 23331668 (r/fold + (r/filter mult35? (vec (range 10000))))))
+      (is (= 23331668 (r/fold 256 + + (r/filter mult35? (range 10000)))))
+      ;; r/map, r/remove, r/take, r/drop, r/monoid, r/foldcat
+      (is (= [2 4 6] (vec (r/foldcat (r/map #(* % 2) (r/filter pos? (range -2 4)))))))
+      (is (= [1 3 5] (into [] (r/remove even? (range 6)))))
+      (is (= 10 (r/reduce + 0 (r/take 5 (range 100)))))
+      (is (= 24 (r/fold (r/monoid * (constantly 1)) (vec (range 1 5)))))
+      ;; Lazy memoization preserved with LongArrayChunk
+      (let [calls (atom 0)
+            s (filter (fn [x] (swap! calls inc) (even? x)) (range 100))]
+        (is (= 2450 (reduce + s)))
+        (let [c1 @calls]
+          (is (= 0 (first s)))
+          (is (= 50 (count s)))
+          (is (= c1 @calls)))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

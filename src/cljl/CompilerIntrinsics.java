@@ -14,7 +14,7 @@ final class CompilerIntrinsics {
     static Node tryCreate(String name, Node[] args) {
         int arity = args.length;
         return switch (name) {
-            case "+", "-", "*", "/", "inc", "dec", "rem", "quot",
+            case "+", "-", "*", "/", "inc", "dec", "rem", "mod", "quot",
                  "unchecked-add", "unchecked-subtract", "unchecked-multiply",
                  "unchecked-inc", "unchecked-inc-long", "unchecked-dec", "unchecked-negate",
                  "bit-and", "bit-or", "bit-xor", "bit-and-not",
@@ -64,6 +64,7 @@ final class CompilerIntrinsics {
                 case "inc" -> arity == 1 ? new IncNode(args[0]) : null;
                 case "dec" -> arity == 1 ? new DecNode(args[0]) : null;
                 case "rem" -> arity == 2 ? new Rem2Node(args[0], args[1]) : null;
+                case "mod" -> arity == 2 ? new Mod2Node(args[0], args[1]) : null;
                 case "quot" -> arity == 2 ? new Quot2Node(args[0], args[1]) : null;
                 case "unchecked-add" -> arity == 2 ? new UncheckedAdd2Node(args[0], args[1]) : null;
                 case "unchecked-subtract" -> arity == 2 ? new UncheckedSub2Node(args[0], args[1]) : null;

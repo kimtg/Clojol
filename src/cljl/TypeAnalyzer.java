@@ -443,6 +443,11 @@ public final class TypeAnalyzer {
             markParamIfLocal(a.b, paramIdx, numericUse);
             scanParamUses(a.a, paramIdx, numericUse, doubleUse, inDoubleCtx);
             scanParamUses(a.b, paramIdx, numericUse, doubleUse, inDoubleCtx);
+        } else if (n instanceof Mod2Node a) {
+            markParamIfLocal(a.a, paramIdx, numericUse);
+            markParamIfLocal(a.b, paramIdx, numericUse);
+            scanParamUses(a.a, paramIdx, numericUse, doubleUse, inDoubleCtx);
+            scanParamUses(a.b, paramIdx, numericUse, doubleUse, inDoubleCtx);
         } else if (n instanceof Quot2Node a) {
             markParamIfLocal(a.a, paramIdx, numericUse);
             markParamIfLocal(a.b, paramIdx, numericUse);
@@ -974,6 +979,9 @@ public final class TypeAnalyzer {
         } else if (n instanceof Rem2Node a) {
             checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
             checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
+        } else if (n instanceof Mod2Node a) {
+            checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
+            checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
         } else if (n instanceof Quot2Node a) {
             checkVolatileEscapes(a.a, false, false, loopStack, candidates, aliases, escaped);
             checkVolatileEscapes(a.b, false, false, loopStack, candidates, aliases, escaped);
@@ -1491,6 +1499,7 @@ public final class TypeAnalyzer {
         if (n instanceof UncheckedSub2Node a) return record(n, arithBinary(analyzeNode(a.a), analyzeNode(a.b)));
         if (n instanceof UncheckedMul2Node a) return record(n, arithBinary(analyzeNode(a.a), analyzeNode(a.b)));
         if (n instanceof Rem2Node a) return record(n, arithBinary(analyzeNode(a.a), analyzeNode(a.b)));
+        if (n instanceof Mod2Node a) return record(n, arithBinary(analyzeNode(a.a), analyzeNode(a.b)));
         if (n instanceof Quot2Node a) return record(n, arithBinary(analyzeNode(a.a), analyzeNode(a.b)));
 
         if (n instanceof NegateNode a) return record(n, arithUnary(analyzeNode(a.a)));

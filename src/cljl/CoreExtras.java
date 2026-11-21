@@ -3459,10 +3459,14 @@ public final class CoreExtras {
         }
     }
 
+    private static Fn unwrapHotFn(Fn f) {
+        return (f instanceof Compiler.CompiledFn cf) ? cf.ensureJit() : f;
+    }
+
     private static final class MapRF extends Fn.NamedFn {
         private final Fn fn;
         private final Fn r;
-        MapRF(Fn fn, Fn r) { super("map-xf"); this.fn = fn; this.r = r; }
+        MapRF(Fn fn, Fn r) { super("map-xf"); this.fn = unwrapHotFn(fn); this.r = unwrapHotFn(r); }
         @Override public Object invoke() { return r.invoke(); }
         @Override public Object invoke(Object acc) { return r.invoke(acc); }
         @Override public Object invoke(Object acc, Object x) { return r.invoke(acc, fn.invoke(x)); }
@@ -3484,7 +3488,7 @@ public final class CoreExtras {
     private static final class FilterRF extends Fn.NamedFn {
         private final Fn p;
         private final Fn r;
-        FilterRF(Fn p, Fn r) { super("filter-xf"); this.p = p; this.r = r; }
+        FilterRF(Fn p, Fn r) { super("filter-xf"); this.p = unwrapHotFn(p); this.r = unwrapHotFn(r); }
         @Override public Object invoke() { return r.invoke(); }
         @Override public Object invoke(Object acc) { return r.invoke(acc); }
         @Override public Object invoke(Object acc, Object x) {
@@ -3502,7 +3506,7 @@ public final class CoreExtras {
     private static final class RemoveRF extends Fn.NamedFn {
         private final Fn p;
         private final Fn r;
-        RemoveRF(Fn p, Fn r) { super("remove-xf"); this.p = p; this.r = r; }
+        RemoveRF(Fn p, Fn r) { super("remove-xf"); this.p = unwrapHotFn(p); this.r = unwrapHotFn(r); }
         @Override public Object invoke() { return r.invoke(); }
         @Override public Object invoke(Object acc) { return r.invoke(acc); }
         @Override public Object invoke(Object acc, Object x) {

@@ -8,8 +8,8 @@ import cljl.Fn;
  */
 public final class ArraySeq extends ASeq implements IChunkedSeq, Counted, IReduceInit {
     private static final int CHUNK_SIZE = 32;
-    private final Object[] array;
-    private final int i;
+    public final Object[] array;
+    public final int i;
 
     public ArraySeq(Object[] array) {
         this(null, array, 0);
