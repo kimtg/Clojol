@@ -844,7 +844,7 @@ public final class CoreExtras {
         def(ns, "ns-interns", new ExtraFn1(94, "ns-interns"));
         def(ns, "ns-refers", new ExtraFn1(95, "ns-refers"));
         def(ns, "ns-imports", new ExtraFn1(96, "ns-imports"));
-        def(ns, "ns-resolve", new ExtraFn2(37, "ns-resolve"));
+        def(ns, "ns-resolve", new ExtraFn23(37, 21, "ns-resolve"));
         def(ns, "ns-unalias", new ExtraFn2(38, "ns-unalias"));
         def(ns, "ns-unmap", new ExtraFn2(39, "ns-unmap"));
         def(ns, "intern", new ExtraFn23(40, 14, "intern"));
@@ -2618,6 +2618,15 @@ public final class CoreExtras {
                     p.registerMethodVar(mvar, methodKw, mname);
                 }
                 return mf;
+            }
+            case 21: {
+                Object nsArg = _a; Object env = _b; Object sym = _c;
+                if (env != null && RT.contains(env, sym)) return null;
+                Namespace n = resolveNsArg(nsArg);
+                Symbol s = (Symbol) sym;
+                Var v = Compiler.lookupVar(n, s, false);
+                if (v != null) return v;
+                return Interop.resolveClass(n, s.toString());
             }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
         }

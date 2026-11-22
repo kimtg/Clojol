@@ -639,11 +639,21 @@ public final class StdLibMore {
             return null;
         }));
 
-        Fn simpleDispatch = Fn.of1("simple-dispatch", obj ->
+        Fn defaultPprint = Fn.of1("simple-dispatch-default", obj ->
                 pprintToWriter(obj, StdLib.outWriter(), StdLib.toInt(rightMargin.deref())));
+        Fn classDispatch = Fn.of1("class-dispatch", obj -> obj == null ? null : obj.getClass());
+        MultiFn simpleDispatch = new MultiFn("simple-dispatch", classDispatch, Keyword.intern("default"));
+        simpleDispatch.addMethod(Keyword.intern("default"), defaultPprint);
+        MultiFn codeDispatch = new MultiFn("code-dispatch", classDispatch, Keyword.intern("default"));
+        codeDispatch.addMethod(Keyword.intern("default"), defaultPprint);
         ns.intern("simple-dispatch", simpleDispatch);
-        ns.intern("code-dispatch", simpleDispatch);
-        ns.intern(Symbol.intern("*print-pprint-dispatch*")).bindRoot(simpleDispatch).setDynamic();
+        ns.intern("code-dispatch", codeDispatch);
+        Var dispatchVar = ns.intern(Symbol.intern("*print-pprint-dispatch*")).bindRoot(simpleDispatch).setDynamic();
+
+        ns.intern("write-out", Fn.of1("write-out", obj -> {
+            Fn df = (Fn) dispatchVar.deref();
+            return df.invoke(obj);
+        }));
 
         ns.internMacro("with-pprint-dispatch", Fn.ofVarargs("with-pprint-dispatch", args -> {
             List<Object> body = new ArrayList<>();

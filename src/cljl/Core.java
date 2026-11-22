@@ -1579,8 +1579,8 @@ public final class Core {
     }
 
     private static Object updateIn(Object m, ISeq ks, Fn f, Object[] extra) {
-        Object k = ks.first();
-        ISeq rest = ks.next();
+        Object k = ks != null ? ks.first() : null;
+        ISeq rest = ks != null ? ks.next() : null;
         if (rest != null) {
             return RT.assoc(m, k, updateIn(RT.get(m, k), rest, f, extra));
         }
@@ -1948,7 +1948,7 @@ public final class Core {
         def(ns, "ns-publics", new CoreFn1(134, "ns-publics"));
         def(ns, "ns-aliases", new CoreFn1(135, "ns-aliases"));
         def(ns, "alias", new CoreFn2(80, "alias"));
-        def(ns, "resolve", new CoreFn1(136, "resolve"));
+        def(ns, "resolve", new CoreFn12(136, 85, "resolve"));
         def(ns, "refer", new CoreFnV(62, "refer"));
         def(ns, "import", new CoreFnV(63, "import"));
 
@@ -3755,6 +3755,11 @@ public final class Core {
                                 Symbol.intern("clojure.core", "when-not"),
                                 PersistentList.createFromArray(Symbol.intern("clojure.core", "bound?"), vSym),
                                 PersistentList.createFromArray(defSym, name, expr)));
+            }
+            case 85: {
+                Object env = _a; Object sym = _b;
+                if (env != null && RT.contains(env, sym)) return null;
+                return call1(136, sym);
             }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);
         }

@@ -323,6 +323,10 @@ public final class Interop {
             case "clojure.lang.Numbers" -> Numbers.class;
             case "clojure.lang.Compiler" -> Compiler.class;
             case "clojure.lang.Compiler$CompilerException" -> Compiler.CompilerException.class;
+            case "clojure.lang.Compiler$Expr" -> Compiler.Expr.class;
+            case "clojure.lang.Compiler$ObjExpr" -> Compiler.ObjExpr.class;
+            case "clojure.lang.Compiler$ObjMethod" -> Compiler.ObjMethod.class;
+            case "clojure.lang.Compiler$LocalBinding" -> Compiler.LocalBinding.class;
             case "clojure.lang.LineNumberingPushbackReader" -> cljl.lang.LineNumberingPushbackReader.class;
             case "clojure.lang.LispReader$ReaderException" -> Reader.ReaderException.class;
             case "clojure.lang.LispReader$StringReader" -> Reader.StringReaderFn.class;

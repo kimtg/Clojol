@@ -52,7 +52,7 @@ public final class RT {
     public static final Var READ_EVAL = CLOJURE_NS.intern(Symbol.intern("*read-eval*")).bindRoot(Boolean.TRUE).setDynamic();
     public static final Var READER_RESOLVER = CLOJURE_NS.intern(Symbol.intern("*reader-resolver*")).bindRoot(null).setDynamic();
     public static final Var SUPPRESS_READ = CLOJURE_NS.intern(Symbol.intern("*suppress-read*")).bindRoot(Boolean.FALSE).setDynamic();
-    public static final Var PRINT_NAMESPACE_MAPS = CLOJURE_NS.intern(Symbol.intern("*print-namespace-maps*")).bindRoot(Boolean.TRUE).setDynamic();
+    public static final Var PRINT_NAMESPACE_MAPS = CLOJURE_NS.intern(Symbol.intern("*print-namespace-maps*")).bindRoot(Boolean.FALSE).setDynamic();
     public static final Var FLUSH_ON_NEWLINE = CLOJURE_NS.intern(Symbol.intern("*flush-on-newline*")).bindRoot(Boolean.TRUE).setDynamic();
     public static final Var REPL = CLOJURE_NS.intern(Symbol.intern("*repl*")).bindRoot(Boolean.FALSE).setDynamic();
     public static final Var SOURCE_PATH = CLOJURE_NS.intern(Symbol.intern("*source-path*")).bindRoot("NO_SOURCE_PATH").setDynamic();
@@ -1065,6 +1065,22 @@ public final class RT {
         }
         if (x instanceof Map<?, ?> m) {
             if (maxLevel >= 0 && level >= maxLevel) { sb.append('#'); return; }
+            String sharedNs = null;
+            if (readably && !(x instanceof PersistentRecord) && !m.isEmpty() && truthy(PRINT_NAMESPACE_MAPS.get())) {
+                boolean allSame = true;
+                for (Object k : m.keySet()) {
+                    String kns = null;
+                    if (k instanceof Keyword kw) kns = kw.getNamespace();
+                    else if (k instanceof Symbol sym) kns = sym.ns;
+                    if (kns == null) { allSame = false; break; }
+                    if (sharedNs == null) sharedNs = kns;
+                    else if (!sharedNs.equals(kns)) { allSame = false; break; }
+                }
+                if (!allSame) sharedNs = null;
+            }
+            if (sharedNs != null) {
+                sb.append("#:").append(sharedNs);
+            }
             sb.append('{');
             int count = 0;
             for (Map.Entry<?, ?> e : m.entrySet()) {
@@ -1074,7 +1090,12 @@ public final class RT {
                     break;
                 }
                 if (count > 0) sb.append(", ");
-                printDepth(e.getKey(), sb, readably, printMeta, maxLen, maxLevel, level + 1);
+                Object key = e.getKey();
+                if (sharedNs != null) {
+                    if (key instanceof Keyword kw) key = Keyword.intern(kw.getName());
+                    else if (key instanceof Symbol sym) key = Symbol.intern(sym.name);
+                }
+                printDepth(key, sb, readably, printMeta, maxLen, maxLevel, level + 1);
                 sb.append(' ');
                 printDepth(e.getValue(), sb, readably, printMeta, maxLen, maxLevel, level + 1);
                 count++;

@@ -2257,7 +2257,42 @@
              (deftype W3Node [label]
                W3HyphenProto
                (render-item [_ ctx] (str label ":" (:v ctx))))
-             (is (= "ok:42" (.render-item (W3Node. "ok") {:v 42})))))))
+             (is (= "ok:42" (.render-item (W3Node. "ok") {:v 42}))))))
+
+  (testing "Wave 4 compatibility: self-ref def, :ns/strs, update-in [], *print-namespace-maps*, resolve/ns-resolve env, Compiler/CHAR_MAP, pprint/write-out"
+    ;; Self-referential anonymous fn in def (intern before compiling init)
+    (eval '(do
+             (def __w4-self-fact (fn [n] (if (<= n 1) 1 (* n (__w4-self-fact (dec n))))))
+             (assert (= 120 (__w4-self-fact 5)))))
+    ;; Namespaced :ns/strs and :ns/syms destructuring
+    (let [{:baz/strs [a b] :qux/syms [c]} {"baz/a" 1 "baz/b" 2 'qux/c 3}]
+      (is (= [1 2 3] [a b c])))
+    ;; update-in / assoc-in with empty path
+    (is (= {:a 1, nil 99} (update-in {:a 1} [] (constantly 99))))
+    ;; *print-namespace-maps*
+    (is (false? *print-namespace-maps*))
+    (is (= "{:foo/a 1}" (pr-str {:foo/a 1})))
+    (is (= "#:foo{:a 1}" (binding [*print-namespace-maps* true] (pr-str {:foo/a 1}))))
+    (let [m {:foo/a 1 :foo/b 2}]
+      (is (= m (read-string (binding [*print-namespace-maps* true] (pr-str m))))))
+    ;; 2-arg resolve and 3-arg ns-resolve with lexical &env map
+    (is (var? (resolve {} '+)))
+    (is (nil? (resolve {'+ :local} '+)))
+    (is (var? (ns-resolve 'clojure.core {} '+)))
+    (is (nil? (ns-resolve 'clojure.core {'+ :local} '+)))
+    ;; Compiler CHAR_MAP, munge/demunge, dynamic vars, ObjExpr/ObjMethod
+    (is (= "_QMARK_" (get clojure.lang.Compiler/CHAR_MAP \?)))
+    (is (= "foo_bar_QMARK_" (clojure.lang.Compiler/munge "foo-bar?")))
+    (is (= "foo-bar?" (clojure.lang.Compiler/demunge "foo_bar_QMARK_")))
+    (is (instance? clojure.lang.Var clojure.lang.Compiler/LOCAL_ENV))
+    (is (some? (clojure.lang.Compiler$ObjMethod. (clojure.lang.Compiler$ObjExpr. nil) nil)))
+    ;; clojure.pprint/simple-dispatch as extensible MultiFn + write-out
+    (require '[clojure.pprint :as pp])
+    (eval '(do
+             (defrecord W4PpRec [v])
+             (defmethod clojure.pprint/simple-dispatch W4PpRec [x]
+               (.write *out* (str "<W4:" (:v x) ">")))
+             (is (= "<W4:7>" (with-out-str (clojure.pprint/write-out (->W4PpRec 7)))))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

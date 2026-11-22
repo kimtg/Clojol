@@ -24,6 +24,9 @@ public final class Compiler {
 
     public static final Object RECUR_SENTINEL = new Object();
     public static final Var LOADER = Var.create(null).setDynamic();
+    public static final Var LOCAL_ENV = Var.create(null).setDynamic();
+    public static final Var METHOD = Var.create(null).setDynamic();
+    public static final Var CLEAR_SITES = Var.create(null).setDynamic();
 
     public static class CompilerException extends RuntimeException {
         public final String source;
@@ -65,6 +68,96 @@ public final class Compiler {
             Symbol.intern("monitor-exit"),
             Symbol.intern("locking*")
     );
+
+    public interface Expr {}
+    public static class ObjExpr implements Expr {
+        public final Object tag;
+        public ObjExpr() { this.tag = null; }
+        public ObjExpr(Object tag) { this.tag = tag; }
+    }
+    public static class ObjMethod {
+        public final ObjExpr objx;
+        public final ObjMethod parent;
+        public ObjMethod() { this.objx = null; this.parent = null; }
+        public ObjMethod(ObjExpr objx, ObjMethod parent) { this.objx = objx; this.parent = parent; }
+    }
+    public static class LocalBinding {
+        public final int idx;
+        public final Symbol sym;
+        public final Symbol tag;
+        public final Expr init;
+        public LocalBinding(int idx, Symbol sym, Symbol tag, Expr init) {
+            this.idx = idx; this.sym = sym; this.tag = tag; this.init = init;
+        }
+    }
+
+    public static final PersistentHashMap CHAR_MAP = PersistentHashMap.create(
+            '-', "_",
+            ':', "_COLON_",
+            '+', "_PLUS_",
+            '>', "_GT_",
+            '<', "_LT_",
+            '=', "_EQ_",
+            '~', "_TILDE_",
+            '!', "_BANG_",
+            '@', "_CIRCA_",
+            '#', "_SHARP_",
+            '\'', "_SINGLEQUOTE_",
+            '"', "_DOUBLEQUOTE_",
+            '%', "_PERCENT_",
+            '^', "_CARET_",
+            '&', "_AMPERSAND_",
+            '*', "_STAR_",
+            '|', "_BAR_",
+            '{', "_LBRACE_",
+            '}', "_RBRACE_",
+            '[', "_LBRACK_",
+            ']', "_RBRACK_",
+            '/', "_SLASH_",
+            '\\', "_BSLASH_",
+            '?', "_QMARK_",
+            '.', "_DOT_"
+    );
+
+    public static String munge(String name) {
+        StringBuilder sb = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            Object sub = CHAR_MAP.valAt(c, null);
+            if (sub != null) sb.append((String) sub);
+            else sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    public static String demunge(String mungedName) {
+        StringBuilder sb = new StringBuilder(mungedName.length());
+        int i = 0;
+        int n = mungedName.length();
+        while (i < n) {
+            if (mungedName.charAt(i) == '_') {
+                boolean matched = false;
+                for (ISeq s = CHAR_MAP.seq(); s != null; s = s.next()) {
+                    PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                    String tok = (String) me.val;
+                    if (tok.length() > 1 && mungedName.startsWith(tok, i)) {
+                        sb.append(me.key);
+                        i += tok.length();
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    sb.append('-');
+                    i++;
+                }
+            } else {
+                sb.append(mungedName.charAt(i));
+                i++;
+            }
+        }
+        return sb.toString();
+    }
 
     public static final PersistentHashMap specials = buildSpecialsMap();
 
@@ -374,12 +467,14 @@ public final class Compiler {
                 } else if ("strs".equals(kn)) {
                     for (ISeq ss = RT.seq(me.val); ss != null; ss = ss.next()) {
                         Object item = ss.first();
+                        String itemNs = (item instanceof Symbol sy && sy.ns != null) ? sy.ns : defaultNs;
                         String itemName = (item instanceof Symbol sy) ? sy.name : RT.name(item);
+                        String lookupStr = itemNs != null ? (itemNs + "/" + itemName) : itemName;
                         Symbol localSym = Symbol.intern(itemName);
                         boolean hasDef = hasOrDefault(orMap, localSym);
                         Object defaultExpr = hasDef ? getOrDefault(orMap, localSym) : null;
                         out.add(localSym);
-                        out.add(makeGetExpr(gmap, itemName, hasDef, defaultExpr));
+                        out.add(makeGetExpr(gmap, lookupStr, hasDef, defaultExpr));
                     }
                 } else if ("syms".equals(kn)) {
                     for (ISeq syms = RT.seq(me.val); syms != null; syms = syms.next()) {
@@ -923,6 +1018,10 @@ public final class Compiler {
         Object fileObj = RT.FILE.get();
         Symbol sym = (Symbol) args.first();
         ISeq more = args.next();
+        Namespace ns = RT.currentNS();
+        PersistentHashMap symMeta = sym.meta();
+        // Intern var BEFORE compiling init expr so self-referential defs resolve (Clojure semantics)
+        Var v = ns.intern(sym);
         String doc = null;
         Node initNode = null;
         if (more != null) {
@@ -932,9 +1031,6 @@ public final class Compiler {
             }
             initNode = compile(more.first(), scope, false);
         }
-        Namespace ns = RT.currentNS();
-        PersistentHashMap symMeta = sym.meta();
-        Var v = ns.intern(sym);
         if (initNode instanceof ConstNode cn && cn.val instanceof CompiledFn cfn) {
             cfn.setOwnerVar(v);
         }
