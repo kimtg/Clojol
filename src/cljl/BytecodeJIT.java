@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class BytecodeJIT {
 
     private static final boolean STRICT_JIT = Boolean.getBoolean("cljl.jit.strict");
+    private static final boolean AUTO_MEMO = !"false".equals(System.getProperty("cljl.jit.automemo"));
     private static final AtomicInteger CLASS_ID = new AtomicInteger(0);
     private static final JitClassLoader LOADER = new JitClassLoader();
     private static final ConcurrentHashMap<String, Object[]> PENDING_CONSTS = new ConcurrentHashMap<>();
@@ -588,6 +589,12 @@ public final class BytecodeJIT {
         if (n instanceof IfNode iff) return containsSelfCall(iff.test, ownerVar, selfSlot, arity) || containsSelfCall(iff.thenNode, ownerVar, selfSlot, arity) || containsSelfCall(iff.elseNode, ownerVar, selfSlot, arity);
         if (n instanceof DoNode dn) { for (Node c : dn.nodes) if (containsSelfCall(c, ownerVar, selfSlot, arity)) return true; return false; }
         if (n instanceof LetNode ln) { for (Node i : ln.inits) if (containsSelfCall(i, ownerVar, selfSlot, arity)) return true; return containsSelfCall(ln.body, ownerVar, selfSlot, arity); }
+        if (n instanceof CaseNode cn) {
+            if (containsSelfCall(cn.expr, ownerVar, selfSlot, arity)) return true;
+            if (cn.hasDefault && containsSelfCall(cn.defaultNode, ownerVar, selfSlot, arity)) return true;
+            for (Node b : cn.table.values()) if (containsSelfCall(b, ownerVar, selfSlot, arity)) return true;
+            return false;
+        }
         if (n instanceof Add2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
         if (n instanceof Sub2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
         if (n instanceof Mul2Node a) return containsSelfCall(a.a, ownerVar, selfSlot, arity) || containsSelfCall(a.b, ownerVar, selfSlot, arity);
@@ -645,6 +652,14 @@ public final class BytecodeJIT {
                 if (!isPureSelfRecursiveBody(i, ownerVar, selfSlot, arity, analysis, ps, stats)) return false;
             }
             return isPureSelfRecursiveBody(ln.body, ownerVar, selfSlot, arity, analysis, ps, stats);
+        }
+        if (n instanceof CaseNode cn) {
+            if (!isPureSelfRecursiveBody(cn.expr, ownerVar, selfSlot, arity, analysis, ps, stats)) return false;
+            if (cn.hasDefault && !isPureSelfRecursiveBody(cn.defaultNode, ownerVar, selfSlot, arity, analysis, ps, stats)) return false;
+            for (Node b : cn.table.values()) {
+                if (!isPureSelfRecursiveBody(b, ownerVar, selfSlot, arity, analysis, ps, stats)) return false;
+            }
+            return true;
         }
         if (n instanceof VarCall1Node c && arity == 1 && ownerVar != null && c.v == ownerVar) {
             if (analysis.typeOf(c.a) != ps.paramTypes[0]) return false;
@@ -733,13 +748,276 @@ public final class BytecodeJIT {
         return isPureSelfRecursiveBody(m.body, ce.ownerVar, m.selfSlot, arity, ps.analysis, ps, stats) && stats[1] >= 1;
     }
 
+    private static boolean isPureCoreMathVar(Var v) {
+        if (v == null || v.ns != RT.CLOJURE_NS || v.isDynamic()) return false;
+        return switch (v.sym.name) {
+            case "+'", "-'", "*'", "inc'", "dec'", "bigint", "biginteger", "abs", "min", "max" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean isPureObjectSelfRecursiveBody(Node n, Var ownerVar, int selfSlot, int[] stats) {
+        if (n == null) return true;
+        if (n instanceof ConstNode cn) {
+            Object v = cn.val;
+            return v == null || v instanceof Long || v instanceof Double || v instanceof Boolean
+                    || v instanceof String || v instanceof java.math.BigInteger;
+        }
+        if (n instanceof LocalNode ln) return ln.slot != selfSlot;
+        if (n instanceof IfNode iff) {
+            return isPureObjectSelfRecursiveBody(iff.test, ownerVar, selfSlot, stats)
+                    && isPureObjectSelfRecursiveBody(iff.thenNode, ownerVar, selfSlot, stats)
+                    && isPureObjectSelfRecursiveBody(iff.elseNode, ownerVar, selfSlot, stats);
+        }
+        if (n instanceof DoNode dn) {
+            for (Node c : dn.nodes) {
+                if (!isPureObjectSelfRecursiveBody(c, ownerVar, selfSlot, stats)) return false;
+            }
+            return true;
+        }
+        if (n instanceof LetNode ln) {
+            for (Node i : ln.inits) {
+                if (!isPureObjectSelfRecursiveBody(i, ownerVar, selfSlot, stats)) return false;
+            }
+            return isPureObjectSelfRecursiveBody(ln.body, ownerVar, selfSlot, stats);
+        }
+        if (n instanceof CaseNode cn) {
+            if (!isPureObjectSelfRecursiveBody(cn.expr, ownerVar, selfSlot, stats)) return false;
+            if (cn.hasDefault && !isPureObjectSelfRecursiveBody(cn.defaultNode, ownerVar, selfSlot, stats)) return false;
+            for (Node b : cn.table.values()) {
+                if (!isPureObjectSelfRecursiveBody(b, ownerVar, selfSlot, stats)) return false;
+            }
+            return true;
+        }
+        if (n instanceof VarCall1Node c) {
+            if (ownerVar != null && c.v == ownerVar) {
+                stats[1]++;
+                return isPureObjectSelfRecursiveBody(c.a, ownerVar, selfSlot, stats);
+            }
+            if (isPureCoreMathVar(c.v)) {
+                return isPureObjectSelfRecursiveBody(c.a, ownerVar, selfSlot, stats);
+            }
+            return false;
+        }
+        if (n instanceof VarCall2Node c) {
+            if (isPureCoreMathVar(c.v)) {
+                return isPureObjectSelfRecursiveBody(c.a, ownerVar, selfSlot, stats)
+                        && isPureObjectSelfRecursiveBody(c.b, ownerVar, selfSlot, stats);
+            }
+            return false;
+        }
+        if (n instanceof Call1Node c && selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot) {
+            stats[1]++;
+            return isPureObjectSelfRecursiveBody(c.a, ownerVar, selfSlot, stats);
+        }
+        if (n instanceof Add2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Sub2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Mul2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Div2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Rem2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Mod2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Quot2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof UncheckedAdd2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof UncheckedSub2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof UncheckedMul2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof BitOp2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Lt2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Lte2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Gt2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Gte2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof Equiv2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof NumEq2Node a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats) && isPureObjectSelfRecursiveBody(a.b, ownerVar, selfSlot, stats);
+        if (n instanceof NegateNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof IncNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof DecNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof UncheckedIncNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof UncheckedDecNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof UncheckedNegateNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof BitNotNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof LongCastNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof DoubleCastNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof ZeroPNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof PosPNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof NegPNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof EvenPNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof OddPNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        if (n instanceof NotNode a) return isPureObjectSelfRecursiveBody(a.a, ownerVar, selfSlot, stats);
+        return false;
+    }
+
+    private static boolean canEmitPureMemoPrim(int arity, PrimSpec ps, int selfCallCount) {
+        if (!AUTO_MEMO || selfCallCount < 2 || arity < 1 || arity > 3) return false;
+        if (ps.analysis.returnType != ValType.LONG) return false;
+        for (int i = 0; i < arity; i++) {
+            if (ps.paramTypes[i] != ValType.LONG) return false;
+        }
+        return true;
+    }
+
+    private static void emitPureMemoPrimWorkers(
+            ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName) {
+        String bodyName = fastName + "_body";
+
+        // 1. Emit the unmemoized computation body whose self-calls invoke the memoized `fastName`
+        int[] argJvmSlots = new int[arity];
+        int nextArgSlot = 0;
+        for (int i = 0; i < arity; i++) {
+            argJvmSlots[i] = nextArgSlot;
+            nextArgSlot += 2; // all params are LONG
+        }
+        SlotLayout layout = new SlotLayout(m, ps.analysis.slotTypes, nextArgSlot);
+        for (int i = 0; i < arity; i++) {
+            int logicalSlot = m.paramSlots[i];
+            if (layout.slotTypes[logicalSlot] == ValType.LONG) {
+                layout.jvmSlot[logicalSlot] = argJvmSlots[i];
+            }
+        }
+        CodeGen bodyCg = ce.beginStaticMethod(bodyName, ps.descriptor, layout.totalLocals);
+        bodyCg.setContext(m, ps.analysis, layout);
+        bodyCg.staticFastSelfSpec = ps;
+        bodyCg.staticFastSelfMethodName = fastName;
+        bodyCg.staticFastSelfCanInline = false;
+        bodyCg.staticFastSelfInlineDepth = 0;
+        for (int i = 0; i < arity; i++) {
+            int logicalSlot = m.paramSlots[i];
+            ValType targetT = layout.slotTypes[logicalSlot];
+            if (targetT != ValType.LONG) {
+                bodyCg.lload(argJvmSlots[i]);
+                bodyCg.convertValue(ValType.LONG, targetT);
+                bodyCg.storeLogicalSlot(logicalSlot);
+            }
+        }
+        boolean terminated = bodyCg.emitReturnTyped(m.body, ValType.LONG);
+        if (!terminated) {
+            bodyCg.emitReturnInstruction(ValType.LONG);
+        }
+        bodyCg.finish();
+
+        // 2. Emit the memoizing entry point `fastName`
+        Object table;
+        String tableClass;
+        String getDesc;
+        String putDesc;
+        if (arity == 1) {
+            table = new PureMemo.Table1();
+            tableClass = "cljl/PureMemo$Table1";
+            getDesc = "(J)J";
+            putDesc = "(JJ)J";
+        } else if (arity == 2) {
+            table = new PureMemo.Table2();
+            tableClass = "cljl/PureMemo$Table2";
+            getDesc = "(JJ)J";
+            putDesc = "(JJJ)J";
+        } else {
+            table = new PureMemo.Table3();
+            tableClass = "cljl/PureMemo$Table3";
+            getDesc = "(JJJ)J";
+            putDesc = "(JJJJ)J";
+        }
+        int tableSlot = arity * 2;
+        int cachedSlot = tableSlot + 1;
+        int totalLocals = cachedSlot + 2;
+        CodeGen cg = ce.beginStaticMethod(fastName, ps.descriptor, totalLocals);
+        cg.loadConstObj(table);
+        cg.checkcast(tableClass);
+        cg.astore(tableSlot);
+
+        // cached = table.get(a0[, a1[, a2]])
+        cg.aload(tableSlot);
+        for (int i = 0; i < arity; i++) cg.lload(i * 2);
+        cg.invokevirtual(tableClass, "get", getDesc, 1 + arity * 2, 2);
+        cg.lstore(cachedSlot);
+
+        Label missLabel = new Label();
+        cg.lload(cachedSlot);
+        cg.ldcLong(PureMemo.MISS);
+        cg.lcmp();
+        cg.ifeq(missLabel);
+        cg.lload(cachedSlot);
+        cg.emitReturnInstruction(ValType.LONG);
+
+        cg.markLabel(missLabel);
+        cg.curStack = 0;
+        cg.aload(tableSlot);
+        for (int i = 0; i < arity; i++) cg.lload(i * 2);
+        for (int i = 0; i < arity; i++) cg.lload(i * 2);
+        cg.invokestatic(ce.className, bodyName, ps.descriptor, arity * 2, 2);
+        cg.invokevirtual(tableClass, "put", putDesc, 1 + arity * 2 + 2, 2);
+        cg.emitReturnInstruction(ValType.LONG);
+        cg.finish();
+    }
+
+    private static void emitPureMemoLongToObjWorkers(
+            ClassEmitter ce, FnMethod m, PrimSpec ps, String fastName) {
+        String bodyName = fastName + "_body";
+        SlotLayout layout = new SlotLayout(m, ps.analysis.slotTypes, 2);
+        int logicalSlot0 = m.paramSlots[0];
+        if (layout.slotTypes[logicalSlot0] == ValType.LONG) {
+            layout.jvmSlot[logicalSlot0] = 0;
+        }
+        CodeGen bodyCg = ce.beginStaticMethod(bodyName, ps.descriptor, layout.totalLocals);
+        bodyCg.setContext(m, ps.analysis, layout);
+        bodyCg.staticFastSelfSpec = ps;
+        bodyCg.staticFastSelfMethodName = fastName;
+        bodyCg.staticFastSelfCanInline = false;
+        bodyCg.staticFastSelfInlineDepth = 0;
+        if (layout.slotTypes[logicalSlot0] != ValType.LONG) {
+            bodyCg.lload(0);
+            bodyCg.convertValue(ValType.LONG, layout.slotTypes[logicalSlot0]);
+            bodyCg.storeLogicalSlot(logicalSlot0);
+        }
+        boolean terminated = bodyCg.emitReturnTyped(m.body, ValType.ANY);
+        if (!terminated) {
+            bodyCg.emitReturnInstruction(ValType.ANY);
+        }
+        bodyCg.finish();
+
+        PureMemo.TableLongToObj table = new PureMemo.TableLongToObj();
+        String tableClass = "cljl/PureMemo$TableLongToObj";
+        int tableSlot = 2;
+        int cachedSlot = 3;
+        CodeGen cg = ce.beginStaticMethod(fastName, ps.descriptor, 4);
+        cg.loadConstObj(table);
+        cg.checkcast(tableClass);
+        cg.astore(tableSlot);
+
+        cg.aload(tableSlot);
+        cg.lload(0);
+        cg.invokevirtual(tableClass, "get", "(J)Ljava/lang/Object;", 3, 1);
+        cg.astore(cachedSlot);
+
+        Label missLabel = new Label();
+        cg.aload(cachedSlot);
+        cg.getstatic("cljl/PureMemo", "MISS_OBJ", "Ljava/lang/Object;", 1);
+        cg.ifAcmpEq(missLabel);
+        cg.aload(cachedSlot);
+        cg.areturn();
+
+        cg.markLabel(missLabel);
+        cg.curStack = 0;
+        cg.aload(tableSlot);
+        cg.lload(0);
+        cg.lload(0);
+        cg.invokestatic(ce.className, bodyName, ps.descriptor, 2, 1);
+        cg.invokevirtual(tableClass, "put", "(JLjava/lang/Object;)Ljava/lang/Object;", 4, 1);
+        cg.areturn();
+        cg.finish();
+    }
+
     private static void emitPrimInvoke(
             ClassEmitter ce, FnMethod m, int arity, int methodCaptureIdx, PrimSpec ps, AnalysisResult genericAnalysis) {
         int[] stats = new int[2];
         String staticFastName = null;
         if (canEmitStaticFastWorker(ce, m, arity, ps, stats)) {
             staticFastName = "fast_" + ps.methodName;
-            emitStaticFastPrimWorker(ce, m, arity, ps, staticFastName, stats[0] <= 24);
+            emitStaticFastPrimWorker(ce, m, arity, ps, staticFastName, stats[0] <= 24, stats[1]);
+        } else if (AUTO_MEMO && arity == 1 && m.capturedLocalSlots.length == 0
+                && ps.paramTypes[0] == ValType.LONG && ps.analysis.returnType == ValType.ANY) {
+            int[] objStats = new int[2];
+            if (isPureObjectSelfRecursiveBody(m.body, ce.ownerVar, m.selfSlot, objStats) && objStats[1] >= 2) {
+                staticFastName = "fast_" + ps.methodName;
+                emitPureMemoLongToObjWorkers(ce, m, ps, staticFastName);
+            }
         }
 
         int[] argJvmSlots = new int[arity];
@@ -813,7 +1091,11 @@ public final class BytecodeJIT {
     }
 
     private static void emitStaticFastPrimWorker(
-            ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName, boolean canSelfInline) {
+            ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName, boolean canSelfInline, int selfCallCount) {
+        if (canEmitPureMemoPrim(arity, ps, selfCallCount)) {
+            emitPureMemoPrimWorkers(ce, m, arity, ps, fastName);
+            return;
+        }
         LinearRecOptimizer.LinearRecSpec linearSpec = LinearRecOptimizer.matchLinearDecrementRec(ce, m, arity, ps);
         if (linearSpec != null) {
             LinearRecOptimizer.emitLinearDecrementWorkers(ce, m, ps, fastName, linearSpec);
@@ -924,6 +1206,70 @@ public final class BytecodeJIT {
                 cg.markLabel(nextSpec);
                 cg.curStack = 0;
             }
+        }
+
+        // Optional auto-memoization for pure multi-branch arity-1 boxed numeric functions (e.g. +' / BigInt fib)
+        int[] objMemoStats = new int[2];
+        boolean useObjMemo = AUTO_MEMO && arity == 1 && m.capturedLocalSlots.length == 0
+                && isPureObjectSelfRecursiveBody(m.body, ce.ownerVar, m.selfSlot, objMemoStats)
+                && objMemoStats[1] >= 2;
+        if (useObjMemo) {
+            String bodyName = "memo_obj_body_1";
+            SlotLayout bodyLayout = new SlotLayout(m, analysis.slotTypes, 2);
+            CodeGen bodyCg = ce.beginMethod(bodyName, "(Ljava/lang/Object;)Ljava/lang/Object;", bodyLayout.totalLocals);
+            bodyCg.setContext(m, analysis, bodyLayout);
+            if (m.selfSlot != -1) {
+                bodyCg.aload(0);
+                bodyCg.astore(bodyLayout.jvmSlot[m.selfSlot]);
+            }
+            int logicalSlot0 = m.paramSlots[0];
+            ValType targetT0 = bodyLayout.slotTypes[logicalSlot0];
+            bodyCg.aload(1);
+            bodyCg.unboxFromObject(targetT0);
+            bodyCg.storeLogicalSlot(logicalSlot0);
+            boolean bodyTerm = bodyCg.emitBoxed(m.body);
+            if (!bodyTerm) {
+                bodyCg.areturn();
+            }
+            bodyCg.finish();
+
+            Label unmemoized = new Label();
+            if (ce.ownerVar != null) {
+                cg.loadConstObj(ce.ownerVar);
+                cg.checkcast("cljl/Var");
+                cg.invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
+                cg.aload(0);
+                cg.getfield(ce.className, "outerFn", "Lcljl/Compiler$CompiledFn;", 1);
+                cg.ifAcmpNe(unmemoized);
+            }
+            PureMemo.TableObj1 objTable = new PureMemo.TableObj1();
+            // Compute table.get(arg0); if != MISS_OBJ return it
+            int tmpTableSlot = cg.allocTempLocal();
+            int tmpCachedSlot = cg.allocTempLocal();
+            cg.loadConstObj(objTable);
+            cg.checkcast("cljl/PureMemo$TableObj1");
+            cg.astore(tmpTableSlot);
+            cg.aload(tmpTableSlot);
+            cg.aload(1);
+            cg.invokevirtual("cljl/PureMemo$TableObj1", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+            cg.astore(tmpCachedSlot);
+            Label objMiss = new Label();
+            cg.aload(tmpCachedSlot);
+            cg.getstatic("cljl/PureMemo", "MISS_OBJ", "Ljava/lang/Object;", 1);
+            cg.ifAcmpEq(objMiss);
+            cg.aload(tmpCachedSlot);
+            cg.areturn();
+            cg.markLabel(objMiss);
+            cg.curStack = 0;
+            cg.aload(tmpTableSlot);
+            cg.aload(1);
+            cg.aload(0);
+            cg.aload(1);
+            cg.invokevirtual(ce.className, bodyName, "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+            cg.invokevirtual("cljl/PureMemo$TableObj1", "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+            cg.areturn();
+            cg.markLabel(unmemoized);
+            cg.curStack = 0;
         }
 
         // Generic body fallback

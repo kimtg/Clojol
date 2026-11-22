@@ -1587,10 +1587,56 @@
     ;; Duplicate-offset CSE: f(n) = f(n-1) + f(n-1) = 2^n
     (is (= [1 2 4 8 16 32 64 128 256 512 1024]
            (mapv rec-double-same-test (range 11))))
-    ;; Exact fib(40)
+    ;; Exact fib(40), fib(77), fib(92), and fib(93) overflow
     (is (= 102334155 (rec-fib-test 40)))
+    (is (= 5527939700884757 (rec-fib-test 77)))
+    (is (= 5527939700884757 (rec-fib-test 77)))
+    (is (= 7540113804746346429 (rec-fib-test 92)))
+    (is (thrown? ArithmeticException (rec-fib-test 93)))
+    ;; Exceptions must never be cached
+    (is (thrown? ArithmeticException (rec-fib-test 93)))
     (is (= 7 (rec-tak-test 18 12 6)))
+    (is (= 9 (rec-tak-test 24 16 8)))
     (is (= 55 (rec-var-fib-test 10)))
+    ;; General pure multi-branch auto-memoization (1-arg, case, BigInt +', 2-arg, 3-arg)
+    (let [trib (fn trib [n]
+                 (if (< n 3) n (+ (trib (- n 1)) (trib (- n 2)) (trib (- n 3)))))
+          case-fib (fn cf [n]
+                     (case n 0 0 1 1 (+ (cf (- n 1)) (cf (- n 2)))))
+          fib-big (fn fb [n]
+                    (if (< n 2) n (+' (fb (- n 1)) (fb (- n 2)))))
+          choose (fn ch [n k]
+                   (if (or (== k 0) (== k n))
+                     1
+                     (+ (ch (- n 1) (- k 1)) (ch (- n 1) k))))
+          paths (fn gp [r c]
+                  (if (or (== r 0) (== c 0))
+                    1
+                    (+ (gp (- r 1) c) (gp r (- c 1)))))
+          min-ret (fn mr [n]
+                    (if (< n 2)
+                      Long/MIN_VALUE
+                      (let [a (mr (- n 1)) b (mr (- n 2))] (if (== a b) a 0))))]
+      (is (= 3927900252338210 (trib 60)))
+      (is (= 5527939700884757 (case-fib 77)))
+      (is (= 280571172992510140037611932413038677189525N (fib-big 200)))
+      (is (= 5527939700884757N (fib-big 77N)))
+      (is (= 118264581564861424 (choose 60 30)))
+      (is (= 118264581564861424 (paths 30 30)))
+      ;; Legitimate Long/MIN_VALUE return value (same as MISS sentinel) must remain exact
+      (is (= Long/MIN_VALUE (min-ret 10))))
+    ;; Impure recursive function MUST NOT be memoized (all 2*F(11)-1 = 177 calls execute)
+    (let [cnt (volatile! 0)
+          impure-fib (fn imp [n]
+                       (vswap! cnt inc)
+                       (if (< n 2) n (+ (imp (- n 1)) (imp (- n 2)))))]
+      (is (= 55 (impure-fib 10)))
+      (is (= 177 @cnt))
+      (is (= 55 (impure-fib 10)))
+      (is (= 354 @cnt)))
+    ;; Concurrent auto-memoized calls must all return exact results
+    (let [futs (mapv (fn [_] (future (rec-fib-test 77))) (range 8))]
+      (is (every? #(= 5527939700884757 @%) futs)))
     ;; Overflow is still detected accurately in pure recursive functions (both small & large base)
     (let [f (fn ovf [n]
               (if (< n 1)
