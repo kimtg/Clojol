@@ -2552,7 +2552,53 @@
     (is (true? (vector? (vector-of :int 1 2 3))))
     ;; clojure.core.reducers ForkJoin helpers
     (eval '(require '[clojure.core.reducers :as w7r]))
-    (eval '(is (= 42 (w7r/fjinvoke #(w7r/fjjoin (w7r/fjfork (w7r/fjtask (fn [] 42))))))))))
+    (eval '(is (= 42 (w7r/fjinvoke #(w7r/fjjoin (w7r/fjfork (w7r/fjtask (fn [] 42)))))))))
+
+  (testing "Wave 8 compatibility: with-precision *math-context*, Reflector sentinel & getMethods, Var$Unbound & hasRoot/isPublic/toSymbol, deftype mutable field vs 0-arg method, IRef extends IDeref, imap-cons & system-newline"
+    ;; with-precision / *math-context* respected by BigDecimal ops
+    (is (= 0.33333M (with-precision 5 (/ 1M 3M))))
+    (is (= 0.6666M (with-precision 4 :rounding FLOOR (/ 2M 3M))))
+    (is (= 1.24M (with-precision 3 (+ 1.234M 0.001M))))
+    (is (= 1.51M (with-precision 3 (* 1.23M 1.23M))))
+    ;; clojure.lang.Reflector stays cached across repeated lookups (no NOT_A_CLASS collision) + getMethods
+    (is (= clojure.lang.Reflector (cljl.Interop/findClass "clojure.lang.Reflector")))
+    (is (= clojure.lang.Reflector (cljl.Interop/findClass "clojure.lang.Reflector")))
+    (is (pos? (count (clojure.lang.Reflector/getMethods String 0 "length" false))))
+    ;; Var.hasRoot / isPublic / toSymbol and Var$Unbound semantics (deref returns Unbound, invoke throws)
+    (eval '(do
+             (def __w8-unbound)
+             (is (false? (.hasRoot #'__w8-unbound)))
+             (is (true? (.isPublic #'__w8-unbound)))
+             (is (= 'cljl.core-test/__w8-unbound (.toSymbol #'__w8-unbound)))
+             (is (instance? clojure.lang.Var$Unbound __w8-unbound))
+             (is (instance? clojure.lang.Var$Unbound @#'__w8-unbound))
+             (is (thrown? IllegalStateException (__w8-unbound)))
+             (def ^:private __w8-priv 1)
+             (is (true? (.hasRoot #'__w8-priv)))
+             (is (false? (.isPublic #'__w8-priv)))))
+    ;; deftype mutable field with same name as 0-arg interface method does not recurse infinitely
+    (eval '(do
+             (deftype W8MutMeta [^:volatile-mutable meta]
+               clojure.lang.IMeta
+               (meta [_] meta)
+               clojure.lang.IReference
+               (resetMeta [_ m] (set! meta m)))
+             (let [x (W8MutMeta. {:a 1})]
+               (is (= {:a 1} (meta x)))
+               (.resetMeta x {:b 2})
+               (is (= {:b 2} (meta x))))))
+    ;; clojure.lang.IRef extends IDeref (works with reify, deref, and defmulti :hierarchy)
+    (is (instance? clojure.lang.IRef (atom 1)))
+    (is (instance? clojure.lang.IRef (ref 1)))
+    (is (instance? clojure.lang.IRef (agent 1)))
+    (is (instance? clojure.lang.IRef #'inc))
+    (let [r (reify clojure.lang.IRef (deref [_] :from-iref))]
+      (is (instance? clojure.lang.IRef r))
+      (is (instance? clojure.lang.IDeref r))
+      (is (= :from-iref @r)))
+    ;; clojure.core/imap-cons and clojure.core/system-newline
+    (is (= {:a 1 :b 2} ((var clojure.core/imap-cons) {:a 1} [:b 2])))
+    (is (= (System/lineSeparator) clojure.core/system-newline))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

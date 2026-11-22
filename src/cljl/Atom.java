@@ -2,6 +2,7 @@ package cljl;
 
 import cljl.lang.IDeref;
 import cljl.lang.IMeta;
+import cljl.lang.IRef;
 import cljl.lang.IReference;
 import cljl.lang.ISeq;
 import cljl.lang.PersistentHashMap;
@@ -15,7 +16,7 @@ import java.util.concurrent.*;
  * Concurrency and state primitives: Atom, Volatile, Delay, Promise, FutureObj.
  * Futures run on Java 25 Virtual Threads for near-zero overhead concurrency.
  */
-public final class Atom implements IDeref, IMeta, IReference {
+public final class Atom implements IRef, IMeta, IReference {
     public static final ExecutorService VIRTUAL_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
     private static final boolean STRICT_ATOM = Boolean.getBoolean("cljl.atom.strict");

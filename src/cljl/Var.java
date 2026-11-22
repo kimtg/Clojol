@@ -2,6 +2,7 @@ package cljl;
 
 import cljl.lang.IDeref;
 import cljl.lang.IMeta;
+import cljl.lang.IRef;
 import cljl.lang.IReference;
 import cljl.lang.ISeq;
 import cljl.lang.PersistentHashMap;
@@ -16,7 +17,23 @@ import java.util.concurrent.ConcurrentHashMap;
  * Clojure Var with ultra-fast root access (zero ThreadLocal overhead unless dynamic)
  * and thread-local dynamic binding frame stack.
  */
-public final class Var extends Fn implements IDeref, IMeta, IReference {
+public final class Var extends Fn implements IRef, IMeta, IReference {
+    public static final class Unbound extends Fn {
+        public final Var v;
+
+        public Unbound(Var v) {
+            this.v = v;
+        }
+
+        @Override public String toString() { return "Unbound: " + v; }
+        @Override public Object invoke() { throw new IllegalStateException("Attempting to call unbound fn: " + v); }
+        @Override public Object invoke(Object a) { throw new IllegalStateException("Attempting to call unbound fn: " + v); }
+        @Override public Object invoke(Object a, Object b) { throw new IllegalStateException("Attempting to call unbound fn: " + v); }
+        @Override public Object invoke(Object a, Object b, Object c) { throw new IllegalStateException("Attempting to call unbound fn: " + v); }
+        @Override public Object invoke(Object a, Object b, Object c, Object d) { throw new IllegalStateException("Attempting to call unbound fn: " + v); }
+        @Override public Object invokeVarargs(Object[] args) { throw new IllegalStateException("Attempting to call unbound fn: " + v); }
+    }
+
     public static final Object UNBOUND = new Object() {
         @Override public String toString() { return "#<Unbound>"; }
     };
@@ -164,11 +181,24 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
                 }
             }
         }
-        return root;
+        return root == UNBOUND ? new Unbound(this) : root;
     }
 
     public Object getRawRoot() {
         return root;
+    }
+
+    public boolean hasRoot() {
+        return root != UNBOUND;
+    }
+
+    public boolean isPublic() {
+        PersistentHashMap m = this.meta;
+        return m == null || !RT.truthy(m.valAt(Keyword.intern("private")));
+    }
+
+    public Symbol toSymbol() {
+        return ns != null && sym != null ? Symbol.intern(ns.name.name, sym.name) : sym;
     }
 
     @Override
@@ -178,13 +208,7 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
     }
 
     private Object derefSlow() {
-        Object v = getSlow();
-        if (v == UNBOUND) throwUnbound();
-        return v;
-    }
-
-    private void throwUnbound() {
-        throw new IllegalStateException("Var " + getName() + " is unbound.");
+        return getSlow();
     }
 
     public boolean isBound() {

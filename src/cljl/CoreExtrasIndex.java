@@ -157,7 +157,7 @@ final class CoreExtrasIndex {
             case "struct", "struct-map", "accessor", "chunk-buffer", "chunk-append" -> 15;
             case "chunk", "chunk-cons", "chunk-first", "chunk-next", "chunk-rest" -> 15;
             case "chunked-seq?", "->ArrayChunk", "->VecNode", "->Vec", "->VecSeq" -> 15;
-            case "->Eduction", "EMPTY-NODE", "ams", "mk-am", "__make-array-manager", "primitives-classnames" -> 15;
+            case "->Eduction", "EMPTY-NODE", "ams", "mk-am", "__make-array-manager", "imap-cons", "system-newline", "primitives-classnames" -> 15;
             // 16: CoreExtras.initSeqsAndMisc (21 vars)
             case "not-empty", "bounded-count", "lazy-cat", "line-seq", "file-seq" -> 16;
             case "enumeration-seq", "iterator-seq", "xml-seq", "resultset-seq", "seque" -> 16;

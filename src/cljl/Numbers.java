@@ -148,10 +148,18 @@ public final class Numbers {
         throw new ClassCastException("Cannot convert to BigInteger: " + o);
     }
 
+    private static MathContext currentMathContext() {
+        Object mc = RT.MATH_CONTEXT.get();
+        return mc instanceof MathContext m ? m : null;
+    }
+
     public static BigDecimal toBigDecimal(Object o) {
         if (o instanceof BigDecimal bd) return bd;
         if (o instanceof BigInteger bi) return new BigDecimal(bi);
-        if (o instanceof Ratio r) return r.toBigDecimal(MathContext.DECIMAL128);
+        if (o instanceof Ratio r) {
+            MathContext mc = currentMathContext();
+            return r.toBigDecimal(mc != null ? mc : MathContext.DECIMAL128);
+        }
         if (o instanceof Double || o instanceof Float) return BigDecimal.valueOf(((Number) o).doubleValue());
         if (o instanceof Number n) return BigDecimal.valueOf(n.longValue());
         if (o instanceof String s) return new BigDecimal(s);
@@ -191,7 +199,8 @@ public final class Numbers {
             return toDouble(x) + toDouble(y);
         }
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
-            return toBigDecimal(x).add(toBigDecimal(y));
+            MathContext mc = currentMathContext();
+            return mc != null ? toBigDecimal(x).add(toBigDecimal(y), mc) : toBigDecimal(x).add(toBigDecimal(y));
         }
         if (x instanceof Ratio || y instanceof Ratio) {
             Ratio rx = toRatio(x);
@@ -236,7 +245,10 @@ public final class Numbers {
             return Math.negateExact(((Number) x).longValue());
         }
         if (x instanceof BigInteger bi) return bi.negate();
-        if (x instanceof BigDecimal bd) return bd.negate();
+        if (x instanceof BigDecimal bd) {
+            MathContext mc = currentMathContext();
+            return mc != null ? bd.negate(mc) : bd.negate();
+        }
         if (x instanceof Ratio r) return Ratio.create(r.numerator.negate(), r.denominator);
         return -toDouble(x);
     }
@@ -275,7 +287,8 @@ public final class Numbers {
             return toDouble(x) - toDouble(y);
         }
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
-            return toBigDecimal(x).subtract(toBigDecimal(y));
+            MathContext mc = currentMathContext();
+            return mc != null ? toBigDecimal(x).subtract(toBigDecimal(y), mc) : toBigDecimal(x).subtract(toBigDecimal(y));
         }
         if (x instanceof Ratio || y instanceof Ratio) {
             Ratio rx = toRatio(x);
@@ -329,7 +342,8 @@ public final class Numbers {
             return toDouble(x) * toDouble(y);
         }
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
-            return toBigDecimal(x).multiply(toBigDecimal(y));
+            MathContext mc = currentMathContext();
+            return mc != null ? toBigDecimal(x).multiply(toBigDecimal(y), mc) : toBigDecimal(x).multiply(toBigDecimal(y));
         }
         if (x instanceof Ratio || y instanceof Ratio) {
             Ratio rx = toRatio(x);
@@ -377,6 +391,10 @@ public final class Numbers {
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
             BigDecimal bdy = toBigDecimal(y);
             if (bdy.compareTo(BigDecimal.ZERO) == 0) throw new ArithmeticException("Divide by zero");
+            MathContext mc = currentMathContext();
+            if (mc != null) {
+                return toBigDecimal(x).divide(bdy, mc);
+            }
             try {
                 return toBigDecimal(x).divide(bdy);
             } catch (ArithmeticException e) {

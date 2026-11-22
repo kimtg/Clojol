@@ -372,6 +372,8 @@ public final class CoreExtras {
                 Keyword.intern("char"), new PrimArrayManager("char"),
                 Keyword.intern("boolean"), new PrimArrayManager("boolean")));
         def(ns, "__make-array-manager", Fn.of1("__make-array-manager", t -> new PrimArrayManager(String.valueOf(t))));
+        def(ns, "imap-cons", Fn.of2("imap-cons", RT::conj));
+        def(ns, "system-newline", System.lineSeparator());
         defMacro(ns, "mk-am", Fn.of1("mk-am", t -> PersistentList.createFromArray(
                 Symbol.intern("clojure.core", "__make-array-manager"),
                 PersistentList.createFromArray(Symbol.intern("quote"), t))));
@@ -1306,7 +1308,7 @@ public final class CoreExtras {
     private static Object rewriteMutableFields(Object form, Object thisSym, Set<String> mutableSet, Set<String> shadowed) {
         if (form instanceof Symbol s && s.ns == null) {
             if (mutableSet.contains(s.name) && !shadowed.contains(s.name)) {
-                return PersistentList.createFromArray(Symbol.intern("."), thisSym, Symbol.intern(s.name));
+                return PersistentList.createFromArray(Symbol.intern("."), thisSym, Symbol.intern("-" + s.name));
             }
             return form;
         }

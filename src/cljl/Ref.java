@@ -10,7 +10,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 /**
  * Clojure coordinated STM Reference (Ref) with history chain, validator, and watches.
  */
-public final class Ref extends Fn implements IDeref, IReference, Comparable<Ref> {
+public final class Ref extends Fn implements IRef, IReference, Comparable<Ref> {
 
     private static final AtomicLong IDS = new AtomicLong(0);
     public final long id = IDS.incrementAndGet();

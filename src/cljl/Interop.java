@@ -10,7 +10,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class Interop {
 
     private static final ConcurrentHashMap<String, Class<?>> CLASS_CACHE = new ConcurrentHashMap<>(256);
-    private static final Class<?> NOT_A_CLASS = Interop.class;
+    private static final class NotAClass {}
+    private static final Class<?> NOT_A_CLASS = NotAClass.class;
     private static final Class<?>[] EMPTY_CLASSES = new Class<?>[0];
 
     private static final class CacheEntry<T> {
@@ -219,6 +220,26 @@ public final class Interop {
         if (name != null) CLASS_CACHE.remove(name);
     }
 
+    public static List<Method> getMethods(Class<?> c, int arity, String name, boolean getStatics) {
+        if (c == null || name == null) return Collections.emptyList();
+        List<Method> matching = new ArrayList<>();
+        for (Method m : c.getMethods()) {
+            if (m.getName().equals(name)
+                    && Modifier.isStatic(m.getModifiers()) == getStatics
+                    && m.getParameterCount() == arity) {
+                matching.add(m);
+            }
+        }
+        return matching;
+    }
+
+    public static Object prepRet(Class<?> c, Object x) {
+        if (!(c.isPrimitive())) return x;
+        if (x instanceof Boolean) return ((Boolean) x).booleanValue() ? Boolean.TRUE : Boolean.FALSE;
+        if (x instanceof Integer i) return i.longValue();
+        return x;
+    }
+
     public static Class<?> findClass(String name) {
         Class<?> cached = CLASS_CACHE.get(name);
         if (cached != null) return cached == NOT_A_CLASS ? null : cached;
@@ -247,7 +268,8 @@ public final class Interop {
             case "clojure.lang.IPending" -> cljl.lang.IPending.class;
             case "clojure.lang.IMeta" -> cljl.lang.IMeta.class;
             case "clojure.lang.IObj" -> cljl.lang.IObj.class;
-            case "clojure.lang.IReference", "clojure.lang.AReference", "clojure.lang.IRef" -> cljl.lang.IReference.class;
+            case "clojure.lang.IReference", "clojure.lang.AReference" -> cljl.lang.IReference.class;
+            case "clojure.lang.IRef" -> cljl.lang.IRef.class;
             case "clojure.lang.IAtom", "clojure.lang.IAtom2" -> Atom.class;
             case "clojure.lang.DynamicClassLoader" -> TypeFactory.DynamicClassLoader.class;
             case "clojure.lang.ISeq" -> cljl.lang.ISeq.class;
@@ -322,6 +344,7 @@ public final class Interop {
             case "clojure.lang.AFn", "clojure.lang.AFunction", "clojure.lang.RestFn" -> Fn.class;
             case "clojure.lang.MultiFn" -> MultiFn.class;
             case "clojure.lang.Var" -> Var.class;
+            case "clojure.lang.Var$Unbound" -> Var.Unbound.class;
             case "clojure.lang.Atom" -> Atom.class;
             case "clojure.lang.Delay" -> Atom.Delay.class;
             case "clojure.lang.Volatile" -> Atom.Volatile.class;

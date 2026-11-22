@@ -3357,6 +3357,7 @@ public final class Core {
             if (ref instanceof Atom a) return a.getValidator();
             if (ref instanceof Agent ag) return ag.getValidator();
             if (ref instanceof Ref r) return r.getValidator();
+            if (ref instanceof IRef ir) return ir.getValidator();
             return null;
         
             }
@@ -3923,6 +3924,7 @@ public final class Core {
             else if (ref instanceof Var v) v.removeWatch(key);
             else if (ref instanceof Agent ag) ag.removeWatch(key);
             else if (ref instanceof Ref r) r.removeWatch(key);
+            else if (ref instanceof IRef ir) ir.removeWatch(key);
             return ref;
         
             }
@@ -3931,6 +3933,7 @@ public final class Core {
             if (ref instanceof Atom a) a.setValidator((Fn) fn);
             else if (ref instanceof Agent ag) ag.setValidator((Fn) fn);
             else if (ref instanceof Ref r) r.setValidator((Fn) fn);
+            else if (ref instanceof IRef ir) ir.setValidator((Fn) fn);
             return null;
         
             }
@@ -4029,6 +4032,7 @@ public final class Core {
             else if (ref instanceof Var v) v.addWatch(key, (Fn) fn);
             else if (ref instanceof Agent ag) ag.addWatch(key, (Fn) fn);
             else if (ref instanceof Ref r) r.addWatch(key, (Fn) fn);
+            else if (ref instanceof IRef ir) ir.addWatch(key, (Fn) fn);
             return ref;
         
             }

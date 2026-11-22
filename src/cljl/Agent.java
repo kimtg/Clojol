@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Clojure Agent: uncoordinated asynchronous reference with serialized per-agent action queue,
  * error handling (:continue / :fail), watches, validators, and STM integration.
  */
-public final class Agent extends Fn implements IDeref, IReference {
+public final class Agent extends Fn implements IRef, IReference {
 
     public static volatile ExecutorService pooledExecutor =
             Executors.newFixedThreadPool(Math.max(2, Runtime.getRuntime().availableProcessors() + 2),
