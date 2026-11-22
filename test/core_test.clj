@@ -2173,7 +2173,91 @@
     (is (= 42 (clojure.main/with-read-known 42)))
     (let [r (IllegalArgumentException. "inner")
           w (RuntimeException. "outer" r)]
-      (is (identical? r (clojure.main/root-cause w))))))
+      (is (identical? r (clojure.main/root-cause w)))))
+
+  (testing "pr, prn, print, println, printf, newline, flush and *print-readably* parity"
+    (let [make-writer (fn []
+                        (let [sb (StringBuilder.)
+                              flushes (atom 0)
+                              w (proxy [java.io.Writer] []
+                                  (write
+                                    ([x] (if (string? x) (.append sb ^String x) (.append sb (char x))))
+                                    ([cbuf off len] (.append sb ^chars cbuf (int off) (int len))))
+                                  (flush [] (swap! flushes inc))
+                                  (close [] nil))]
+                          {:w w :sb sb :flushes flushes}))]
+      ;; pr, print, printf MUST NOT flush (even if printf contains newline)
+      (doseq [[f expected]
+              [[#(pr "hi" 1) "\"hi\" 1"]
+               [#(print "hi" 1) "hi 1"]
+               [#(printf "%s=%d\n" "k" 7) "k=7\n"]]]
+        (let [{:keys [w sb flushes]} (make-writer)]
+          (binding [*out* w *flush-on-newline* true]
+            (is (nil? (f))))
+          (is (= expected (.toString sb)))
+          (is (= 0 @flushes))))
+      ;; prn, println, newline flush iff *flush-on-newline* is truthy
+      (let [nl (System/lineSeparator)]
+        (doseq [[f expected]
+                [[#(prn "hi" 1) (str "\"hi\" 1" nl)]
+                 [#(println "hi" 1) (str "hi 1" nl)]
+                 [#(newline) nl]]]
+          (let [{:keys [w sb flushes]} (make-writer)]
+            (binding [*out* w *flush-on-newline* true]
+              (is (nil? (f))))
+            (is (= expected (.toString sb)))
+            (is (= 1 @flushes)))
+          (let [{:keys [w sb flushes]} (make-writer)]
+            (binding [*out* w *flush-on-newline* false]
+              (is (nil? (f))))
+            (is (= expected (.toString sb)))
+            (is (= 0 @flushes)))
+          (let [{:keys [w sb flushes]} (make-writer)]
+            (binding [*out* w *flush-on-newline* nil]
+              (is (nil? (f))))
+            (is (= expected (.toString sb)))
+            (is (= 0 @flushes)))))
+      ;; flush always flushes even when *flush-on-newline* is false
+      (let [{:keys [w flushes]} (make-writer)]
+        (binding [*out* w *flush-on-newline* false]
+          (print "abc")
+          (is (= 0 @flushes))
+          (is (nil? (flush)))
+          (is (= 1 @flushes)))))
+    ;; *print-readably* respected by pr, prn, pr-str, prn-str
+    (is (= "\"hi\"" (pr-str "hi")))
+    (is (= "hi" (binding [*print-readably* nil] (pr-str "hi"))))
+    (is (= "hi" (binding [*print-readably* false] (with-out-str (pr "hi")))))
+    ;; Default *out*, *in*, and read-line on LineNumberingPushbackReader & plain Reader
+    (is (instance? java.io.Writer *out*))
+    (is (instance? clojure.lang.LineNumberingPushbackReader *in*))
+    (is (= "line1" (binding [*in* (clojure.lang.LineNumberingPushbackReader. (java.io.StringReader. "line1\nline2"))]
+                     (read-line))))
+    (is (= "plain" (binding [*in* (java.io.StringReader. "plain\nnext")]
+                     (read-line)))))
+
+  (testing "Wave 3 ecosystem compatibility: clojure.lang.Fn, ancestors/parents, hyphenated interop, Compiler/specials"
+    (let [f (fn [x] (inc x))]
+      (is (instance? clojure.lang.Fn f))
+      (is (instance? clojure.lang.IFn f))
+      (is (not (instance? clojure.lang.Fn :kw)))
+      (is (not (instance? clojure.lang.Fn {:a 1})))
+      (let [anc (ancestors (class f))]
+        (is (contains? anc clojure.lang.IFn))
+        (is (contains? anc clojure.lang.Fn))
+        (is (contains? anc java.lang.Runnable))
+        (is (contains? anc java.util.concurrent.Callable))))
+    (is (contains? (parents String) Object))
+    (is (contains? (parents String) CharSequence))
+    (is (contains? clojure.lang.Compiler/specials 'if))
+    (is (contains? clojure.lang.Compiler/specials 'let*))
+    (eval '(do
+             (defprotocol W3HyphenProto
+               (render-item [this ctx]))
+             (deftype W3Node [label]
+               W3HyphenProto
+               (render-item [_ ctx] (str label ":" (:v ctx))))
+             (is (= "ok:42" (.render-item (W3Node. "ok") {:v 42})))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

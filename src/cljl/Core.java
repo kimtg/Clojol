@@ -1781,6 +1781,19 @@ public final class Core {
     }
 
     private static String joinPrint(Object[] args, boolean readably) {
+        if (args.length == 0) return "";
+        if (!readably && RT.hasCustomPrintMethod() && RT.PRINT_READABLY.get() != null) {
+            Var.pushThreadBindings(Collections.singletonMap(RT.PRINT_READABLY, null));
+            try {
+                return joinPrintRaw(args, false);
+            } finally {
+                Var.popThreadBindings();
+            }
+        }
+        return joinPrintRaw(args, readably);
+    }
+
+    private static String joinPrintRaw(Object[] args, boolean readably) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < args.length; i++) {
             if (i > 0) sb.append(' ');
@@ -1791,21 +1804,12 @@ public final class Core {
 
     private static void writeOut(String s, boolean newline) {
         Object out = RT.OUT.deref();
-        boolean flushNl = RT.truthy(RT.FLUSH_ON_NEWLINE.get());
-        if (out instanceof PrintWriter pw) {
-            if (newline) {
-                pw.print(s);
-                pw.print(System.lineSeparator());
-                if (flushNl) pw.flush();
-            } else {
-                pw.print(s);
-                pw.flush();
-            }
-        } else if (out instanceof Writer w) {
+        boolean flushNl = newline && RT.truthy(RT.FLUSH_ON_NEWLINE.get());
+        if (out instanceof Writer w) {
             try {
-                w.write(s);
+                if (!s.isEmpty()) w.write(s);
                 if (newline) w.write(System.lineSeparator());
-                if (!newline || flushNl) w.flush();
+                if (flushNl) w.flush();
             } catch (IOException e) {
                 throw RT.sneakyThrow(e);
             }
@@ -2717,8 +2721,24 @@ public final class Core {
             case 2: {
                 
             try {
-                BufferedReader br = (BufferedReader) RT.IN.deref();
-                return br.readLine();
+                Object in = RT.IN.deref();
+                if (in instanceof LineNumberingPushbackReader lnr) {
+                    return lnr.readLine();
+                }
+                if (in instanceof BufferedReader br) {
+                    return br.readLine();
+                }
+                if (in instanceof java.io.Reader r) {
+                    int c = r.read();
+                    if (c == -1) return null;
+                    StringBuilder sb = new StringBuilder();
+                    while (c != -1 && c != '\n') {
+                        if (c != '\r') sb.append((char) c);
+                        c = r.read();
+                    }
+                    return sb.toString();
+                }
+                throw new ClassCastException("Cannot read-line from " + (in == null ? "nil" : in.getClass().getName()));
             } catch (IOException e) {
                 throw RT.sneakyThrow(e);
             }
@@ -4166,15 +4186,15 @@ public final class Core {
             return Symbol.intern(prefix + RT.nextID());
         
             }
-            case 37: { Object[] args = _args; return (joinPrint(args, true)); }
-            case 38: { Object[] args = _args; return (joinPrint(args, true) + System.lineSeparator()); }
+            case 37: { Object[] args = _args; return (joinPrint(args, RT.truthy(RT.PRINT_READABLY.get()))); }
+            case 38: { Object[] args = _args; return (joinPrint(args, RT.truthy(RT.PRINT_READABLY.get())) + System.lineSeparator()); }
             case 39: { Object[] args = _args; return (joinPrint(args, false)); }
             case 40: { Object[] args = _args; return (joinPrint(args, false) + System.lineSeparator()); }
             case 41: {
-                Object[] args = _args; writeOut(joinPrint(args, true), false); return null; 
+                Object[] args = _args; writeOut(joinPrint(args, RT.truthy(RT.PRINT_READABLY.get())), false); return null; 
             }
             case 42: {
-                Object[] args = _args; writeOut(joinPrint(args, true), true); return null; 
+                Object[] args = _args; writeOut(joinPrint(args, RT.truthy(RT.PRINT_READABLY.get())), true); return null; 
             }
             case 43: {
                 Object[] args = _args; writeOut(joinPrint(args, false), false); return null; 

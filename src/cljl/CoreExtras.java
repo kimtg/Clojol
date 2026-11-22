@@ -684,6 +684,47 @@ public final class CoreExtras {
     // Hierarchies & Multimethods
     // ========================================================================
 
+    private static Object parentsOf(Object h, Object tag) {
+        Object hp = RT.get(RT.get(h, KW_PARENTS), tag);
+        if (!(tag instanceof Class<?> cls)) return hp;
+        PersistentHashSet.TransientHashSet ts = PersistentHashSet.EMPTY.asTransient();
+        if (hp != null) {
+            for (ISeq s = RT.seq(hp); s != null; s = s.next()) ts = ts.conj(s.first());
+        }
+        if (cls.getSuperclass() != null) ts = ts.conj(cls.getSuperclass());
+        for (Class<?> iface : cls.getInterfaces()) ts = ts.conj(iface);
+        PersistentHashSet res = ts.persistent();
+        return res.count() == 0 ? null : res;
+    }
+
+    private static Object ancestorsOf(Object h, Object tag) {
+        Object hAncMap = RT.get(h, KW_ANCESTORS);
+        Object ha = RT.get(hAncMap, tag);
+        if (!(tag instanceof Class<?> cls)) return ha;
+        PersistentHashSet.TransientHashSet ts = PersistentHashSet.EMPTY.asTransient();
+        if (ha != null) {
+            for (ISeq s = RT.seq(ha); s != null; s = s.next()) ts = ts.conj(s.first());
+        }
+        Set<Class<?>> seen = new LinkedHashSet<>();
+        Deque<Class<?>> q = new ArrayDeque<>();
+        if (cls.getSuperclass() != null) q.add(cls.getSuperclass());
+        Collections.addAll(q, cls.getInterfaces());
+        while (!q.isEmpty()) {
+            Class<?> cur = q.poll();
+            if (seen.add(cur)) {
+                ts = ts.conj(cur);
+                Object curAnc = RT.get(hAncMap, cur);
+                if (curAnc != null) {
+                    for (ISeq s = RT.seq(curAnc); s != null; s = s.next()) ts = ts.conj(s.first());
+                }
+                if (cur.getSuperclass() != null) q.add(cur.getSuperclass());
+                Collections.addAll(q, cur.getInterfaces());
+            }
+        }
+        PersistentHashSet res = ts.persistent();
+        return res.count() == 0 ? null : res;
+    }
+
     public static PersistentHashMap makeHierarchy() {
         return PersistentHashMap.create(
                 KW_PARENTS, PersistentHashMap.EMPTY,
@@ -1990,8 +2031,8 @@ public final class CoreExtras {
                     });
                 
             }
-            case 88: { Object tag = _a; return (RT.get(RT.get(getGlobalHierarchy().deref(), KW_PARENTS), tag)); }
-            case 89: { Object tag = _a; return (RT.get(RT.get(getGlobalHierarchy().deref(), KW_ANCESTORS), tag)); }
+            case 88: { Object tag = _a; return (parentsOf(getGlobalHierarchy().deref(), tag)); }
+            case 89: { Object tag = _a; return (ancestorsOf(getGlobalHierarchy().deref(), tag)); }
             case 90: { Object tag = _a; return (RT.get(RT.get(getGlobalHierarchy().deref(), KW_DESCENDANTS), tag)); }
             case 91: { Object mf = _a; return (((MultiFn) mf).prefers()); }
             case 92: { Object mf = _a; return (((MultiFn) mf).removeAllMethods()); }
@@ -2333,8 +2374,8 @@ public final class CoreExtras {
             case 33: { Object tag = _a; Object parent = _b; return (getGlobalHierarchy().alterRoot(
                         Fn.of1("underive-global", h -> underiveHierarchy((PersistentHashMap) h, tag, parent)),
                         Fn.EMPTY_ARGS)); }
-            case 34: { Object h = _a; Object tag = _b; return (RT.get(RT.get(h, KW_PARENTS), tag)); }
-            case 35: { Object h = _a; Object tag = _b; return (RT.get(RT.get(h, KW_ANCESTORS), tag)); }
+            case 34: { Object h = _a; Object tag = _b; return (parentsOf(h, tag)); }
+            case 35: { Object h = _a; Object tag = _b; return (ancestorsOf(h, tag)); }
             case 36: { Object h = _a; Object tag = _b; return (RT.get(RT.get(h, KW_DESCENDANTS), tag)); }
             case 37: {
                 Object nsArg = _a; Object sym = _b;

@@ -66,6 +66,20 @@ public final class Compiler {
             Symbol.intern("locking*")
     );
 
+    public static final PersistentHashMap specials = buildSpecialsMap();
+
+    private static PersistentHashMap buildSpecialsMap() {
+        PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
+        for (Symbol s : SPECIALS) tm = tm.assoc(s, Boolean.TRUE);
+        tm = tm.assoc(Symbol.intern("finally"), Boolean.TRUE);
+        tm = tm.assoc(Symbol.intern("catch"), Boolean.TRUE);
+        tm = tm.assoc(Symbol.intern("deftype*"), Boolean.TRUE);
+        tm = tm.assoc(Symbol.intern("reify*"), Boolean.TRUE);
+        tm = tm.assoc(Symbol.intern("clojure.core/import*"), Boolean.TRUE);
+        tm = tm.assoc(Symbol.intern("&"), Boolean.TRUE);
+        return tm.persistent();
+    }
+
     public static boolean isSpecial(Symbol sym) {
         return SPECIALS.contains(sym);
     }
@@ -2063,7 +2077,7 @@ public final class Compiler {
         }
     }
 
-    public static final class CompiledFn extends Fn implements IObj {
+    public static final class CompiledFn extends Fn implements clojure.lang.Fn, IObj {
         private static final int JIT_THRESHOLD = 16;
 
         private final String name;

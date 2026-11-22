@@ -19,9 +19,16 @@ public final class RT {
     public static final Namespace USER_NS = Namespace.findOrCreate(Symbol.intern("user"));
 
     public static final Var CURRENT_NS = CLOJURE_NS.intern(Symbol.intern("*ns*")).bindRoot(USER_NS).setDynamic();
-    public static final Var OUT = CLOJURE_NS.intern(Symbol.intern("*out*")).bindRoot(new PrintWriter(System.out, true)).setDynamic();
-    public static final Var ERR = CLOJURE_NS.intern(Symbol.intern("*err*")).bindRoot(new PrintWriter(System.err, true)).setDynamic();
-    public static final Var IN = CLOJURE_NS.intern(Symbol.intern("*in*")).bindRoot(new BufferedReader(new InputStreamReader(System.in))).setDynamic();
+    public static final Var OUT = CLOJURE_NS.intern(Symbol.intern("*out*"))
+            .bindRoot(new OutputStreamWriter(System.out))
+            .setDynamic()
+            .setMeta(PersistentHashMap.create(Keyword.intern("tag"), Symbol.intern("java.io.Writer")));
+    public static final Var ERR = CLOJURE_NS.intern(Symbol.intern("*err*"))
+            .bindRoot(new PrintWriter(new OutputStreamWriter(System.err), true))
+            .setDynamic();
+    public static final Var IN = CLOJURE_NS.intern(Symbol.intern("*in*"))
+            .bindRoot(new LineNumberingPushbackReader(new InputStreamReader(System.in)))
+            .setDynamic();
     public static final Var PRINT_READABLY = CLOJURE_NS.intern(Symbol.intern("*print-readably*")).bindRoot(Boolean.TRUE).setDynamic();
     public static final Var PRINT_META = CLOJURE_NS.intern(Symbol.intern("*print-meta*")).bindRoot(Boolean.FALSE).setDynamic();
     public static final Var PRINT_DUP = CLOJURE_NS.intern(Symbol.intern("*print-dup*")).bindRoot(Boolean.FALSE).setDynamic();
@@ -137,8 +144,8 @@ public final class RT {
     public static PrintWriter outWriter() {
         Object o = OUT.deref();
         if (o instanceof PrintWriter pw) return pw;
-        if (o instanceof Writer w) return new PrintWriter(w, true);
-        return new PrintWriter(System.out, true);
+        if (o instanceof Writer w) return new PrintWriter(w, false);
+        return new PrintWriter(System.out, false);
     }
 
     public static void setRuntimeClassLoader(ClassLoader cl) {
@@ -935,18 +942,21 @@ public final class RT {
         }
     }
 
+    public static boolean hasCustomPrintMethod() {
+        MultiFn mf = truthy(PRINT_DUP.get()) ? PRINT_DUP_FN : PRINT_METHOD_FN;
+        return mf != null && mf.getMethodTable().count() > 1;
+    }
+
     private static void printDepth(Object x, StringBuilder sb, boolean readably, boolean printMeta, int maxLen, int maxLevel, int level) {
-        if (x != null) {
-            MultiFn mf = truthy(PRINT_DUP.get()) ? PRINT_DUP_FN : PRINT_METHOD_FN;
-            if (mf != null && mf.getMethodTable().count() > 1) {
-                Fn custom = mf.getMethod(x.getClass());
-                Fn defMethod = mf.getMethod(Keyword.intern("default"));
-                if (custom != null && custom != defMethod) {
-                    StringWriter sw = new StringWriter();
-                    custom.invoke(x, sw);
-                    sb.append(sw.toString());
-                    return;
-                }
+        MultiFn mf = truthy(PRINT_DUP.get()) ? PRINT_DUP_FN : PRINT_METHOD_FN;
+        if (mf != null && mf.getMethodTable().count() > 1) {
+            Fn custom = mf.getMethod(x == null ? null : x.getClass());
+            Fn defMethod = mf.getMethod(Keyword.intern("default"));
+            if (custom != null && custom != defMethod) {
+                StringWriter sw = new StringWriter();
+                custom.invoke(x, sw);
+                sb.append(sw.toString());
+                return;
             }
         }
         printSimpleDepth(x, sb, readably, printMeta, maxLen, maxLevel, level);

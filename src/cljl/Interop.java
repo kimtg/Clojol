@@ -307,6 +307,7 @@ public final class Interop {
             case "clojure.lang.ExceptionInfo" -> Core.ExceptionInfo.class;
             case "clojure.lang.IExceptionInfo" -> cljl.lang.IExceptionInfo.class;
             case "clojure.lang.IFn" -> clojure.lang.IFn.class;
+            case "clojure.lang.Fn" -> clojure.lang.Fn.class;
             case "clojure.lang.AFn", "clojure.lang.AFunction", "clojure.lang.RestFn" -> Fn.class;
             case "clojure.lang.MultiFn" -> MultiFn.class;
             case "clojure.lang.Var" -> Var.class;
@@ -549,6 +550,16 @@ public final class Interop {
     }
 
     private static Field findField(Class<?> clazz, String name) {
+        Field f = findFieldExact(clazz, name);
+        if (f != null) return f;
+        String munged = mungeMemberName(name);
+        if (!munged.equals(name)) {
+            return findFieldExact(clazz, munged);
+        }
+        return null;
+    }
+
+    private static Field findFieldExact(Class<?> clazz, String name) {
         try {
             return clazz.getField(name);
         } catch (NoSuchFieldException e) {
@@ -559,6 +570,36 @@ public final class Interop {
             }
             return null;
         }
+    }
+
+    private static String mungeMemberName(String name) {
+        if (name == null || name.isEmpty()) return name;
+        boolean needs = false;
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (!Character.isJavaIdentifierPart(c) || (i == 0 && !Character.isJavaIdentifierStart(c))) {
+                needs = true;
+                break;
+            }
+        }
+        if (!needs) return name;
+        StringBuilder sb = new StringBuilder(name.length() + 4);
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            switch (c) {
+                case '-' -> sb.append('_');
+                case '?' -> sb.append("_QMARK_");
+                case '!' -> sb.append("_BANG_");
+                case '*' -> sb.append("_STAR_");
+                case '+' -> sb.append("_PLUS_");
+                case '>' -> sb.append("_GT_");
+                case '<' -> sb.append("_LT_");
+                case '=' -> sb.append("_EQ_");
+                case '/' -> sb.append("_SLASH_");
+                default -> sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     public static Object invokeInstanceMethod(Object target, String methodName, Object[] args) {
@@ -604,6 +645,26 @@ public final class Interop {
             return cached;
         }
 
+        Method best = findBestMethodExact(clazz, name, args, isStatic);
+        if (best == null) {
+            String munged = mungeMemberName(name);
+            if (!munged.equals(name)) {
+                best = findBestMethodExact(clazz, munged, args, isStatic);
+            }
+        }
+        if (best != null) {
+            best = setAccessibleSafe(best, clazz);
+            final Method resolved = best;
+            final Class<?>[] sig = captureArgTypes(args);
+            map.compute(name, (k, existing) -> {
+                if (lookupEntry(existing, args) != null) return existing;
+                return appendEntry(existing, new CacheEntry<>(sig, resolved));
+            });
+        }
+        return best;
+    }
+
+    private static Method findBestMethodExact(Class<?> clazz, String name, Object[] args, boolean isStatic) {
         Method best = null;
         int bestScore = Integer.MAX_VALUE;
         for (Method m : clazz.getMethods()) {
@@ -615,15 +676,6 @@ public final class Interop {
                 best = m;
                 if (score == 0) break;
             }
-        }
-        if (best != null) {
-            best = setAccessibleSafe(best, clazz);
-            final Method resolved = best;
-            final Class<?>[] sig = captureArgTypes(args);
-            map.compute(name, (k, existing) -> {
-                if (lookupEntry(existing, args) != null) return existing;
-                return appendEntry(existing, new CacheEntry<>(sig, resolved));
-            });
         }
         return best;
     }

@@ -414,7 +414,11 @@ public final class Main {
                 v3.bindRoot(v2.get());
                 v2.bindRoot(v1.get());
                 v1.bindRoot(res);
-                System.out.println(RT.printString(res, true));
+                PrintWriter out = RT.outWriter();
+                out.println(RT.printString(res, RT.truthy(RT.PRINT_READABLY.get())));
+                if (RT.truthy(RT.FLUSH_ON_NEWLINE.get())) {
+                    out.flush();
+                }
             });
         } catch (Throwable t) {
             ve.bindRoot(t);

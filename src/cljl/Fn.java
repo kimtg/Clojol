@@ -231,7 +231,7 @@ public abstract class Fn implements clojure.lang.IFn, Callable<Object>, Runnable
         };
     }
 
-    public abstract static class NamedFn extends Fn implements cljl.lang.IObj {
+    public abstract static class NamedFn extends Fn implements clojure.lang.Fn, cljl.lang.IObj {
         private final String name;
         public NamedFn(String name) { this.name = name; }
         @Override public String getName() { return name; }
@@ -242,7 +242,7 @@ public abstract class Fn implements clojure.lang.IFn, Callable<Object>, Runnable
         @Override public String toString() { return "#<fn " + name + ">"; }
     }
 
-    public static final class MetaFn extends Fn implements cljl.lang.IObj {
+    public static final class MetaFn extends Fn implements clojure.lang.Fn, cljl.lang.IObj {
         private final Fn fn;
         private final cljl.lang.PersistentHashMap meta;
 

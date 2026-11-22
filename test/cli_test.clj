@@ -515,6 +515,36 @@
       (finally
         (delete-tree! tmp)))))
 
+(deftest cli-print-flush-behavior-test
+  (testing "CLI subprocess stdout matches Clojure flush semantics for pr/prn/print/println/printf"
+    (let [run-e (fn [expr]
+                  (run-proc {:dir repo-root}
+                            [java-bin "-jar" cljl-jar "-Srepro" "-Sdeps" "{}" "-e" expr]))]
+      (let [r (run-e "(pr :a)")]
+        (is (= 0 (:exit r)) (:err r))
+        (is (= "" (:out r))))
+      (let [r (run-e "(print :a)")]
+        (is (= 0 (:exit r)) (:err r))
+        (is (= "" (:out r))))
+      (let [r (run-e "(printf \"%s\\n\" :a)")]
+        (is (= 0 (:exit r)) (:err r))
+        (is (= "" (:out r))))
+      (let [r (run-e "(binding [*flush-on-newline* false] (println :a))")]
+        (is (= 0 (:exit r)) (:err r))
+        (is (= "" (:out r))))
+      (let [r (run-e "(prn :a)")]
+        (is (= 0 (:exit r)) (:err r))
+        (is (= ":a" (str/trim (:out r)))))
+      (let [r (run-e "(println :a)")]
+        (is (= 0 (:exit r)) (:err r))
+        (is (= ":a" (str/trim (:out r)))))
+      (let [r (run-e "(print :a) (flush)")]
+        (is (= 0 (:exit r)) (:err r))
+        (is (= ":a" (:out r))))
+      (let [r (run-e "(printf \"%s=%d\" \"x\" 42) (flush)")]
+        (is (= 0 (:exit r)) (:err r))
+        (is (= "x=42" (:out r)))))))
+
 (let [res (run-tests 'cljl.cli-test)]
   (when (or (pos? (:fail res)) (pos? (:error res)))
     (System/exit 1)))

@@ -1610,6 +1610,8 @@ public final class BytecodeJIT {
             int outerNameIdx = cp.addUtf8("outerFn");
             int outerDescIdx = cp.addUtf8("Lcljl/Compiler$CompiledFn;");
 
+            int fnIfaceIdx = cp.addClass("clojure/lang/Fn");
+
             ByteArrayOutputStream baos = new ByteArrayOutputStream(1024);
             DataOutputStream out = new DataOutputStream(baos);
 
@@ -1622,7 +1624,8 @@ public final class BytecodeJIT {
             out.writeShort(0x0011); // ACC_PUBLIC | ACC_FINAL
             out.writeShort(thisClassIdx);
             out.writeShort(superClassIdx);
-            out.writeShort(0); // interfaces count
+            out.writeShort(1); // interfaces count
+            out.writeShort(fnIfaceIdx);
 
             // 3 instance fields + nConsts static final constant fields (trusted as compile-time constants by HotSpot C2)
             out.writeShort(3 + nConsts);
