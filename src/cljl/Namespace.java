@@ -373,6 +373,6 @@ public final class Namespace implements IMeta, IReference {
 
     @Override
     public String toString() {
-        return "#<Namespace " + name + ">";
+        return name.toString();
     }
 }

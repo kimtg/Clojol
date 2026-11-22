@@ -43,57 +43,61 @@ public final class StdLib {
         if (LOADED.contains("clojure.string")) return;
         Namespace ns = Namespace.findOrCreate("clojure.string");
 
-        ns.intern("blank?", Fn.of1("blank?", s -> s == null || ((String) s).isBlank()));
+        ns.intern("blank?", Fn.of1("blank?", s -> s == null || s.toString().isBlank()));
         ns.intern("capitalize", Fn.of1("capitalize", s -> {
-            String str = (String) s;
+            String str = s.toString();
             if (str.isEmpty()) return str;
             return Character.toUpperCase(str.charAt(0)) + str.substring(1).toLowerCase(Locale.ROOT);
         }));
-        ns.intern("ends-with?", Fn.of2("ends-with?", (s, suf) -> ((String) s).endsWith((String) suf)));
-        ns.intern("starts-with?", Fn.of2("starts-with?", (s, pre) -> ((String) s).startsWith((String) pre)));
-        ns.intern("includes?", Fn.of2("includes?", (s, sub) -> ((String) s).contains((CharSequence) sub)));
+        ns.intern("ends-with?", Fn.of2("ends-with?", (s, suf) -> s.toString().endsWith(suf.toString())));
+        ns.intern("starts-with?", Fn.of2("starts-with?", (s, pre) -> s.toString().startsWith(pre.toString())));
+        ns.intern("includes?", Fn.of2("includes?", (s, sub) -> s.toString().contains(sub.toString())));
         ns.intern("index-of", Fn.of23("index-of",
                 (s, val) -> {
-                    int idx = val instanceof Character c ? ((String) s).indexOf(c) : ((String) s).indexOf((String) val);
+                    String str = s.toString();
+                    int idx = val instanceof Character c ? str.indexOf(c) : str.indexOf(val.toString());
                     return idx < 0 ? null : (long) idx;
                 },
                 (s, val, from) -> {
+                    String str = s.toString();
                     int f = (int) Numbers.toLong(from);
-                    int idx = val instanceof Character c ? ((String) s).indexOf(c, f) : ((String) s).indexOf((String) val, f);
+                    int idx = val instanceof Character c ? str.indexOf(c, f) : str.indexOf(val.toString(), f);
                     return idx < 0 ? null : (long) idx;
                 }));
         ns.intern("last-index-of", Fn.of23("last-index-of",
                 (s, val) -> {
-                    int idx = val instanceof Character c ? ((String) s).lastIndexOf(c) : ((String) s).lastIndexOf((String) val);
+                    String str = s.toString();
+                    int idx = val instanceof Character c ? str.lastIndexOf(c) : str.lastIndexOf(val.toString());
                     return idx < 0 ? null : (long) idx;
                 },
                 (s, val, from) -> {
+                    String str = s.toString();
                     int f = (int) Numbers.toLong(from);
-                    int idx = val instanceof Character c ? ((String) s).lastIndexOf(c, f) : ((String) s).lastIndexOf((String) val, f);
+                    int idx = val instanceof Character c ? str.lastIndexOf(c, f) : str.lastIndexOf(val.toString(), f);
                     return idx < 0 ? null : (long) idx;
                 }));
         ns.intern("join", Fn.of12("join",
                 coll -> joinStrings("", coll),
                 (sep, coll) -> joinStrings(sep.toString(), coll)));
-        ns.intern("lower-case", Fn.of1("lower-case", s -> ((String) s).toLowerCase(Locale.ROOT)));
-        ns.intern("upper-case", Fn.of1("upper-case", s -> ((String) s).toUpperCase(Locale.ROOT)));
-        ns.intern("reverse", Fn.of1("reverse", s -> new StringBuilder((String) s).reverse().toString()));
-        ns.intern("trim", Fn.of1("trim", s -> ((String) s).trim()));
-        ns.intern("triml", Fn.of1("triml", s -> ((String) s).stripLeading()));
-        ns.intern("trimr", Fn.of1("trimr", s -> ((String) s).stripTrailing()));
+        ns.intern("lower-case", Fn.of1("lower-case", s -> s.toString().toLowerCase(Locale.ROOT)));
+        ns.intern("upper-case", Fn.of1("upper-case", s -> s.toString().toUpperCase(Locale.ROOT)));
+        ns.intern("reverse", Fn.of1("reverse", s -> new StringBuilder(s.toString()).reverse().toString()));
+        ns.intern("trim", Fn.of1("trim", s -> s.toString().trim()));
+        ns.intern("triml", Fn.of1("triml", s -> s.toString().stripLeading()));
+        ns.intern("trimr", Fn.of1("trimr", s -> s.toString().stripTrailing()));
         ns.intern("trim-newline", Fn.of1("trim-newline", s -> {
-            String str = (String) s;
+            String str = s.toString();
             int end = str.length();
             while (end > 0 && (str.charAt(end - 1) == '\n' || str.charAt(end - 1) == '\r')) end--;
             return str.substring(0, end);
         }));
         ns.intern("split", Fn.of23("split",
-                (s, re) -> PersistentVector.createOwning((Object[]) ((Pattern) re).split((CharSequence) s)),
-                (s, re, limit) -> PersistentVector.createOwning((Object[]) ((Pattern) re).split((CharSequence) s, (int) Numbers.toLong(limit)))));
+                (s, re) -> PersistentVector.createOwning((Object[]) ((Pattern) re).split(s.toString())),
+                (s, re, limit) -> PersistentVector.createOwning((Object[]) ((Pattern) re).split(s.toString(), (int) Numbers.toLong(limit)))));
         ns.intern("split-lines", Fn.of1("split-lines", s ->
-                PersistentVector.createOwning((Object[]) ((String) s).split("\\r?\\n", -1))));
+                PersistentVector.createOwning((Object[]) s.toString().split("\\r?\\n", -1))));
         ns.intern("replace", Fn.of3("replace", (s, match, replacement) -> {
-            String str = (String) s;
+            String str = s.toString();
             if (match instanceof Character c && replacement instanceof Character rc) {
                 return str.replace(c, rc);
             }
@@ -124,7 +128,7 @@ public final class StdLib {
             throw new IllegalArgumentException("Invalid match type for replace: " + match);
         }));
         ns.intern("replace-first", Fn.of3("replace-first", (s, match, replacement) -> {
-            String str = (String) s;
+            String str = s.toString();
             if (match instanceof Character c && replacement instanceof Character rc) {
                 int idx = str.indexOf(c);
                 return idx < 0 ? str : str.substring(0, idx) + rc + str.substring(idx + 1);
@@ -569,6 +573,12 @@ public final class StdLib {
             File f = asFileImpl(args[0]);
             for (int i = 1; i < args.length; i++) f = new File(f, args[i].toString());
             return f;
+        }));
+        ns.intern("make-parents", Fn.ofVarargs("make-parents", args -> {
+            File f = asFileImpl(args[0]);
+            for (int i = 1; i < args.length; i++) f = new File(f, args[i].toString());
+            File parent = f != null ? f.getParentFile() : null;
+            return parent != null ? parent.mkdirs() : Boolean.FALSE;
         }));
         ns.intern("input-stream", Fn.ofVarargs("input-stream", args -> {
             try {

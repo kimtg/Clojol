@@ -1383,36 +1383,18 @@ public final class Core {
             @Override public Object invoke() { return PersistentVector.EMPTY.asTransient(); }
             @Override public Object invoke(Object t) { return t; }
             @Override public Object invoke(Object t, Object x) {
-                if (t instanceof PersistentVector.TransientVector tv) return tv.conj(x);
-                if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.conj(x);
-                if (t instanceof PersistentHashMap.TransientHashMap tm) {
-                    if (x == null) return tm;
-                    if (x instanceof Map.Entry<?, ?> e) return tm.assoc(e.getKey(), e.getValue());
-                    if (x instanceof PersistentVector v && v.cnt == 2) return tm.assoc(v.nth(0), v.nth(1));
-                    if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return tm.assoc(sv.nth(0), sv.nth(1));
-                    if (x instanceof Map<?, ?> m) {
-                        for (Map.Entry<?, ?> e : m.entrySet()) tm = tm.assoc(e.getKey(), e.getValue());
-                        return tm;
-                    }
-                    throw new IllegalArgumentException("Cannot conj onto transient map: " + x);
-                }
-                throw new IllegalArgumentException("Not a transient: " + t);
+                return RT.conjBang(t, x);
             }
         });
         def(ns, "assoc!", new Fn.NamedFn("assoc!") {
-            private Object assoc1(Object t, Object k, Object v) {
-                if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.assoc(k, v);
-                if (t instanceof PersistentVector.TransientVector tv) return tv.assocN((int) Numbers.toLong(k), v);
-                throw new IllegalArgumentException("Not an associative transient: " + t);
-            }
             @Override public Object invoke(Object t, Object k, Object v) {
-                return assoc1(t, k, v);
+                return RT.assocBang(t, k, v);
             }
             @Override public Object invokeVarargs(Object[] args) {
                 if (args.length < 3 || (args.length & 1) == 0) throw arityError(args.length);
                 Object res = args[0];
                 for (int i = 1; i < args.length; i += 2) {
-                    res = assoc1(res, args[i], args[i + 1]);
+                    res = RT.assocBang(res, args[i], args[i + 1]);
                 }
                 return res;
             }
@@ -1420,17 +1402,17 @@ public final class Core {
         def(ns, "dissoc!", new Fn.NamedFn("dissoc!") {
             @Override public Object invoke(Object t) { return t; }
             @Override public Object invoke(Object t, Object k) {
-                return ((PersistentHashMap.TransientHashMap) t).without(k);
+                return ((ITransientMap) t).without(k);
             }
             @Override public Object invoke(Object t, Object k1, Object k2) {
-                return ((PersistentHashMap.TransientHashMap) t).without(k1).without(k2);
+                return ((ITransientMap) t).without(k1).without(k2);
             }
             @Override public Object invoke(Object t, Object k1, Object k2, Object k3) {
-                return ((PersistentHashMap.TransientHashMap) t).without(k1).without(k2).without(k3);
+                return ((ITransientMap) t).without(k1).without(k2).without(k3);
             }
             @Override public Object invokeVarargs(Object[] args) {
                 if (args.length == 0) throw arityError(0);
-                PersistentHashMap.TransientHashMap tm = (PersistentHashMap.TransientHashMap) args[0];
+                ITransientMap tm = (ITransientMap) args[0];
                 for (int i = 1; i < args.length; i++) tm = tm.without(args[i]);
                 return tm;
             }
@@ -1439,17 +1421,17 @@ public final class Core {
         def(ns, "disj!", new Fn.NamedFn("disj!") {
             @Override public Object invoke(Object t) { return t; }
             @Override public Object invoke(Object t, Object k) {
-                return ((PersistentHashSet.TransientHashSet) t).disjoin(k);
+                return ((ITransientSet) t).disjoin(k);
             }
             @Override public Object invoke(Object t, Object k1, Object k2) {
-                return ((PersistentHashSet.TransientHashSet) t).disjoin(k1).disjoin(k2);
+                return ((ITransientSet) t).disjoin(k1).disjoin(k2);
             }
             @Override public Object invoke(Object t, Object k1, Object k2, Object k3) {
-                return ((PersistentHashSet.TransientHashSet) t).disjoin(k1).disjoin(k2).disjoin(k3);
+                return ((ITransientSet) t).disjoin(k1).disjoin(k2).disjoin(k3);
             }
             @Override public Object invokeVarargs(Object[] args) {
                 if (args.length == 0) throw arityError(0);
-                PersistentHashSet.TransientHashSet ts = (PersistentHashSet.TransientHashSet) args[0];
+                ITransientSet ts = (ITransientSet) args[0];
                 for (int i = 1; i < args.length; i++) ts = ts.disjoin(args[i]);
                 return ts;
             }
@@ -2038,6 +2020,25 @@ public final class Core {
             return;
         }
         if (spec instanceof PersistentVector v) {
+            if (v.count() >= 2 && !(v.nth(1) instanceof Keyword)) {
+                String prefix = ((Symbol) v.nth(0)).name;
+                for (int i = 1; i < v.count(); i++) {
+                    Object child = v.nth(i);
+                    if (child instanceof Symbol cs) {
+                        processLibSpec(Symbol.intern(prefix + "." + cs.name), isUse);
+                    } else if (child instanceof PersistentVector cv) {
+                        Object[] arr = new Object[cv.count()];
+                        arr[0] = Symbol.intern(prefix + "." + ((Symbol) cv.nth(0)).name);
+                        for (int j = 1; j < cv.count(); j++) arr[j] = cv.nth(j);
+                        processLibSpec(PersistentVector.createOwning(arr), isUse);
+                    } else if (child instanceof ISeq nested && nested.first() instanceof Symbol nsym) {
+                        processLibSpec(RT.cons(Symbol.intern(prefix + "." + nsym.name), nested.next()), isUse);
+                    } else {
+                        throw new IllegalArgumentException("Invalid child in prefix lib spec: " + child);
+                    }
+                }
+                return;
+            }
             Symbol libSym = (Symbol) v.nth(0);
             boolean reload = false;
             Symbol asAlias = null;
@@ -3064,24 +3065,10 @@ public final class Core {
             return PersistentVector.create(list);
         
             }
-            case 98: {
-                Object coll = _a;
-            if (coll instanceof PersistentVector pv) return pv.asTransient();
-            if (coll instanceof PersistentHashMap pm) return pm.asTransient();
-            if (coll instanceof PersistentHashSet ps) return ps.asTransient();
-            throw new IllegalArgumentException("Cannot create transient from: " + coll);
-        
-            }
-            case 99: {
-                Object t = _a;
-            if (t instanceof PersistentVector.TransientVector tv) return tv.persistent();
-            if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.persistent();
-            if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.persistent();
-            throw new IllegalArgumentException("Not a transient: " + t);
-        
-            }
+            case 98: return RT.transientColl(_a);
+            case 99: return RT.persistentBang(_a);
             case 100: return RT.destructureMap(_a);
-            case 101: { Object t = _a; return (((PersistentVector.TransientVector) t).pop()); }
+            case 101: { Object t = _a; return (((ITransientVector) t).pop()); }
             case 102: return RT.name(_a);
             case 103: return RT.namespace(_a);
             case 104: { Object s = _a; return (s instanceof Symbol sym ? sym : Symbol.intern((String) s)); }

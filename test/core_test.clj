@@ -2292,7 +2292,82 @@
              (defrecord W4PpRec [v])
              (defmethod clojure.pprint/simple-dispatch W4PpRec [x]
                (.write *out* (str "<W4:" (:v x) ">")))
-             (is (= "<W4:7>" (with-out-str (clojure.pprint/write-out (->W4PpRec 7)))))))))
+             (is (= "<W4:7>" (with-out-str (clojure.pprint/write-out (->W4PpRec 7))))))))
+
+  (testing "Wave 5 compatibility: BigDecimal =, #_ strip in namespaced maps, syntax-quote Class./Class/m, prefix-list require, Var meta, Namespace str, clojure.string CharSequence, conj nil on maps, IFn deftype Var call, ITransient interfaces"
+    ;; BigDecimal scale-sensitive = vs ==
+    (is (false? (= 1.0M 1.00M)))
+    (is (true? (== 1.0M 1.00M)))
+    (is (true? (= 1.0M 1.0M)))
+    ;; :_/ and _/ stripping in namespaced maps
+    (is (= {:a/x 1, :y 2, 'z 3} (read-string "#:a{:x 1 :_/y 2 _/z 3}")))
+    ;; Syntax-quote resolves ClassName. and ClassName/staticMember
+    (is (= 'java.lang.StringBuilder. `StringBuilder.))
+    (is (= 'java.lang.String/valueOf `String/valueOf))
+    ;; Prefix-list vector :require & clojure.string CharSequence / Symbol & clojure.java.io/make-parents
+    (eval '(require '[clojure [string :as w5str] [set :as w5set]] '[clojure.java.io :as w5io]))
+    (eval '(do
+             (is (= "ABC" (w5str/upper-case "abc")))
+             (is (= #{1 2 3} (w5set/union #{1 2} #{2 3})))
+             (is (= "Hello" (w5str/capitalize 'hello)))
+             (is (= "abc" (w5str/lower-case (StringBuilder. "AbC"))))
+             (let [tmp-dir (java.io.File. (System/getProperty "java.io.tmpdir") (str "cljl-w5-" (System/nanoTime)))
+                   nested (java.io.File. (java.io.File. tmp-dir "sub") "leaf.txt")]
+               (try
+                 (w5io/make-parents nested)
+                 (is (.isDirectory (.getParentFile nested)))
+                 (finally
+                   (.delete (.getParentFile nested))
+                   (.delete tmp-dir))))))
+    ;; Var meta lazily includes :ns and :name; Namespace.toString is bare name
+    (let [m (meta #'inc)]
+      (is (= (find-ns 'clojure.core) (:ns m)))
+      (is (= 'inc (:name m))))
+    (is (= "clojure.core" (str (find-ns 'clojure.core))))
+    ;; conj nil onto hash-map, sorted-map, and defrecord is a no-op
+    (is (= {:a 1} (conj {:a 1} nil)))
+    (is (= {:a 1} (conj (sorted-map :a 1) nil)))
+    (eval '(do
+             (defrecord W5Rec [x])
+             (is (= (->W5Rec 1) (conj (->W5Rec 1) nil)))
+             (is (= (assoc (->W5Rec 1) :y 2) (conj (->W5Rec 1) {:y 2})))))
+    ;; deftype implementing clojure.lang.IFn bound to a Var (interpreter + JIT hot loop)
+    (eval '(do
+             (deftype W5Counter [a]
+               clojure.lang.IFn
+               (invoke [_] (swap! a inc))
+               (invoke [_ n] (swap! a + n)))
+             (def w5-ctr (W5Counter. (atom 0)))
+             (is (= 1 (w5-ctr)))
+             (is (= 6 (w5-ctr 5)))
+             (defn w5-hot [iters]
+               (loop [i 0]
+                 (if (< i iters)
+                   (do (w5-ctr 1) (recur (inc i)))
+                   @(.a w5-ctr))))
+             (is (= 106 (w5-hot 100)))))
+    ;; Real ITransient* interface hierarchy (persistent collections are NOT transients!)
+    (is (false? (instance? clojure.lang.ITransientCollection {:a 1})))
+    (is (false? (instance? clojure.lang.ITransientCollection [1 2])))
+    (is (false? (instance? clojure.lang.ITransientCollection #{1 2})))
+    (is (false? (instance? clojure.lang.ITransientCollection "str")))
+    (let [tm (transient {:a 1})
+          tv (transient [10 20])
+          ts (transient #{:x})]
+      (is (true? (instance? clojure.lang.ITransientCollection tm)))
+      (is (true? (instance? clojure.lang.ITransientAssociative tm)))
+      (is (true? (instance? clojure.lang.ITransientMap tm)))
+      (is (= 1 (get tm :a)))
+      (is (= :miss (get tm :z :miss)))
+      (is (true? (instance? clojure.lang.ITransientCollection tv)))
+      (is (true? (instance? clojure.lang.ITransientAssociative tv)))
+      (is (true? (instance? clojure.lang.ITransientVector tv)))
+      (is (= 20 (get tv 1)))
+      (is (true? (instance? clojure.lang.ITransientCollection ts)))
+      (is (true? (instance? clojure.lang.ITransientSet ts)))
+      (is (= {:a 1 :b 2} (persistent! (conj! tm [:b 2]))))
+      (is (= [10 99] (persistent! (assoc! tv 1 99))))
+      (is (= #{:x :y} (persistent! (conj! ts :y)))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

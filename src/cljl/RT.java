@@ -463,6 +463,7 @@ public final class RT {
         if (coll instanceof PersistentList l) return l.cons(x);
         if (coll instanceof PersistentList.EmptyList l) return l.cons(x);
         if (coll instanceof PersistentHashMap m) {
+            if (x == null) return m;
             if (x instanceof Map.Entry<?, ?> e) {
                 return m.assoc(e.getKey(), e.getValue());
             }
@@ -495,6 +496,7 @@ public final class RT {
         if (coll instanceof PersistentHashSet s) return s.conj(x);
         if (coll instanceof PersistentTreeSet s) return s.conj(x);
         if (coll instanceof PersistentTreeMap m) {
+            if (x == null) return m;
             if (x instanceof Map.Entry<?, ?> e) return m.assoc(e.getKey(), e.getValue());
             if (x instanceof PersistentVector v && v.count() == 2) return m.assoc(v.nth(0), v.nth(1));
             if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return m.assoc(sv.nth(0), sv.nth(1));
@@ -512,9 +514,21 @@ public final class RT {
             throw new IllegalArgumentException("Cannot conj " + x + " onto map");
         }
         if (coll instanceof PersistentRecord rec) {
+            if (x == null) return rec;
             if (x instanceof Map.Entry<?, ?> e) return rec.assoc(e.getKey(), e.getValue());
             if (x instanceof PersistentVector v && v.count() == 2) return rec.assoc(v.nth(0), v.nth(1));
             if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return rec.assoc(sv.nth(0), sv.nth(1));
+            if (x instanceof Seqable || x instanceof Map<?, ?>) {
+                Associative ret = rec;
+                for (ISeq s = seq(x); s != null; s = s.next()) {
+                    Object elem = s.first();
+                    if (elem instanceof Map.Entry<?, ?> e) ret = ret.assoc(e.getKey(), e.getValue());
+                    else if (elem instanceof PersistentVector v && v.count() == 2) ret = ret.assoc(v.nth(0), v.nth(1));
+                    else if (elem instanceof PersistentVector.SubVec sv && sv.count() == 2) ret = ret.assoc(sv.nth(0), sv.nth(1));
+                    else throw new IllegalArgumentException("Cannot conj " + elem + " onto record");
+                }
+                return ret;
+            }
             throw new IllegalArgumentException("Cannot conj " + x + " onto record");
         }
         if (coll instanceof ISeq s) return cons(x, s);
@@ -563,6 +577,7 @@ public final class RT {
         if (coll instanceof PersistentVector pv) return pv.asTransient();
         if (coll instanceof PersistentHashMap pm) return pm.asTransient();
         if (coll instanceof PersistentHashSet ps) return ps.asTransient();
+        if (coll instanceof IEditableCollection ec) return ec.asTransient();
         throw new IllegalArgumentException("Cannot create transient from: " + coll);
     }
 
@@ -570,29 +585,22 @@ public final class RT {
         if (t instanceof PersistentVector.TransientVector tv) return tv.persistent();
         if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.persistent();
         if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.persistent();
+        if (t instanceof ITransientCollection tc) return tc.persistent();
         throw new IllegalArgumentException("Not a transient: " + t);
     }
 
     public static Object conjBang(Object t, Object x) {
         if (t instanceof PersistentVector.TransientVector tv) return tv.conj(x);
         if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.conj(x);
-        if (t instanceof PersistentHashMap.TransientHashMap tm) {
-            if (x == null) return tm;
-            if (x instanceof Map.Entry<?, ?> e) return tm.assoc(e.getKey(), e.getValue());
-            if (x instanceof PersistentVector v && v.cnt == 2) return tm.assoc(v.nth(0), v.nth(1));
-            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return tm.assoc(sv.nth(0), sv.nth(1));
-            if (x instanceof Map<?, ?> m) {
-                for (Map.Entry<?, ?> e : m.entrySet()) tm = tm.assoc(e.getKey(), e.getValue());
-                return tm;
-            }
-            throw new IllegalArgumentException("Cannot conj onto transient map: " + x);
-        }
+        if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.conj(x);
+        if (t instanceof ITransientCollection tc) return tc.conj(x);
         throw new IllegalArgumentException("Not a transient: " + t);
     }
 
     public static Object assocBang(Object t, Object k, Object v) {
         if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.assoc(k, v);
         if (t instanceof PersistentVector.TransientVector tv) return tv.assocN((int) Numbers.toLong(k), v);
+        if (t instanceof ITransientAssociative ta) return ta.assoc(k, v);
         throw new IllegalArgumentException("Not an associative transient: " + t);
     }
 

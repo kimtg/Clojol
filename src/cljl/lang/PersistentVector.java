@@ -891,7 +891,7 @@ public final class PersistentVector extends Fn
         }
     }
 
-    public static final class TransientVector extends Fn implements Counted {
+    public static final class TransientVector extends Fn implements ITransientVector {
         private int cnt;
         private int shift;
         private Node root;
@@ -977,6 +977,15 @@ public final class PersistentVector extends Fn
             return parent;
         }
 
+        @Override
+        public TransientVector assoc(Object key, Object val) {
+            if (key instanceof Integer || key instanceof Long || key instanceof Short || key instanceof Byte) {
+                return assocN(((Number) key).intValue(), val);
+            }
+            throw new IllegalArgumentException("Key must be integer: " + key);
+        }
+
+        @Override
         public TransientVector assocN(int i, Object val) {
             ensureEditable();
             if (i >= 0 && i < cnt) {

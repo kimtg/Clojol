@@ -841,7 +841,7 @@ public final class PersistentHashMap extends Fn
         @Override public List<Object> subList(int fromIndex, int toIndex) { return toVector().subList(fromIndex, toIndex); }
     }
 
-    public static final class TransientHashMap extends Fn implements Counted {
+    public static final class TransientHashMap extends Fn implements ITransientMap {
         private final AtomicReference<Thread> edit;
         private INode root;
         private int count;
@@ -898,6 +898,27 @@ public final class PersistentHashMap extends Fn
             return this;
         }
 
+        @Override
+        public TransientHashMap conj(Object x) {
+            ensureEditable();
+            if (x == null) return this;
+            if (x instanceof Map.Entry<?, ?> e) return assoc(e.getKey(), e.getValue());
+            if (x instanceof PersistentVector v && v.cnt == 2) return assoc(v.nth(0), v.nth(1));
+            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return assoc(sv.nth(0), sv.nth(1));
+            if (x instanceof Map<?, ?> m) {
+                TransientHashMap tm = this;
+                for (Map.Entry<?, ?> e : m.entrySet()) tm = tm.assoc(e.getKey(), e.getValue());
+                return tm;
+            }
+            throw new IllegalArgumentException("Cannot conj onto transient map: " + x);
+        }
+
+        @Override
+        public Object valAt(Object key) {
+            return valAt(key, null);
+        }
+
+        @Override
         public Object valAt(Object key, Object notFound) {
             ensureEditable();
             if (key == null) return hasNull ? nullValue : notFound;

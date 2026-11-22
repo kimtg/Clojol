@@ -468,6 +468,11 @@ public final class BytecodeJIT {
         throw new ClassCastException("Cannot cast " + (o == null ? "nil" : o.getClass().getName()) + " to char");
     }
 
+    public static Object invokeAnyVarargs(Object fnObj, Object[] args) {
+        if (fnObj instanceof Fn f) return f.invokeVarargs(args);
+        return ((clojure.lang.IFn) fnObj).applyTo(PersistentList.createFromArray(args));
+    }
+
     public static boolean isMap(Object x) {
         return x instanceof PersistentHashMap || x instanceof Map<?, ?>;
     }
@@ -5085,46 +5090,89 @@ public final class BytecodeJIT {
                 return false;
             }
 
-            // Var calls
+            // Var calls (fast invokevirtual for cljl.Fn vars, invokeinterface for IFn deftype/reify/dynamic vars)
             if (node instanceof VarCall0Node c) {
-                emitVarFn(c.v);
-                invokevirtual("cljl/Fn", "invoke", "()Ljava/lang/Object;", 1, 1);
+                if (isKnownCljlFnVar(c.v)) {
+                    emitVarFn(c.v);
+                    invokevirtual("cljl/Fn", "invoke", "()Ljava/lang/Object;", 1, 1);
+                } else {
+                    emitVarIFn(c.v);
+                    invokeinterface("clojure/lang/IFn", "invoke", "()Ljava/lang/Object;", 1, 1);
+                }
                 return false;
             }
             if (node instanceof VarCall1Node c) {
-                emitVarFn(c.v);
-                emitBoxed(c.a);
-                invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                if (isKnownCljlFnVar(c.v)) {
+                    emitVarFn(c.v);
+                    emitBoxed(c.a);
+                    invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                } else {
+                    emitVarIFn(c.v);
+                    emitBoxed(c.a);
+                    invokeinterface("clojure/lang/IFn", "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                }
                 return false;
             }
             if (node instanceof VarCall2Node c) {
-                emitVarFn(c.v);
-                emitBoxed(c.a);
-                emitBoxed(c.b);
-                invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                if (isKnownCljlFnVar(c.v)) {
+                    emitVarFn(c.v);
+                    emitBoxed(c.a);
+                    emitBoxed(c.b);
+                    invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                } else {
+                    emitVarIFn(c.v);
+                    emitBoxed(c.a);
+                    emitBoxed(c.b);
+                    invokeinterface("clojure/lang/IFn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                }
                 return false;
             }
             if (node instanceof VarCall3Node c) {
-                emitVarFn(c.v);
-                emitBoxed(c.a);
-                emitBoxed(c.b);
-                emitBoxed(c.c);
-                invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
+                if (isKnownCljlFnVar(c.v)) {
+                    emitVarFn(c.v);
+                    emitBoxed(c.a);
+                    emitBoxed(c.b);
+                    emitBoxed(c.c);
+                    invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
+                } else {
+                    emitVarIFn(c.v);
+                    emitBoxed(c.a);
+                    emitBoxed(c.b);
+                    emitBoxed(c.c);
+                    invokeinterface("clojure/lang/IFn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
+                }
                 return false;
             }
             if (node instanceof VarCall4Node c) {
-                emitVarFn(c.v);
-                emitBoxed(c.a);
-                emitBoxed(c.b);
-                emitBoxed(c.c);
-                emitBoxed(c.d);
-                invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
+                if (isKnownCljlFnVar(c.v)) {
+                    emitVarFn(c.v);
+                    emitBoxed(c.a);
+                    emitBoxed(c.b);
+                    emitBoxed(c.c);
+                    emitBoxed(c.d);
+                    invokevirtual("cljl/Fn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
+                } else {
+                    emitVarIFn(c.v);
+                    emitBoxed(c.a);
+                    emitBoxed(c.b);
+                    emitBoxed(c.c);
+                    emitBoxed(c.d);
+                    invokeinterface("clojure/lang/IFn", "invoke", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
+                }
                 return false;
             }
             if (node instanceof VarCallNNode c) {
-                emitVarFn(c.v);
-                emitObjectArray(c.args);
-                invokevirtual("cljl/Fn", "invokeVarargs", "([Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                if (isKnownCljlFnVar(c.v)) {
+                    emitVarFn(c.v);
+                    emitObjectArray(c.args);
+                    invokevirtual("cljl/Fn", "invokeVarargs", "([Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                } else {
+                    loadConstObj(c.v);
+                    checkcast("cljl/Var");
+                    invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
+                    emitObjectArray(c.args);
+                    invokestatic("cljl/BytecodeJIT", "invokeAnyVarargs", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                }
                 return false;
             }
 
@@ -5993,11 +6041,22 @@ public final class BytecodeJIT {
                     || n instanceof EvenPNode || n instanceof OddPNode || n instanceof TypePredNode;
         }
 
+        private static boolean isKnownCljlFnVar(Var v) {
+            return !v.isDynamic() && v.isBound() && v.getRawRoot() instanceof Fn;
+        }
+
         private void emitVarFn(Var v) {
             loadConstObj(v);
             checkcast("cljl/Var");
             invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
             checkcast("cljl/Fn");
+        }
+
+        private void emitVarIFn(Var v) {
+            loadConstObj(v);
+            checkcast("cljl/Var");
+            invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
+            checkcast("clojure/lang/IFn");
         }
 
         private void emitObjectArray(Node[] nodes) {

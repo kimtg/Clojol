@@ -871,10 +871,18 @@ public final class Reader {
         for (int i = 0; i < items.size(); i += 2) {
             Object k = items.get(i);
             Object v = items.get(i + 1);
-            if (k instanceof Keyword kw && kw.getNamespace() == null) {
-                k = Keyword.intern(nsStr, kw.getName());
-            } else if (k instanceof Symbol sym && sym.getNamespace() == null) {
-                k = Symbol.intern(nsStr, sym.getName());
+            if (k instanceof Keyword kw) {
+                if ("_".equals(kw.getNamespace())) {
+                    k = Keyword.intern(kw.getName());
+                } else if (kw.getNamespace() == null) {
+                    k = Keyword.intern(nsStr, kw.getName());
+                }
+            } else if (k instanceof Symbol sym) {
+                if ("_".equals(sym.getNamespace())) {
+                    k = Symbol.intern(sym.getName());
+                } else if (sym.getNamespace() == null) {
+                    k = Symbol.intern(nsStr, sym.getName());
+                }
             }
             out[i] = k;
             out[i + 1] = v;
@@ -966,10 +974,18 @@ public final class Reader {
         if (Compiler.isSpecial(sym)) {
             return sym;
         }
-        if (sym.ns == null && (sym.name.startsWith(".") || sym.name.endsWith(".") || sym.name.equals("&"))) {
+        if (sym.ns == null && (sym.name.startsWith(".") || sym.name.equals("&"))) {
             return sym;
         }
         Namespace cur = RT.currentNS();
+        if (sym.ns == null && sym.name.endsWith(".") && sym.name.length() > 1) {
+            String baseName = sym.name.substring(0, sym.name.length() - 1);
+            Class<?> c = Interop.resolveClass(cur, baseName);
+            if (c != null) {
+                return Symbol.intern(null, c.getName() + ".");
+            }
+            return sym;
+        }
         if (sym.ns != null) {
             if (Interop.isArrayDimToken(sym.name)) {
                 Class<?> comp = Interop.resolveClass(cur, sym.ns);
@@ -980,6 +996,12 @@ public final class Reader {
             Namespace aliasNs = cur.lookupAlias(Symbol.intern(sym.ns));
             if (aliasNs != null) {
                 return Symbol.intern(aliasNs.name.name, sym.name);
+            }
+            if (Namespace.find(sym.ns) == null) {
+                Class<?> c = Interop.resolveClass(cur, sym.ns);
+                if (c != null) {
+                    return Symbol.intern(c.getName(), sym.name);
+                }
             }
             return sym;
         }

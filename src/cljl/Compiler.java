@@ -2530,35 +2530,35 @@ public final class Compiler {
     public static final class VarCall0Node extends Node {
         public final Var v;
         public VarCall0Node(Var v) { this.v = v; }
-        @Override public Object eval(Object[] frame) { return ((Fn) v.get()).invoke(); }
+        @Override public Object eval(Object[] frame) { return ((clojure.lang.IFn) v.get()).invoke(); }
     }
 
     public static final class VarCall1Node extends Node {
         public final Var v;
         public final Node a;
         public VarCall1Node(Var v, Node a) { this.v = v; this.a = a; }
-        @Override public Object eval(Object[] frame) { return ((Fn) v.get()).invoke(a.eval(frame)); }
+        @Override public Object eval(Object[] frame) { return ((clojure.lang.IFn) v.get()).invoke(a.eval(frame)); }
     }
 
     public static final class VarCall2Node extends Node {
         public final Var v;
         public final Node a, b;
         public VarCall2Node(Var v, Node a, Node b) { this.v = v; this.a = a; this.b = b; }
-        @Override public Object eval(Object[] frame) { return ((Fn) v.get()).invoke(a.eval(frame), b.eval(frame)); }
+        @Override public Object eval(Object[] frame) { return ((clojure.lang.IFn) v.get()).invoke(a.eval(frame), b.eval(frame)); }
     }
 
     public static final class VarCall3Node extends Node {
         public final Var v;
         public final Node a, b, c;
         public VarCall3Node(Var v, Node a, Node b, Node c) { this.v = v; this.a = a; this.b = b; this.c = c; }
-        @Override public Object eval(Object[] frame) { return ((Fn) v.get()).invoke(a.eval(frame), b.eval(frame), c.eval(frame)); }
+        @Override public Object eval(Object[] frame) { return ((clojure.lang.IFn) v.get()).invoke(a.eval(frame), b.eval(frame), c.eval(frame)); }
     }
 
     public static final class VarCall4Node extends Node {
         public final Var v;
         public final Node a, b, c, d;
         public VarCall4Node(Var v, Node a, Node b, Node c, Node d) { this.v = v; this.a = a; this.b = b; this.c = c; this.d = d; }
-        @Override public Object eval(Object[] frame) { return ((Fn) v.get()).invoke(a.eval(frame), b.eval(frame), c.eval(frame), d.eval(frame)); }
+        @Override public Object eval(Object[] frame) { return ((clojure.lang.IFn) v.get()).invoke(a.eval(frame), b.eval(frame), c.eval(frame), d.eval(frame)); }
     }
 
     public static final class VarCallNNode extends Node {
@@ -2567,9 +2567,11 @@ public final class Compiler {
         public VarCallNNode(Var v, Node[] args) { this.v = v; this.args = args; }
         @Override
         public Object eval(Object[] frame) {
+            Object fObj = v.get();
             Object[] evaluated = new Object[args.length];
             for (int i = 0; i < args.length; i++) evaluated[i] = args[i].eval(frame);
-            return ((Fn) v.get()).invokeVarargs(evaluated);
+            if (fObj instanceof Fn f) return f.invokeVarargs(evaluated);
+            return ((clojure.lang.IFn) fObj).applyTo(PersistentList.createFromArray(evaluated));
         }
     }
 

@@ -226,9 +226,18 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
         return macro;
     }
 
+    private static final Keyword NS_KW = Keyword.intern("ns");
+    private static final Keyword NAME_KW = Keyword.intern("name");
+
     @Override
     public PersistentHashMap meta() {
-        return meta;
+        PersistentHashMap m = this.meta;
+        if (this.ns != null && this.sym != null && (!m.containsKey(NS_KW) || !m.containsKey(NAME_KW))) {
+            if (!m.containsKey(NS_KW)) m = m.assoc(NS_KW, this.ns);
+            if (!m.containsKey(NAME_KW)) m = m.assoc(NAME_KW, this.sym);
+            this.meta = m;
+        }
+        return m;
     }
 
     public synchronized Var mergeMeta(PersistentHashMap m) {
@@ -263,7 +272,7 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
     @Override
     public synchronized PersistentHashMap alterMeta(Fn alter, ISeq args) {
         Object[] callArgs = new Object[1 + RT.count(args)];
-        callArgs[0] = this.meta;
+        callArgs[0] = meta();
         int i = 1;
         for (ISeq s = args; s != null; s = s.next()) callArgs[i++] = s.first();
         return resetMeta((PersistentHashMap) alter.applyTo(callArgs));

@@ -192,7 +192,7 @@ public final class PersistentHashSet extends Fn
     @Override public boolean removeAll(Collection<?> c) { throw new UnsupportedOperationException(); }
     @Override public void clear() { throw new UnsupportedOperationException(); }
 
-    public static final class TransientHashSet extends Fn implements Counted {
+    public static final class TransientHashSet extends Fn implements ITransientSet {
         private static final Object NOT_FOUND = new Object();
         private final PersistentHashMap.TransientHashMap impl;
 
@@ -212,8 +212,14 @@ public final class PersistentHashSet extends Fn
             return this;
         }
 
+        @Override
         public boolean contains(Object key) {
             return impl.valAt(key, NOT_FOUND) != NOT_FOUND;
+        }
+
+        @Override
+        public Object get(Object key) {
+            return impl.valAt(key, null);
         }
 
         @Override

@@ -286,10 +286,11 @@ public final class Interop {
             case "clojure.lang.IRecord" -> cljl.lang.PersistentRecord.class;
             case "clojure.lang.IEditableCollection" -> cljl.lang.IEditableCollection.class;
             case "clojure.lang.IHashEq" -> cljl.lang.IHashEq.class;
-            case "clojure.lang.ITransientSet" -> cljl.lang.PersistentHashSet.TransientHashSet.class;
-            case "clojure.lang.ITransientVector" -> cljl.lang.PersistentVector.TransientVector.class;
-            case "clojure.lang.ITransientAssociative" -> cljl.lang.PersistentHashMap.TransientHashMap.class;
-            case "clojure.lang.ITransientCollection" -> Object.class;
+            case "clojure.lang.ITransientSet" -> cljl.lang.ITransientSet.class;
+            case "clojure.lang.ITransientVector" -> cljl.lang.ITransientVector.class;
+            case "clojure.lang.ITransientMap" -> cljl.lang.ITransientMap.class;
+            case "clojure.lang.ITransientAssociative", "clojure.lang.ITransientAssociative2" -> cljl.lang.ITransientAssociative.class;
+            case "clojure.lang.ITransientCollection" -> cljl.lang.ITransientCollection.class;
             case "clojure.lang.PersistentHashSet", "clojure.lang.APersistentSet" -> cljl.lang.PersistentHashSet.class;
             case "clojure.lang.PersistentList" -> cljl.lang.PersistentList.class;
             case "clojure.lang.PersistentQueue" -> cljl.lang.PersistentQueue.class;

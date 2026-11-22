@@ -726,7 +726,7 @@ public final class Numbers {
             return x.doubleValue() == y.doubleValue();
         }
         if (x instanceof BigDecimal bdx && y instanceof BigDecimal bdy) {
-            return bdx.compareTo(bdy) == 0;
+            return bdx.equals(bdy);
         }
         if (x instanceof Ratio rx && y instanceof Ratio ry) {
             return rx.equals(ry);
