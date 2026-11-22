@@ -248,6 +248,7 @@ public final class Interop {
             case "clojure.lang.DynamicClassLoader" -> TypeFactory.DynamicClassLoader.class;
             case "clojure.lang.ISeq" -> cljl.lang.ISeq.class;
             case "clojure.lang.ASeq" -> cljl.lang.ASeq.class;
+            case "clojure.lang.SeqIterator" -> cljl.lang.SeqIterator.class;
             case "clojure.lang.Seqable" -> cljl.lang.Seqable.class;
             case "clojure.lang.Sequential" -> cljl.lang.Sequential.class;
             case "clojure.lang.Associative" -> cljl.lang.Associative.class;
@@ -263,6 +264,7 @@ public final class Interop {
             case "clojure.lang.ChunkedCons" -> cljl.lang.ChunkedCons.class;
             case "clojure.lang.ArrayChunk" -> cljl.lang.ArrayChunk.class;
             case "clojure.lang.IPersistentMap" -> cljl.lang.IPersistentMap.class;
+            case "clojure.lang.MapEquivalence" -> cljl.lang.MapEquivalence.class;
             case "clojure.lang.IPersistentVector" -> cljl.lang.IPersistentVector.class;
             case "clojure.lang.IPersistentSet" -> cljl.lang.IPersistentSet.class;
             case "clojure.lang.IPersistentList" -> cljl.lang.IPersistentList.class;

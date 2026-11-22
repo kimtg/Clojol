@@ -2367,7 +2367,132 @@
       (is (true? (instance? clojure.lang.ITransientSet ts)))
       (is (= {:a 1 :b 2} (persistent! (conj! tm [:b 2]))))
       (is (= [10 99] (persistent! (assoc! tv 1 99))))
-      (is (= #{:x :y} (persistent! (conj! ts :y)))))))
+      (is (= #{:x :y} (persistent! (conj! ts :y))))))
+
+  (testing "Wave 6 compatibility: special forms unshadowed by locals, reader cond trailing skip, Future deref/realized?, def runtime metadata eval, io/IOFactory & Coercions, reflect/JavaReflector & :ancestors, RT/makeClassLoader"
+    ;; Special forms in operator position are never shadowed by local bindings
+    (is (= 2 (let [if +] (if 1 2 3))))
+    (is (= 10 (let [let* +] (let* [x 10] x))))
+    (eval '(do
+             (defn w6-self-let-test [[a b]]
+               (let [let* +]
+                 (let [[x y] [a b]]
+                   (+ x y))))
+             (is (= 7 (w6-self-let-test [3 4])))
+             (defmacro let* [bindings & body]
+               (reduce (fn [acc [l r]] `((fn [~l] ~acc) ~r))
+                       `(do ~@body)
+                       (reverse (partition 2 bindings))))
+             (is (= 30 (let* [a 10 b 20] (+ a b))))))
+    ;; Reader conditional skips trailing forms once a branch matches (matches Clojure ConditionalReader)
+    (is (= 42 (read-string {:read-cond :allow} "#?(:clj 42 :cljs foo bar)")))
+    (is (thrown? Exception (read-string {:read-cond :allow} "#?(:cljs foo :clj)")))
+    ;; deref / @ and realized? on java.util.concurrent.Future / CompletableFuture (interp + JIT + timeout)
+    (let [cf (java.util.concurrent.CompletableFuture/completedFuture 42)]
+      (is (true? (realized? cf)))
+      (is (= 42 @cf))
+      (is (= 42 (deref cf)))
+      (is (= 42 (deref cf 50 :timeout)))
+      (let [hot (fn [f n]
+                  (loop [i 0 acc 0]
+                    (if (< i n)
+                      (recur (inc i) (+ acc @f))
+                      acc)))]
+        (is (= 4200 (hot cf 100)))))
+    (let [pending (java.util.concurrent.CompletableFuture.)]
+      (is (false? (realized? pending)))
+      (is (= :to (deref pending 5 :to)))
+      (.complete pending 99)
+      (is (true? (realized? pending)))
+      (is (= 99 @pending)))
+    ;; def / defn runtime evaluation of symbol metadata
+    (eval '(do
+             (def ^{:computed (+ 10 20) :ref #'inc :nested {:vars #{#'dec}}} __w6-mvar 7)
+             (let [m (meta #'__w6-mvar)]
+               (is (= 30 (:computed m)))
+               (is (= #'inc (:ref m)))
+               (is (every? var? (get-in m [:nested :vars]))))
+             (defn ^{:pass-info {:depends #{#'inc}}} __w6-mfn [x] x)
+             (let [m (meta #'__w6-mfn)]
+               (is (= '([x]) (:arglists m)))
+               (is (every? var? (get-in m [:pass-info :depends]))))
+             (defn __w6-custom-args {:arglists '([a] [a b])} [& xs] xs)
+             (is (= '([a] [a b]) (:arglists (meta #'__w6-custom-args))))))
+    ;; clojure.java.io IOFactory & Coercions protocols + default-streams-impl
+    (eval '(require '[clojure.java.io :as w6io]))
+    (eval '(do
+             (deftype W6MemSource [s])
+             (extend W6MemSource
+               w6io/IOFactory
+               (assoc w6io/default-streams-impl
+                 :make-input-stream (fn [^W6MemSource this _]
+                                      (java.io.ByteArrayInputStream. (.getBytes ^String (.s this) "UTF-8")))))
+             (let [src (W6MemSource. "hello-iofactory")]
+               (is (= "hello-iofactory" (with-open [r (w6io/reader src)] (.readLine r))))
+               (is (= "hello-iofactory" (with-open [is (w6io/input-stream src)]
+                                          (String. (.readAllBytes is) "UTF-8")))))))
+    ;; clojure.reflect Reflector / JavaReflector / records / :ancestors / array resolve-class
+    (eval '(require '[clojure.reflect :as w6ref]))
+    (eval '(do
+             (let [cl (clojure.lang.RT/baseLoader)
+                   r (w6ref/type-reflect String :ancestors true :reflector (w6ref/->JavaReflector cl))]
+               (is (contains? (:bases r) 'java.lang.Object))
+               (is (contains? (:bases r) 'java.lang.CharSequence))
+               (is (some #(instance? clojure.reflect.Method %) (:members r)))
+               (is (= (Class/forName "[I") (w6ref/resolve-class cl 'int<>)))
+               (is (= (Class/forName "[Ljava.lang.String;") (w6ref/resolve-class cl 'java.lang.String<>))))))
+    ;; RT/makeClassLoader
+    (is (instance? clojure.lang.DynamicClassLoader (clojure.lang.RT/makeClassLoader)))
+    ;; JIT-compiled (case sym ...) must use value equality, never identity (Symbol is not interned!)
+    (let [f (fn [x]
+              (case x
+                do :do
+                if :if
+                let* :let*
+                recur :recur
+                :other))]
+      (dotimes [_ 80]
+        (is (= :if (f (symbol "if"))))
+        (is (= :if (f (with-meta 'if {:line 99}))))
+        (is (= :let* (f (symbol "let*"))))
+        (is (= :other (f 'nope)))))
+    ;; let/loop/fn/when-let/doseq macroexpand-1 destructures at macro time so let* only sees symbols
+    (let [ex (macroexpand-1 '(let [[a b] xs] (+ a b)))]
+      (is (= 'let* (first ex)))
+      (is (every? symbol? (take-nth 2 (second ex)))))
+    (let [ex (macroexpand-1 '(loop [[a b] xs c (+ a 1)] (recur [a b] c)))]
+      (is (= 'let* (first ex)))
+      (is (every? symbol? (take-nth 2 (second ex)))))
+    (let [f (fn [[x y]] {:pre [(pos? x)] :post [(> % x)]} (+ x y))]
+      (is (= 7 (f [3 4])))
+      (is (thrown? AssertionError (f [-1 5])))
+      (is (thrown? AssertionError (f [3 -1]))))
+    ;; &env contains real Compiler$LocalBinding objects
+    (eval '(defmacro __w6-env-check [sym]
+             (let [lb (get &env sym)]
+               `[~(instance? clojure.lang.Compiler$LocalBinding lb)
+                 ~(.hasJavaClass ^clojure.lang.Compiler$LocalBinding lb)
+                 ~(.getJavaClass ^clojure.lang.Compiler$LocalBinding lb)])))
+    (eval '(let [^String s "hi"
+                 plain 42]
+             (is (= [true true java.lang.String] (__w6-env-check s)))
+             (is (= [true false nil] (__w6-env-check plain)))))
+    ;; Var/getThreadBindingFrame & resetThreadBindingFrame, Namespace/.getName, MapEquivalence, SeqIterator
+    (eval '(do
+             (def ^:dynamic __w6-dyn 1)
+             (let [captured (binding [__w6-dyn 99] (clojure.lang.Var/getThreadBindingFrame))
+                   prev (clojure.lang.Var/getThreadBindingFrame)]
+               (is (= 1 __w6-dyn))
+               (try
+                 (clojure.lang.Var/resetThreadBindingFrame captured)
+                 (is (= 99 __w6-dyn))
+                 (finally
+                   (clojure.lang.Var/resetThreadBindingFrame prev)))
+               (is (= 1 __w6-dyn)))))
+    (is (= 'clojure.core (.getName (find-ns 'clojure.core))))
+    (is (instance? clojure.lang.MapEquivalence {:a 1}))
+    (let [it (clojure.lang.SeqIterator. [10 20 30])]
+      (is (= [10 20 30] (vec (iterator-seq it)))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

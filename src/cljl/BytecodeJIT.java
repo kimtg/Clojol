@@ -244,7 +244,7 @@ public final class BytecodeJIT {
             for (Node e : sn.elems) if (!canCompileNode(e, false)) return false;
             return true;
         }
-        if (n instanceof DefNode dn) return canCompileNode(dn.init, false);
+        if (n instanceof DefNode dn) return canCompileNode(dn.init, false) && (dn.metaNode == null || canCompileNode(dn.metaNode, false));
         if (n instanceof DefMacroNode dm) return canCompileNode(dm.fnNode, false);
         if (n instanceof FnNode) return true;
         if (n instanceof VarCall0Node) return true;
@@ -4336,7 +4336,7 @@ public final class BytecodeJIT {
                 } else {
                     allLongs = false;
                 }
-                if (!(kv instanceof Keyword || kv instanceof Symbol)) {
+                if (!(kv instanceof Keyword)) {
                     allInterned = false;
                 }
                 if (kv instanceof Number) {
@@ -5017,6 +5017,12 @@ public final class BytecodeJIT {
                     emitBoxed(dn.init);
                     invokevirtual("cljl/Var", "bindRoot", "(Ljava/lang/Object;)Lcljl/Var;", 2, 1);
                     pop();
+                }
+                if (dn.metaNode != null) {
+                    dup();
+                    emitBoxed(dn.metaNode);
+                    checkcast("cljl/lang/PersistentHashMap");
+                    invokevirtual("cljl/Var", "mergeMeta", "(Lcljl/lang/PersistentHashMap;)V", 2, 0);
                 }
                 return false;
             }
@@ -5759,8 +5765,7 @@ public final class BytecodeJIT {
                     return false;
                 }
                 emitBoxed(dn.target);
-                checkcast("cljl/lang/IDeref");
-                invokeinterface("cljl/lang/IDeref", "deref", "()Ljava/lang/Object;", 1, 1);
+                invokestatic("cljl/RT", "deref", "(Ljava/lang/Object;)Ljava/lang/Object;", 1, 1);
                 return false;
             }
             if (node instanceof VresetNode vr) {

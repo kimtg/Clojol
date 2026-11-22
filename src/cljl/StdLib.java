@@ -557,10 +557,91 @@ public final class StdLib {
     private static synchronized void initJavaIo() {
         if (LOADED.contains("clojure.java.io")) return;
         Namespace ns = Namespace.findOrCreate("clojure.java.io");
-        ns.intern("as-file", Fn.of1("as-file", StdLib::asFileImpl));
-        ns.intern("as-url", Fn.of1("as-url", StdLib::asUrlImpl));
+        LOADED.add("clojure.java.io");
+        ns.intern("__as-file-default", Fn.of1("__as-file-default", StdLib::asFileImpl));
+        ns.intern("__as-url-default", Fn.of1("__as-url-default", StdLib::asUrlImpl));
+        ns.intern("__open-input-stream", Fn.of2("__open-input-stream", (x, opts) -> {
+            try {
+                return openInputStream(x);
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        }));
+        ns.intern("__open-output-stream", Fn.of2("__open-output-stream", (x, opts) -> {
+            try {
+                boolean append = opts instanceof Map<?, ?> m && RT.truthy(m.get(Keyword.intern("append")));
+                return openOutputStream(x, append);
+            } catch (IOException e) {
+                throw RT.sneakyThrow(e);
+            }
+        }));
+        ns.intern("__open-reader", Fn.of2("__open-reader", (x, opts) -> {
+            try {
+                if (x instanceof java.io.Reader r) return r instanceof BufferedReader ? r : new BufferedReader(r);
+                java.nio.charset.Charset cs = charsetFromOpts(opts);
+                InputStream is = (InputStream) ns.findInternedVar(Symbol.intern("make-input-stream")).invoke(x, opts);
+                return new BufferedReader(new InputStreamReader(is, cs));
+            } catch (Exception e) {
+                throw RT.sneakyThrow(e);
+            }
+        }));
+        ns.intern("__open-writer", Fn.of2("__open-writer", (x, opts) -> {
+            try {
+                if (x instanceof Writer w) return w instanceof BufferedWriter ? w : new BufferedWriter(w);
+                java.nio.charset.Charset cs = charsetFromOpts(opts);
+                OutputStream os = (OutputStream) ns.findInternedVar(Symbol.intern("make-output-stream")).invoke(x, opts);
+                return new BufferedWriter(new OutputStreamWriter(os, cs));
+            } catch (Exception e) {
+                throw RT.sneakyThrow(e);
+            }
+        }));
+        Var.pushThreadBindings(Map.of(RT.CURRENT_NS, ns));
+        try {
+            Compiler.load("""
+                (defprotocol Coercions
+                  (as-file [x] "Coerce argument to a file.")
+                  (as-url [x] "Coerce argument to a URL."))
+                (extend-protocol Coercions
+                  nil
+                  (as-file [_] nil)
+                  (as-url [_] nil)
+                  Object
+                  (as-file [x] (__as-file-default x))
+                  (as-url [x] (__as-url-default x)))
+                (defprotocol IOFactory
+                  (make-reader [x opts] "Creates a BufferedReader.")
+                  (make-writer [x opts] "Creates a BufferedWriter.")
+                  (make-input-stream [x opts] "Creates a BufferedInputStream.")
+                  (make-output-stream [x opts] "Creates a BufferedOutputStream."))
+                (def default-streams-impl
+                  {:make-reader (fn [x opts] (__open-reader (make-input-stream x opts) opts))
+                   :make-writer (fn [x opts] (__open-writer (make-output-stream x opts) opts))
+                   :make-input-stream (fn [x opts]
+                                        (throw (IllegalArgumentException.
+                                                 (str "Cannot open <" (pr-str x) "> as an InputStream."))))
+                   :make-output-stream (fn [x opts]
+                                         (throw (IllegalArgumentException.
+                                                  (str "Cannot open <" (pr-str x) "> as an OutputStream."))))})
+                (extend-protocol IOFactory
+                  Object
+                  (make-reader [x opts] (__open-reader x opts))
+                  (make-writer [x opts] (__open-writer x opts))
+                  (make-input-stream [x opts] (__open-input-stream x opts))
+                  (make-output-stream [x opts] (__open-output-stream x opts)))
+                (defn input-stream [x & opts]
+                  (make-input-stream x (when (seq opts) (apply hash-map opts))))
+                (defn output-stream [x & opts]
+                  (make-output-stream x (when (seq opts) (apply hash-map opts))))
+                (defn reader [x & opts]
+                  (make-reader x (when (seq opts) (apply hash-map opts))))
+                (defn writer [x & opts]
+                  (make-writer x (when (seq opts) (apply hash-map opts))))
+                """, "clojure/java/io.clj");
+        } finally {
+            Var.popThreadBindings();
+        }
         ns.intern("as-relative-path", Fn.of1("as-relative-path", x -> {
-            File f = asFileImpl(x);
+            File f = (File) ns.findInternedVar(Symbol.intern("as-file")).invoke(x);
             if (f == null) throw new IllegalArgumentException("Cannot coerce to File: null");
             if (f.isAbsolute()) throw new IllegalArgumentException(f + " is not a relative path");
             return f.getPath();
@@ -569,50 +650,18 @@ public final class StdLib {
                 n -> RT.baseLoader().getResource(n.toString()),
                 (n, loader) -> ((ClassLoader) loader).getResource(n.toString())));
         ns.intern("file", Fn.ofVarargs("file", args -> {
-            if (args.length == 1) return asFileImpl(args[0]);
-            File f = asFileImpl(args[0]);
+            Var asFileVar = ns.findInternedVar(Symbol.intern("as-file"));
+            if (args.length == 1) return asFileVar.invoke(args[0]);
+            File f = (File) asFileVar.invoke(args[0]);
             for (int i = 1; i < args.length; i++) f = new File(f, args[i].toString());
             return f;
         }));
         ns.intern("make-parents", Fn.ofVarargs("make-parents", args -> {
-            File f = asFileImpl(args[0]);
+            Var asFileVar = ns.findInternedVar(Symbol.intern("as-file"));
+            File f = (File) asFileVar.invoke(args[0]);
             for (int i = 1; i < args.length; i++) f = new File(f, args[i].toString());
             File parent = f != null ? f.getParentFile() : null;
             return parent != null ? parent.mkdirs() : Boolean.FALSE;
-        }));
-        ns.intern("input-stream", Fn.ofVarargs("input-stream", args -> {
-            try {
-                return openInputStream(args[0]);
-            } catch (IOException e) {
-                throw RT.sneakyThrow(e);
-            }
-        }));
-        ns.intern("output-stream", Fn.ofVarargs("output-stream", args -> {
-            try {
-                boolean append = hasAppendOpt(args, 1);
-                return openOutputStream(args[0], append);
-            } catch (IOException e) {
-                throw RT.sneakyThrow(e);
-            }
-        }));
-        ns.intern("reader", Fn.ofVarargs("reader", args -> {
-            try {
-                Object x = args[0];
-                if (x instanceof java.io.Reader r) return r instanceof BufferedReader ? r : new BufferedReader(r);
-                return new BufferedReader(new InputStreamReader(openInputStream(x), StandardCharsets.UTF_8));
-            } catch (IOException e) {
-                throw RT.sneakyThrow(e);
-            }
-        }));
-        ns.intern("writer", Fn.ofVarargs("writer", args -> {
-            try {
-                Object x = args[0];
-                if (x instanceof Writer w) return w instanceof BufferedWriter ? w : new BufferedWriter(w);
-                boolean append = hasAppendOpt(args, 1);
-                return new BufferedWriter(new OutputStreamWriter(openOutputStream(x, append), StandardCharsets.UTF_8));
-            } catch (IOException e) {
-                throw RT.sneakyThrow(e);
-            }
         }));
         ns.intern("copy", Fn.ofVarargs("copy", args -> {
             try {
@@ -678,7 +727,10 @@ public final class StdLib {
                     }
                     return null;
                 }
-                try (InputStream is = openInputStream(in); OutputStream os = openOutputStream(out, false)) {
+                Var mis = ns.findInternedVar(Symbol.intern("make-input-stream"));
+                Var mos = ns.findInternedVar(Symbol.intern("make-output-stream"));
+                try (InputStream is = (InputStream) mis.invoke(in, null);
+                     OutputStream os = (OutputStream) mos.invoke(out, null)) {
                     byte[] buf = new byte[bufSize];
                     int n;
                     while ((n = is.read(buf)) >= 0) os.write(buf, 0, n);
@@ -705,7 +757,14 @@ public final class StdLib {
                     }
                     return Boolean.TRUE;
                 }));
-        LOADED.add("clojure.java.io");
+    }
+
+    private static java.nio.charset.Charset charsetFromOpts(Object opts) {
+        if (opts instanceof Map<?, ?> m) {
+            Object enc = m.get(Keyword.intern("encoding"));
+            if (enc != null) return java.nio.charset.Charset.forName(enc.toString());
+        }
+        return StandardCharsets.UTF_8;
     }
 
     private static File asFileImpl(Object x) {

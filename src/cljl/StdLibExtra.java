@@ -326,32 +326,109 @@ public final class StdLibExtra {
 
     public static void initReflect() {
         Namespace ns = Namespace.findOrCreate("clojure.reflect");
+        Core.markLibLoaded("clojure.reflect");
 
-        ns.intern("typename", Fn.of1("typename", o -> {
+        ns.intern("__type-name-of", Fn.of1("__type-name-of", o -> {
             if (o instanceof Class<?> c) return typeNameOf(c);
             return String.valueOf(o);
         }));
 
         ns.intern("resolve-class", Fn.of2("resolve-class", (cl, sym) -> {
             String name = String.valueOf(sym);
-            return Interop.findClass(name);
+            return resolveReflectClass(cl instanceof ClassLoader loader ? loader : RT.baseLoader(), name);
         }));
 
-        Fn typeReflectFn = Fn.ofVarargs("type-reflect", args -> {
-            if (args.length == 0) throw new IllegalArgumentException("type-reflect requires a class");
-            Class<?> cls = args[0] instanceof Class<?> c ? c : args[0].getClass();
-            return reflectClass(cls);
-        });
-        ns.intern("type-reflect", typeReflectFn);
-
-        ns.intern("reflect", Fn.ofVarargs("reflect", args -> {
-            if (args.length == 0) throw new IllegalArgumentException("reflect requires an object or class");
-            Object obj = args[0];
-            Class<?> cls = obj instanceof Class<?> c ? c : obj.getClass();
-            return reflectClass(cls);
+        ns.intern("__reflect-class", Fn.of2("__reflect-class", (clObj, typeref) -> {
+            ClassLoader loader = clObj instanceof ClassLoader cl ? cl : RT.baseLoader();
+            Class<?> cls = typeref instanceof Class<?> c ? c : resolveReflectClass(loader, String.valueOf(typeref));
+            if (cls == null) throw new RuntimeException("Could not resolve class: " + typeref);
+            return reflectClass(ns, cls);
         }));
 
-        Core.markLibLoaded("clojure.reflect");
+        Var.pushThreadBindings(Map.of(RT.CURRENT_NS, ns));
+        try {
+            Compiler.load("""
+                (defprotocol TypeReference
+                  (typename [o] "Returns Java type name string for o."))
+                (extend-protocol TypeReference
+                  Class
+                  (typename [c] (__type-name-of c))
+                  Object
+                  (typename [o] (str o)))
+                (defprotocol Reflector
+                  (do-reflect [reflector typeref]))
+                (defrecord Constructor [name declaring-class parameter-types exception-types flags])
+                (defrecord Method [name return-type declaring-class parameter-types exception-types flags])
+                (defrecord Field [name type declaring-class flags])
+                (defrecord JavaReflector [classloader]
+                  Reflector
+                  (do-reflect [_ typeref]
+                    (__reflect-class classloader typeref)))
+                (def default-reflector (->JavaReflector (clojure.lang.RT/baseLoader)))
+                (defn type-reflect [typeref & options]
+                  (let [{:keys [ancestors reflector] :or {reflector default-reflector}}
+                        (when (seq options) (apply hash-map options))
+                        res (do-reflect reflector typeref)]
+                    (if-not ancestors
+                      res
+                      (loop [queue (vec (:bases res))
+                             seen #{(symbol (typename typeref))}
+                             all-bases (set (:bases res))
+                             all-members (set (:members res))]
+                        (if (empty? queue)
+                          (assoc res :bases all-bases :members all-members)
+                          (let [b (peek queue)
+                                q (pop queue)]
+                            (if (contains? seen b)
+                              (recur q seen all-bases all-members)
+                              (let [r (try (do-reflect reflector b) (catch Throwable _ nil))]
+                                (if r
+                                  (recur (into q (:bases r))
+                                         (conj seen b)
+                                         (into all-bases (:bases r))
+                                         (into all-members (:members r)))
+                                  (recur q (conj seen b) all-bases all-members))))))))))
+                (defn reflect [obj & options]
+                  (apply type-reflect (if (class? obj) obj (class obj)) options))
+                """, "clojure/reflect.clj");
+        } finally {
+            Var.popThreadBindings();
+        }
+    }
+
+    private static Class<?> resolveReflectClass(ClassLoader loader, String name) {
+        if (name == null) return null;
+        int arrayDims = 0;
+        while (name.endsWith("<>")) {
+            arrayDims++;
+            name = name.substring(0, name.length() - 2);
+        }
+        Class<?> base = switch (name) {
+            case "boolean" -> boolean.class;
+            case "byte" -> byte.class;
+            case "short" -> short.class;
+            case "char" -> char.class;
+            case "int" -> int.class;
+            case "long" -> long.class;
+            case "float" -> float.class;
+            case "double" -> double.class;
+            case "void" -> void.class;
+            default -> {
+                Class<?> c = Interop.findClass(name);
+                if (c != null) yield c;
+                try {
+                    yield Class.forName(name, false, loader);
+                } catch (ClassNotFoundException e) {
+                    yield null;
+                }
+            }
+        };
+        if (base == null || arrayDims == 0) return base;
+        Class<?> arr = base;
+        for (int i = 0; i < arrayDims; i++) {
+            arr = java.lang.reflect.Array.newInstance(arr, 0).getClass();
+        }
+        return arr;
     }
 
     private static String typeNameOf(Class<?> c) {
@@ -381,36 +458,39 @@ public final class StdLibExtra {
         return PersistentVector.createOwning(out);
     }
 
-    private static PersistentHashMap reflectClass(Class<?> cls) {
+    private static PersistentHashMap reflectClass(Namespace ns, Class<?> cls) {
         List<Object> bases = new ArrayList<>();
         if (cls.getSuperclass() != null) bases.add(Symbol.intern(cls.getSuperclass().getName()));
         for (Class<?> iface : cls.getInterfaces()) bases.add(Symbol.intern(iface.getName()));
 
+        Fn mkCtor = (Fn) ns.findInternedVar(Symbol.intern("->Constructor")).deref();
+        Fn mkMethod = (Fn) ns.findInternedVar(Symbol.intern("->Method")).deref();
+        Fn mkField = (Fn) ns.findInternedVar(Symbol.intern("->Field")).deref();
+
         List<Object> members = new ArrayList<>();
         Symbol declCls = Symbol.intern(cls.getName());
         for (Constructor<?> c : cls.getDeclaredConstructors()) {
-            members.add(PersistentHashMap.create(
-                    Keyword.intern("name"), declCls,
-                    Keyword.intern("declaring-class"), declCls,
-                    Keyword.intern("parameter-types"), classSymVec(c.getParameterTypes()),
-                    Keyword.intern("exception-types"), classSymVec(c.getExceptionTypes()),
-                    Keyword.intern("flags"), modifierFlags(c.getModifiers())));
+            members.add(mkCtor.applyTo(new Object[]{
+                    declCls, declCls,
+                    classSymVec(c.getParameterTypes()),
+                    classSymVec(c.getExceptionTypes()),
+                    modifierFlags(c.getModifiers())}));
         }
         for (Method m : cls.getDeclaredMethods()) {
-            members.add(PersistentHashMap.create(
-                    Keyword.intern("name"), Symbol.intern(m.getName()),
-                    Keyword.intern("return-type"), Symbol.intern(typeNameOf(m.getReturnType())),
-                    Keyword.intern("declaring-class"), declCls,
-                    Keyword.intern("parameter-types"), classSymVec(m.getParameterTypes()),
-                    Keyword.intern("exception-types"), classSymVec(m.getExceptionTypes()),
-                    Keyword.intern("flags"), modifierFlags(m.getModifiers())));
+            members.add(mkMethod.applyTo(new Object[]{
+                    Symbol.intern(m.getName()),
+                    Symbol.intern(typeNameOf(m.getReturnType())),
+                    declCls,
+                    classSymVec(m.getParameterTypes()),
+                    classSymVec(m.getExceptionTypes()),
+                    modifierFlags(m.getModifiers())}));
         }
         for (Field f : cls.getDeclaredFields()) {
-            members.add(PersistentHashMap.create(
-                    Keyword.intern("name"), Symbol.intern(f.getName()),
-                    Keyword.intern("type"), Symbol.intern(typeNameOf(f.getType())),
-                    Keyword.intern("declaring-class"), declCls,
-                    Keyword.intern("flags"), modifierFlags(f.getModifiers())));
+            members.add(mkField.applyTo(new Object[]{
+                    Symbol.intern(f.getName()),
+                    Symbol.intern(typeNameOf(f.getType())),
+                    declCls,
+                    modifierFlags(f.getModifiers())}));
         }
 
         return PersistentHashMap.create(

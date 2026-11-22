@@ -3243,7 +3243,8 @@ public final class CoreExtras {
                     }
                     Keyword mk = Keyword.intern(mname.name);
                     PersistentHashMap meta = PersistentHashMap.EMPTY
-                            .assoc(Keyword.intern("arglists"), PersistentList.create(arglists));
+                            .assoc(Keyword.intern("arglists"), PersistentList.createFromArray(
+                                    Symbol.intern("quote"), PersistentList.create(arglists)));
                     if (mdoc != null) meta = meta.assoc(Keyword.intern("doc"), mdoc);
                     Symbol mnameWithMeta = mname.withMeta(meta);
                     methodDefForms.add(PersistentList.createFromArray(

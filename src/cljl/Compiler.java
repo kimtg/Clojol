@@ -86,8 +86,38 @@ public final class Compiler {
         public final Symbol sym;
         public final Symbol tag;
         public final Expr init;
+        public final String name;
+        public final boolean isArg;
+        private final Class<?> javaClass;
+
         public LocalBinding(int idx, Symbol sym, Symbol tag, Expr init) {
-            this.idx = idx; this.sym = sym; this.tag = tag; this.init = init;
+            this(idx, sym, tag, init, false);
+        }
+
+        public LocalBinding(int idx, Symbol sym, Symbol tag, Expr init, boolean isArg) {
+            this.idx = idx;
+            this.sym = sym;
+            this.tag = tag;
+            this.init = init;
+            this.name = sym != null ? munge(sym.name) : null;
+            this.isArg = isArg;
+            Class<?> jc = null;
+            if (tag != null) {
+                jc = Interop.resolveClass(RT.currentNS(), tag.toString());
+            }
+            this.javaClass = jc;
+        }
+
+        public boolean hasJavaClass() {
+            return javaClass != null;
+        }
+
+        public Class<?> getJavaClass() {
+            return javaClass;
+        }
+
+        public Class<?> getPrimitiveType() {
+            return (javaClass != null && javaClass.isPrimitive()) ? javaClass : null;
         }
     }
 
@@ -551,6 +581,7 @@ public final class Compiler {
         final Map<Symbol, Integer> capturedBySymbol = new HashMap<>();
         final List<Integer> capturedParentSlots = new ArrayList<>();
         final List<ValType> slotHints = new ArrayList<>();
+        final List<Symbol> slotTags = new ArrayList<>();
         final Set<Integer> staticDoubleSlots = new HashSet<>();
         final Deque<int[]> recurTargets = new ArrayDeque<>();
         int maxSlots = 0;
@@ -583,6 +614,13 @@ public final class Compiler {
         int allocateSlot(Symbol sym) {
             int slot = maxSlots++;
             slotHints.add(extractTagHint(sym));
+            Symbol tagSym = null;
+            if (sym != null && sym.meta() != null) {
+                Object tagObj = sym.meta().valAt(TAG_KW);
+                if (tagObj instanceof Symbol ts) tagSym = ts;
+                else if (tagObj instanceof String s) tagSym = Symbol.intern(s);
+            }
+            slotTags.add(tagSym);
             if (sym != null) {
                 blockStack.get(blockStack.size() - 1).put(sym.withMeta(null), slot);
             }
@@ -605,6 +643,7 @@ public final class Compiler {
                     ValType parentHint = parentSlot < parent.slotHints.size()
                             ? parent.slotHints.get(parentSlot) : ValType.ANY;
                     slotHints.add(parentHint);
+                    slotTags.add(parentSlot < parent.slotTags.size() ? parent.slotTags.get(parentSlot) : null);
                     capturedBySymbol.put(key, mySlot);
                     capturedParentSlots.add(parentSlot);
                     if (parent.staticDoubleSlots.contains(parentSlot)) {
@@ -619,11 +658,15 @@ public final class Compiler {
         PersistentHashMap lexicalEnvMap() {
             PersistentHashMap env = PersistentHashMap.EMPTY;
             for (Scope cur = this; cur != null; cur = cur.parent) {
-                for (Map<Symbol, Integer> block : cur.blockStack) {
+                for (int bi = cur.blockStack.size() - 1; bi >= 0; bi--) {
+                    Map<Symbol, Integer> block = cur.blockStack.get(bi);
                     for (Map.Entry<Symbol, Integer> e : block.entrySet()) {
-                        if (e.getValue() == cur.selfSlot) continue;
-                        if (!env.containsKey(e.getKey())) {
-                            env = env.assoc(e.getKey(), Boolean.TRUE);
+                        int slot = e.getValue();
+                        if (slot == cur.selfSlot) continue;
+                        Symbol sym = e.getKey();
+                        if (!env.containsKey(sym)) {
+                            Symbol tagSym = (slot >= 0 && slot < cur.slotTags.size()) ? cur.slotTags.get(slot) : null;
+                            env = env.assoc(sym, new LocalBinding(slot, sym, tagSym, null));
                         }
                     }
                 }
@@ -843,9 +886,8 @@ public final class Compiler {
         ISeq args = s.next();
 
         if (op instanceof Symbol sym) {
-            // If not shadowed by a local variable, check special forms and intrinsics
-            boolean shadowed = (sym.ns == null && scope != null && scope.resolveLocal(sym) != -1);
-            if (!shadowed && sym.ns == null) {
+            // Special forms are never shadowed by local variables in operator position (matches Clojure)
+            if (sym.ns == null) {
                 switch (sym.name) {
                     case "quote" -> {
                         return new ConstNode(RT.first(args));
@@ -911,6 +953,7 @@ public final class Compiler {
                     }
                 }
             }
+            boolean shadowed = (sym.ns == null && scope != null && scope.resolveLocal(sym) != -1);
 
             // Check if this is a static/qualified method or constructor call (Class/method, Class/.method, Class/new)
             if (!shadowed && sym.ns != null) {
@@ -1013,6 +1056,51 @@ public final class Compiler {
         };
     }
 
+    private static boolean hasEvaluatableForm(Object o) {
+        if (o instanceof ISeq || o instanceof Symbol) return true;
+        if (o instanceof PersistentVector pv) {
+            for (int i = 0; i < pv.count(); i++) {
+                if (hasEvaluatableForm(pv.nth(i))) return true;
+            }
+            return false;
+        }
+        if (o instanceof PersistentHashMap pm) {
+            for (ISeq s = pm.seq(); s != null; s = s.next()) {
+                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+                if (hasEvaluatableForm(me.key) || hasEvaluatableForm(me.val)) return true;
+            }
+            return false;
+        }
+        if (o instanceof PersistentHashSet ps) {
+            for (ISeq s = ps.seq(); s != null; s = s.next()) {
+                if (hasEvaluatableForm(s.first())) return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    private static Node compileDynamicMeta(PersistentHashMap rawMeta, Scope scope) {
+        if (rawMeta == null || rawMeta.count() == 0) return null;
+        PersistentHashMap evalMap = PersistentHashMap.EMPTY;
+        for (ISeq s = rawMeta.seq(); s != null; s = s.next()) {
+            PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
+            Object k = me.key;
+            if (k instanceof Keyword kw) {
+                String kn = kw.getName();
+                if (kw.getNamespace() == null && ("line".equals(kn) || "column".equals(kn) || "file".equals(kn)
+                        || "ns".equals(kn) || "name".equals(kn) || "doc".equals(kn) || "tag".equals(kn))) {
+                    continue;
+                }
+            }
+            if (hasEvaluatableForm(k) || hasEvaluatableForm(me.val)) {
+                evalMap = evalMap.assoc(k, me.val);
+            }
+        }
+        if (evalMap.count() == 0) return null;
+        return compile(evalMap, scope, false);
+    }
+
     private static Node compileDef(ISeq args, Scope scope) {
         Integer defLine = CURRENT_LINE.get();
         Object fileObj = RT.FILE.get();
@@ -1034,6 +1122,7 @@ public final class Compiler {
         if (initNode instanceof ConstNode cn && cn.val instanceof CompiledFn cfn) {
             cfn.setOwnerVar(v);
         }
+        Node metaNode = compileDynamicMeta(symMeta, scope);
         PersistentHashMap meta = v.meta()
                 .assoc(Keyword.intern("ns"), ns)
                 .assoc(Keyword.intern("name"), sym.withMeta(null));
@@ -1047,7 +1136,7 @@ public final class Compiler {
             meta = meta.assoc(FILE_KW, fileObj.toString());
         }
         v.setMeta(meta);
-        return new DefNode(v, initNode);
+        return new DefNode(v, initNode, metaNode);
     }
 
     private static Node compileIf(ISeq args, Scope scope, boolean inTail) {
@@ -1781,7 +1870,13 @@ public final class Compiler {
     public static final class DefNode extends Node {
         public final Var var;
         public final Node init;
-        public DefNode(Var var, Node init) { this.var = var; this.init = init; }
+        public final Node metaNode;
+        public DefNode(Var var, Node init) { this(var, init, null); }
+        public DefNode(Var var, Node init, Node metaNode) {
+            this.var = var;
+            this.init = init;
+            this.metaNode = metaNode;
+        }
         @Override
         public Object eval(Object[] frame) {
             if (init != null) {
@@ -1790,6 +1885,12 @@ public final class Compiler {
                     cfn.setOwnerVar(var);
                 }
                 var.bindRoot(val);
+            }
+            if (metaNode != null) {
+                Object mv = metaNode.eval(frame);
+                if (mv instanceof PersistentHashMap pm) {
+                    var.mergeMeta(pm);
+                }
             }
             return var;
         }
@@ -3448,7 +3549,7 @@ public final class Compiler {
     public static final class DerefNode extends Node {
         public final Node target;
         public DerefNode(Node target) { this.target = target; }
-        @Override public Object eval(Object[] frame) { return ((IDeref) target.eval(frame)).deref(); }
+        @Override public Object eval(Object[] frame) { return RT.deref(target.eval(frame)); }
     }
 
     public static final class VresetNode extends Node {

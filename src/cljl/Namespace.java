@@ -341,6 +341,10 @@ public final class Namespace implements IMeta, IReference {
         }
     }
 
+    public Symbol getName() {
+        return name;
+    }
+
     public Map<Symbol, Object> getMappings() {
         materializeIfNeeded();
         return mappings;

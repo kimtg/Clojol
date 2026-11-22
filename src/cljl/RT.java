@@ -168,6 +168,10 @@ public final class RT {
         return ctx != null ? ctx : RT.class.getClassLoader();
     }
 
+    public static ClassLoader makeClassLoader() {
+        return new TypeFactory.DynamicClassLoader(baseLoader());
+    }
+
     public static boolean hasCustomRuntimeLoader() {
         return runtimeClassLoader != null;
     }
@@ -571,6 +575,34 @@ public final class RT {
         if (coll instanceof PersistentList.EmptyList el) return el.pop();
         if (coll instanceof PersistentColl pc) return pc.pop();
         throw new IllegalArgumentException("pop not supported on: " + coll.getClass().getName());
+    }
+
+    public static Object deref(Object ref) {
+        if (ref instanceof IDeref d) return d.deref();
+        if (ref instanceof java.util.concurrent.Future<?> f) {
+            try {
+                return f.get();
+            } catch (Exception e) {
+                throw sneakyThrow(e);
+            }
+        }
+        throw new ClassCastException(
+                (ref == null ? "null" : ref.getClass().getName()) + " cannot be cast to clojure.lang.IDeref");
+    }
+
+    public static Object deref(Object ref, long timeoutMs, Object timeoutVal) {
+        if (ref instanceof IDeref d) return d.deref(timeoutMs, timeoutVal);
+        if (ref instanceof java.util.concurrent.Future<?> f) {
+            try {
+                return f.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.TimeoutException e) {
+                return timeoutVal;
+            } catch (Exception e) {
+                throw sneakyThrow(e);
+            }
+        }
+        throw new ClassCastException(
+                (ref == null ? "null" : ref.getClass().getName()) + " cannot be cast to clojure.lang.IDeref");
     }
 
     public static Object transientColl(Object coll) {

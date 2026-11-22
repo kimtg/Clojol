@@ -105,6 +105,7 @@ public final class Core {
             idx++;
         }
         int endIdx = args.length;
+        Keyword arglistsKw = Keyword.intern("arglists");
         if (idx < endIdx && !(args[idx] instanceof PersistentVector)) {
             if (args[endIdx - 1] instanceof PersistentHashMap tailAttr) {
                 for (ISeq s = tailAttr.seq(); s != null; s = s.next()) {
@@ -113,24 +114,198 @@ public final class Core {
                 }
                 endIdx--;
             }
-            List<Object> arglists = new ArrayList<>();
-            for (int i = idx; i < endIdx; i++) {
-                if (args[i] instanceof ISeq clause && clause.first() != null) {
-                    arglists.add(clause.first());
+            if (!meta.containsKey(arglistsKw)) {
+                List<Object> arglists = new ArrayList<>();
+                for (int i = idx; i < endIdx; i++) {
+                    if (args[i] instanceof ISeq clause && clause.first() != null) {
+                        arglists.add(clause.first());
+                    }
+                }
+                if (!arglists.isEmpty()) {
+                    meta = meta.assoc(arglistsKw, PersistentList.createFromArray(quoteSym, PersistentList.create(arglists)));
                 }
             }
-            if (!arglists.isEmpty()) {
-                meta = meta.assoc(Keyword.intern("arglists"), PersistentList.create(arglists));
-            }
         } else if (idx < endIdx && args[idx] instanceof PersistentVector paramsVec) {
-            meta = meta.assoc(Keyword.intern("arglists"), PersistentList.createFromArray(paramsVec));
+            if (!meta.containsKey(arglistsKw)) {
+                meta = meta.assoc(arglistsKw, PersistentList.createFromArray(quoteSym, PersistentList.createFromArray(paramsVec)));
+            }
         }
         Symbol namedSym = meta.count() > 0 ? name.withMeta(meta) : name;
-        List<Object> fnArgs = new ArrayList<>();
-        fnArgs.add(Symbol.intern("fn*"));
-        fnArgs.add(name);
-        for (int i = idx; i < endIdx; i++) fnArgs.add(args[i]);
-        return PersistentList.createFromArray(Symbol.intern("def"), namedSym, PersistentList.create(fnArgs));
+        Object[] fnSpec = new Object[1 + (endIdx - idx)];
+        fnSpec[0] = name;
+        for (int i = idx; i < endIdx; i++) fnSpec[1 + (i - idx)] = args[i];
+        return PersistentList.createFromArray(Symbol.intern("def"), namedSym, expandFn(fnSpec));
+    }
+
+    private static Object expandLet(Object[] args) {
+        if (args.length < 1 || !(args[0] instanceof PersistentVector rawBindings)) {
+            throw new IllegalArgumentException("let requires a vector for its binding");
+        }
+        PersistentVector bindings = Compiler.destructure(rawBindings);
+        List<Object> list = new ArrayList<>(args.length + 1);
+        list.add(letStar);
+        list.add(bindings);
+        for (int i = 1; i < args.length; i++) list.add(args[i]);
+        return PersistentList.create(list);
+    }
+
+    private static Object expandLoop(Object[] args) {
+        if (args.length < 1 || !(args[0] instanceof PersistentVector rawBindings)) {
+            throw new IllegalArgumentException("loop requires a vector for its binding");
+        }
+        if ((rawBindings.count() & 1) != 0) {
+            throw new IllegalArgumentException("loop requires an even number of forms in binding vector");
+        }
+        boolean hasComplex = false;
+        for (int i = 0; i < rawBindings.count(); i += 2) {
+            if (!(rawBindings.nth(i) instanceof Symbol)) {
+                hasComplex = true;
+                break;
+            }
+        }
+        if (!hasComplex) {
+            List<Object> list = new ArrayList<>(args.length + 1);
+            list.add(loopStar);
+            Collections.addAll(list, args);
+            return PersistentList.create(list);
+        }
+        List<Object> outerLet = new ArrayList<>();
+        List<Object> loopBindings = new ArrayList<>();
+        List<Object> innerLet = new ArrayList<>();
+        for (int i = 0; i < rawBindings.count(); i += 2) {
+            Object pat = rawBindings.nth(i);
+            Object init = rawBindings.nth(i + 1);
+            if (pat instanceof Symbol sym) {
+                outerLet.add(sym);
+                outerLet.add(init);
+                loopBindings.add(sym);
+                loopBindings.add(sym);
+            } else {
+                Symbol g = Symbol.intern("loop__" + RT.nextID());
+                outerLet.add(g);
+                outerLet.add(init);
+                outerLet.add(pat);
+                outerLet.add(g);
+                loopBindings.add(g);
+                loopBindings.add(g);
+                innerLet.add(pat);
+                innerLet.add(g);
+            }
+        }
+        List<Object> innerBody = new ArrayList<>(args.length + 1);
+        innerBody.add(letStar);
+        innerBody.add(Compiler.destructure(PersistentVector.create(innerLet)));
+        for (int i = 1; i < args.length; i++) innerBody.add(args[i]);
+        Object loopForm = PersistentList.createFromArray(
+                loopStar,
+                PersistentVector.create(loopBindings),
+                PersistentList.create(innerBody));
+        return PersistentList.createFromArray(
+                letStar,
+                Compiler.destructure(PersistentVector.create(outerLet)),
+                loopForm);
+    }
+
+    private static ISeq expandFnArity(PersistentVector rawParams, ISeq bodyForms) {
+        boolean hasComplex = false;
+        for (int i = 0; i < rawParams.count(); i++) {
+            Object p = rawParams.nth(i);
+            if (!(p instanceof Symbol)) {
+                hasComplex = true;
+                break;
+            }
+        }
+        if (!hasComplex) {
+            return RT.cons(rawParams, bodyForms);
+        }
+        List<Object> newParams = new ArrayList<>(rawParams.count());
+        List<Object> destructurePairs = new ArrayList<>();
+        for (int i = 0; i < rawParams.count(); i++) {
+            Object p = rawParams.nth(i);
+            if (p instanceof Symbol s && "&".equals(s.name)) {
+                newParams.add(s);
+                if (i + 1 < rawParams.count()) {
+                    Object restPat = rawParams.nth(++i);
+                    if (restPat instanceof Symbol rs) {
+                        newParams.add(rs);
+                    } else {
+                        Symbol g = Symbol.intern("p__" + RT.nextID());
+                        newParams.add(g);
+                        destructurePairs.add(restPat);
+                        destructurePairs.add(g);
+                    }
+                }
+            } else if (p instanceof Symbol s) {
+                newParams.add(s);
+            } else {
+                Symbol g = Symbol.intern("p__" + RT.nextID());
+                newParams.add(g);
+                destructurePairs.add(p);
+                destructurePairs.add(g);
+            }
+        }
+        // Handle :pre / :post condition map before wrapping in let* so :pre/:post see destructured locals
+        if (bodyForms != null && bodyForms.first() instanceof PersistentHashMap condMap && bodyForms.next() != null) {
+            Object preConds = condMap.valAt(Keyword.intern("pre"));
+            Object postConds = condMap.valAt(Keyword.intern("post"));
+            if (preConds != null || postConds != null) {
+                ISeq actualBody = bodyForms.next();
+                Object innerExpr = (actualBody.next() == null) ? actualBody.first() : RT.cons(doSym, actualBody);
+                if (postConds != null) {
+                    Symbol retSym = Symbol.intern("%");
+                    List<Object> postBody = new ArrayList<>();
+                    for (ISeq ps = RT.seq(postConds); ps != null; ps = ps.next()) {
+                        postBody.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "assert"), ps.first()));
+                    }
+                    postBody.add(retSym);
+                    innerExpr = RT.cons(letStar, RT.cons(
+                            PersistentVector.createOwning(retSym, innerExpr),
+                            PersistentList.create(postBody)));
+                }
+                if (preConds != null) {
+                    List<Object> preList = new ArrayList<>();
+                    for (ISeq ps = RT.seq(preConds); ps != null; ps = ps.next()) {
+                        preList.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "assert"), ps.first()));
+                    }
+                    preList.add(innerExpr);
+                    bodyForms = PersistentList.create(preList);
+                } else {
+                    bodyForms = PersistentList.createFromArray(innerExpr);
+                }
+            }
+        }
+        PersistentVector paramsVec = PersistentVector.create(newParams);
+        if (rawParams.meta() != null) paramsVec = paramsVec.withMeta(rawParams.meta());
+        PersistentVector db = Compiler.destructure(PersistentVector.create(destructurePairs));
+        Object wrapped = RT.cons(letStar, RT.cons(db, bodyForms));
+        return PersistentList.createFromArray(paramsVec, wrapped);
+    }
+
+    private static Object expandFn(Object[] args) {
+        int idx = 0;
+        Symbol name = null;
+        if (idx < args.length && args[idx] instanceof Symbol s) {
+            name = s;
+            idx++;
+        }
+        List<Object> out = new ArrayList<>(args.length + 1);
+        out.add(fnStar);
+        if (name != null) out.add(name);
+        if (idx < args.length && args[idx] instanceof PersistentVector rawParams) {
+            List<Object> body = new ArrayList<>();
+            for (int i = idx + 1; i < args.length; i++) body.add(args[i]);
+            ISeq expanded = expandFnArity(rawParams, PersistentList.create(body));
+            for (ISeq s = expanded; s != null; s = s.next()) out.add(s.first());
+        } else {
+            for (int i = idx; i < args.length; i++) {
+                if (args[i] instanceof ISeq clause && clause.first() instanceof PersistentVector rawParams) {
+                    out.add(expandFnArity(rawParams, clause.next()));
+                } else {
+                    out.add(args[i]);
+                }
+            }
+        }
+        return PersistentList.create(out);
     }
 
     public static boolean isa(Object child, Object parent) {
@@ -1835,14 +2010,14 @@ public final class Core {
 
         def(ns, "deref", new Fn.NamedFn("deref") {
             @Override public Object invoke(Object ref) {
-                return ((IDeref) ref).deref();
+                return RT.deref(ref);
             }
             @Override public Object invoke(Object ref, Object timeoutMs, Object timeoutVal) {
-                return ((IDeref) ref).deref(Numbers.toLong(timeoutMs), timeoutVal);
+                return RT.deref(ref, Numbers.toLong(timeoutMs), timeoutVal);
             }
             @Override public Object invokeVarargs(Object[] args) {
-                if (args.length == 1) return ((IDeref) args[0]).deref();
-                if (args.length == 3) return ((IDeref) args[0]).deref(Numbers.toLong(args[1]), args[2]);
+                if (args.length == 1) return RT.deref(args[0]);
+                if (args.length == 3) return RT.deref(args[0], Numbers.toLong(args[1]), args[2]);
                 throw arityError(args.length);
             }
         });
@@ -2126,10 +2301,25 @@ public final class Core {
         }
     }
 
+    private static boolean isContribFallbackLib(String nsName) {
+        return switch (nsName) {
+            case "clojure.core.async",
+                 "clojure.spec.alpha",
+                 "clojure.data.priority-map",
+                 "clojure.data.int-map",
+                 "clojure.data.avl",
+                 "flatland.ordered.map",
+                 "flatland.ordered.set",
+                 "flatland.useful.map" -> true;
+            default -> false;
+        };
+    }
+
     public static void loadLib(String nsName) {
         if ("clojure.core".equals(nsName)) return;
         if (LOADED_LIBS.contains(nsName) && Namespace.find(nsName) != null) return;
-        if (StdLib.ensureLoaded(nsName)) {
+        boolean contribFallback = isContribFallbackLib(nsName);
+        if (!contribFallback && StdLib.ensureLoaded(nsName)) {
             LOADED_LIBS.add(nsName);
             return;
         }
@@ -2153,6 +2343,10 @@ public final class Core {
             } catch (IOException e) {
                 throw RT.sneakyThrow(e);
             }
+        }
+        if (contribFallback && StdLib.ensureLoaded(nsName)) {
+            LOADED_LIBS.add(nsName);
+            return;
         }
         // Fallback to CWD / src / lib unless explicit deps.edn / -Scp / -T enforces strict isolation
         if (!(RT.hasCustomRuntimeLoader() && RT.isStrictRuntimeLoader())) {
@@ -2395,7 +2589,7 @@ public final class Core {
         Object k = seqExprs.nth(idx);
         Object v = seqExprs.nth(idx + 1);
         if (Keyword.intern("let").equals(k)) {
-            return PersistentList.createFromArray(Symbol.intern("let*"), v, expandDoseq(seqExprs, idx + 2, body));
+            return PersistentList.createFromArray(Symbol.intern("let*"), Compiler.destructure((PersistentVector) v), expandDoseq(seqExprs, idx + 2, body));
         }
         if (Keyword.intern("when").equals(k)) {
             return PersistentList.createFromArray(Symbol.intern("when"), v, expandDoseq(seqExprs, idx + 2, body));
@@ -2409,7 +2603,7 @@ public final class Core {
                 PersistentVector.createOwning(s, PersistentList.createFromArray(Symbol.intern("clojure.core", "seq"), v)),
                 PersistentList.createFromArray(Symbol.intern("when"), s,
                         PersistentList.createFromArray(Symbol.intern("let*"),
-                                PersistentVector.createOwning(k, PersistentList.createFromArray(Symbol.intern("clojure.core", "first"), s)),
+                                Compiler.destructure(PersistentVector.createOwning(k, PersistentList.createFromArray(Symbol.intern("clojure.core", "first"), s))),
                                 inner,
                                 PersistentList.createFromArray(Symbol.intern("recur"),
                                         PersistentList.createFromArray(Symbol.intern("clojure.core", "next"), s)))));
@@ -2422,7 +2616,7 @@ public final class Core {
         Object k = seqExprs.nth(idx);
         Object v = seqExprs.nth(idx + 1);
         if (Keyword.intern("let").equals(k)) {
-            return PersistentList.createFromArray(Symbol.intern("let*"), v, expandFor(seqExprs, idx + 2, body));
+            return PersistentList.createFromArray(Symbol.intern("let*"), Compiler.destructure((PersistentVector) v), expandFor(seqExprs, idx + 2, body));
         }
         if (Keyword.intern("when").equals(k)) {
             return PersistentList.createFromArray(Symbol.intern("when"), v, expandFor(seqExprs, idx + 2, body));
@@ -2465,7 +2659,7 @@ public final class Core {
                                 PersistentList.createFromArray(Symbol.intern("when-let"),
                                         PersistentVector.createOwning(s, PersistentList.createFromArray(Symbol.intern("clojure.core", "seq"), s)),
                                         PersistentList.createFromArray(Symbol.intern("let*"),
-                                                PersistentVector.createOwning(k, PersistentList.createFromArray(Symbol.intern("clojure.core", "first"), s)),
+                                                Compiler.destructure(PersistentVector.createOwning(k, PersistentList.createFromArray(Symbol.intern("clojure.core", "first"), s))),
                                                 combined)))),
                 v);
     }
@@ -2849,6 +3043,8 @@ public final class Core {
             if (x instanceof Atom.Delay d) return d.isRealized();
             if (x instanceof Atom.Promise p) return p.isRealized();
             if (x instanceof Atom.FutureObj f) return f.isDone();
+            if (x instanceof java.util.concurrent.Future<?> f) return f.isDone();
+            if (x instanceof IPending p) return p.isRealized();
             return true;
         
             }
@@ -4540,14 +4736,7 @@ public final class Core {
             return expandDefn(patched);
         
             }
-            case 73: {
-                Object[] args = _args;
-            List<Object> list = new ArrayList<>(args.length + 1);
-            list.add(fnStar);
-            Collections.addAll(list, args);
-            return PersistentList.create(list);
-        
-            }
+            case 73: return Core.expandFn(_args);
             case 74: {
                 Object[] args = _args;
             List<Object> forms = new ArrayList<>();
@@ -4556,22 +4745,8 @@ public final class Core {
             return PersistentList.create(forms);
         
             }
-            case 75: {
-                Object[] args = _args;
-            List<Object> list = new ArrayList<>(args.length + 1);
-            list.add(letStar);
-            Collections.addAll(list, args);
-            return PersistentList.create(list);
-        
-            }
-            case 76: {
-                Object[] args = _args;
-            List<Object> list = new ArrayList<>(args.length + 1);
-            list.add(loopStar);
-            Collections.addAll(list, args);
-            return PersistentList.create(list);
-        
-            }
+            case 75: return Core.expandLet(_args);
+            case 76: return Core.expandLoop(_args);
             case 77: {
                 Object[] args = _args;
             List<Object> body = new ArrayList<>();
@@ -4609,7 +4784,7 @@ public final class Core {
             body.add(temp);
             List<Object> innerLet = new ArrayList<>();
             innerLet.add(letStar);
-            innerLet.add(PersistentVector.createOwning(form, temp));
+            innerLet.add(Compiler.destructure(PersistentVector.createOwning(form, temp)));
             for (int i = 1; i < args.length; i++) innerLet.add(args[i]);
             body.add(PersistentList.create(innerLet));
             return PersistentList.createFromArray(letStar, PersistentVector.createOwning(temp, tst), PersistentList.create(body));
@@ -4626,7 +4801,7 @@ public final class Core {
             return PersistentList.createFromArray(letStar,
                     PersistentVector.createOwning(temp, tst),
                     PersistentList.createFromArray(ifSym, temp,
-                            PersistentList.createFromArray(letStar, PersistentVector.createOwning(form, temp), thenF),
+                            PersistentList.createFromArray(letStar, Compiler.destructure(PersistentVector.createOwning(form, temp)), thenF),
                             elseF));
         
             }
@@ -4638,7 +4813,7 @@ public final class Core {
             Symbol temp = Symbol.intern("temp__" + RT.nextID());
             List<Object> innerLet = new ArrayList<>();
             innerLet.add(letStar);
-            innerLet.add(PersistentVector.createOwning(form, temp));
+            innerLet.add(Compiler.destructure(PersistentVector.createOwning(form, temp)));
             for (int i = 1; i < args.length; i++) innerLet.add(args[i]);
             return PersistentList.createFromArray(letStar,
                     PersistentVector.createOwning(temp, tst),
@@ -4661,7 +4836,7 @@ public final class Core {
                     PersistentList.createFromArray(ifSym,
                             PersistentList.createFromArray(Symbol.intern("clojure.core", "nil?"), temp),
                             elseF,
-                            PersistentList.createFromArray(letStar, PersistentVector.createOwning(form, temp), thenF)));
+                            PersistentList.createFromArray(letStar, Compiler.destructure(PersistentVector.createOwning(form, temp)), thenF)));
         
             }
             case 84: {
@@ -4672,7 +4847,7 @@ public final class Core {
             Symbol s = Symbol.intern("s__" + RT.nextID());
             List<Object> body = new ArrayList<>();
             body.add(letStar);
-            body.add(PersistentVector.createOwning(x, PersistentList.createFromArray(Symbol.intern("clojure.core", "first"), s)));
+            body.add(Compiler.destructure(PersistentVector.createOwning(x, PersistentList.createFromArray(Symbol.intern("clojure.core", "first"), s))));
             for (int i = 1; i < args.length; i++) body.add(args[i]);
             return PersistentList.createFromArray(Symbol.intern("when-let"),
                     PersistentVector.createOwning(s, PersistentList.createFromArray(Symbol.intern("clojure.core", "seq"), xs)),

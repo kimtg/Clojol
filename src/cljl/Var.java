@@ -93,6 +93,51 @@ public final class Var extends Fn implements IDeref, IMeta, IReference {
         return stack.peek();
     }
 
+    public static Object getThreadBindingFrame() {
+        Deque<Map<Var, Object>> stack = BINDING_STACK.get();
+        if (stack == null || stack.isEmpty()) return Collections.emptyList();
+        return new ArrayDeque<>(stack);
+    }
+
+    public static Object cloneThreadBindingFrame() {
+        Deque<Map<Var, Object>> stack = BINDING_STACK.get();
+        if (stack == null || stack.isEmpty()) return Collections.emptyList();
+        ArrayDeque<Map<Var, Object>> copy = new ArrayDeque<>(stack.size());
+        for (Map<Var, Object> frame : stack) {
+            copy.addLast(new HashMap<>(frame));
+        }
+        return copy;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static void resetThreadBindingFrame(Object frame) {
+        if (frame == null) {
+            BINDING_STACK.remove();
+            return;
+        }
+        if (frame instanceof java.util.Collection<?> c) {
+            if (c.isEmpty()) {
+                BINDING_STACK.remove();
+                return;
+            }
+            ArrayDeque<Map<Var, Object>> stack = new ArrayDeque<>(c.size());
+            for (Object item : c) {
+                stack.addLast(new HashMap<>((Map<Var, Object>) item));
+            }
+            BINDING_STACK.set(stack);
+            return;
+        }
+        if (frame instanceof Map<?, ?> m) {
+            if (m.isEmpty()) {
+                BINDING_STACK.remove();
+                return;
+            }
+            Deque<Map<Var, Object>> stack = new ArrayDeque<>();
+            stack.push(new HashMap<>((Map<Var, Object>) m));
+            BINDING_STACK.set(stack);
+        }
+    }
+
     public static Map<Var, Object> cloneThreadBindings() {
         Map<Var, Object> top = getThreadBindings();
         return top.isEmpty() ? Collections.emptyMap() : new HashMap<>(top);

@@ -803,15 +803,25 @@ public final class Reader {
                 readChar();
                 break;
             }
+            if (found) {
+                // Once a branch has matched, skip remaining forms until ')' (matches official Clojure)
+                suppressReadDepth++;
+                try {
+                    readNext(true, null);
+                } finally {
+                    suppressReadDepth--;
+                }
+                continue;
+            }
             Object feat = readNext(true, null);
             if (feat == DISCARD) continue;
             skipWhitespaceAndComments();
             if (peek() == -1 || peek() == ')') {
                 throw readerError("Reader conditional requires an even number of forms");
             }
-            boolean match = !found && ((features != null)
+            boolean match = (features != null)
                     ? (features.contains(feat) || feat == defKw)
-                    : (feat == cljlKw || feat == cljKw || feat == defKw));
+                    : (feat == cljlKw || feat == cljKw || feat == defKw);
             if (match) {
                 Object expr = readForm(true, null);
                 found = true;
