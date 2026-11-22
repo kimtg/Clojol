@@ -2301,6 +2301,8 @@ public final class Core {
         }
     }
 
+    private static final ThreadLocal<Set<String>> LOADING_LIBS = new ThreadLocal<>();
+
     private static boolean isContribFallbackLib(String nsName) {
         return switch (nsName) {
             case "clojure.core.async",
@@ -2318,6 +2320,8 @@ public final class Core {
     public static void loadLib(String nsName) {
         if ("clojure.core".equals(nsName)) return;
         if (LOADED_LIBS.contains(nsName) && Namespace.find(nsName) != null) return;
+        Set<String> loading = LOADING_LIBS.get();
+        if (loading != null && loading.contains(nsName)) return;
         boolean contribFallback = isContribFallbackLib(nsName);
         if (!contribFallback && StdLib.ensureLoaded(nsName)) {
             LOADED_LIBS.add(nsName);
@@ -2331,12 +2335,19 @@ public final class Core {
                 if (is != null) {
                     Namespace savedNs = RT.currentNS();
                     Var.pushThreadBindings(Map.of(RT.CURRENT_NS, savedNs));
+                    if (loading == null) {
+                        loading = new HashSet<>();
+                        LOADING_LIBS.set(loading);
+                    }
+                    loading.add(nsName);
                     try {
                         String src = new String(is.readAllBytes(), StandardCharsets.UTF_8);
                         Compiler.load(src, rel + ext);
                         LOADED_LIBS.add(nsName);
                         return;
                     } finally {
+                        loading.remove(nsName);
+                        if (loading.isEmpty()) LOADING_LIBS.remove();
                         Var.popThreadBindings();
                     }
                 }
@@ -2358,12 +2369,19 @@ public final class Core {
                         try {
                             Namespace savedNs = RT.currentNS();
                             Var.pushThreadBindings(Map.of(RT.CURRENT_NS, savedNs));
+                            if (loading == null) {
+                                loading = new HashSet<>();
+                                LOADING_LIBS.set(loading);
+                            }
+                            loading.add(nsName);
                             try {
                                 String src = Files.readString(p, StandardCharsets.UTF_8);
                                 Compiler.load(src, cand);
                                 LOADED_LIBS.add(nsName);
                                 return;
                             } finally {
+                                loading.remove(nsName);
+                                if (loading.isEmpty()) LOADING_LIBS.remove();
                                 Var.popThreadBindings();
                             }
                         } catch (IOException e) {
@@ -3015,19 +3033,21 @@ public final class Core {
     @SuppressWarnings("unchecked")
     private static Object call1_1(int _id, Object _a) {
         switch (_id) {
-            case 32: { Object x = _a; return (x instanceof PersistentList || x instanceof PersistentList.EmptyList); }
-            case 33: { Object x = _a; return (x instanceof PersistentVector || x instanceof PersistentVector.SubVec || x instanceof PersistentHashMap.MapEntry); }
-            case 34: { Object x = _a; return (x instanceof PersistentHashMap || x instanceof Map<?, ?>); }
-            case 35: { Object x = _a; return (x instanceof PersistentHashSet || x instanceof Set<?>); }
+            case 32: { Object x = _a; return (x instanceof IPersistentList || x instanceof PersistentList || x instanceof PersistentList.EmptyList); }
+            case 33: { Object x = _a; return RT.isVector(x); }
+            case 34: { Object x = _a; return (x instanceof IPersistentMap || x instanceof PersistentHashMap || x instanceof Map<?, ?>); }
+            case 35: { Object x = _a; return (x instanceof IPersistentSet || x instanceof PersistentHashSet || x instanceof Set<?>); }
             case 36: { Object x = _a; return (x instanceof ISeq); }
             case 37: { Object x = _a; return (x == null || x instanceof Seqable || x instanceof Iterable<?>
                 || x instanceof Map<?, ?> || x instanceof CharSequence || x.getClass().isArray()); }
-            case 38: { Object x = _a; return (x instanceof PersistentVector || x instanceof PersistentHashMap
+            case 38: { Object x = _a; return (x instanceof IPersistentVector || x instanceof IPersistentMap
+                || x instanceof IPersistentSet || x instanceof IPersistentList
+                || x instanceof PersistentVector || x instanceof PersistentHashMap
                 || x instanceof PersistentHashSet || x instanceof PersistentTreeMap || x instanceof PersistentTreeSet
                 || x instanceof PersistentRecord || x instanceof PersistentColl
                 || x instanceof ISeq || x instanceof Collection<?>); }
             case 39: { Object x = _a; return (x instanceof Associative); }
-            case 40: { Object x = _a; return (x instanceof ISeq || x instanceof PersistentVector || x instanceof List<?>); }
+            case 40: { Object x = _a; return (x instanceof Sequential || x instanceof ISeq || x instanceof PersistentVector || x instanceof List<?>); }
             case 41: { Object x = _a; return (x instanceof Counted); }
             case 42: { Object x = _a; return (x instanceof clojure.lang.IFn); }
             case 43: { Object x = _a; return (x instanceof Fn && !(x instanceof Keyword || x instanceof Symbol

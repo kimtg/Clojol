@@ -239,7 +239,19 @@ public abstract class Fn implements clojure.lang.IFn, Callable<Object>, Runnable
         @Override public Object withMeta(cljl.lang.PersistentHashMap m) {
             return m == null ? this : new MetaFn(this, m);
         }
-        @Override public String toString() { return "#<fn " + name + ">"; }
+        @Override public String toString() {
+            String hex = Integer.toHexString(System.identityHashCode(this));
+            if (name != null) {
+                int slash = name.indexOf('/');
+                if (slash > 0) {
+                    String nsPart = Compiler.munge(name.substring(0, slash));
+                    String fnPart = Compiler.munge(name.substring(slash + 1));
+                    return nsPart + "$" + fnPart + "@" + hex;
+                }
+                return "clojure.core$" + Compiler.munge(name) + "@" + hex;
+            }
+            return "clojure.core$fn__" + (System.identityHashCode(this) & 0x7fffffff) + "@" + hex;
+        }
     }
 
     public static final class MetaFn extends Fn implements clojure.lang.Fn, cljl.lang.IObj {

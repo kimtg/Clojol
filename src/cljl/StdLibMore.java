@@ -471,8 +471,61 @@ public final class StdLibMore {
     private static synchronized void initData() {
         if (LOADED.contains("clojure.data")) return;
         Namespace ns = Namespace.findOrCreate("clojure.data");
-        ns.intern("diff", Fn.of2("diff", StdLibMore::diffImpl));
         LOADED.add("clojure.data");
+        ns.intern("__diff-impl", Fn.of2("__diff-impl", StdLibMore::diffImpl));
+        Var.pushThreadBindings(Map.of(RT.CURRENT_NS, ns));
+        try {
+            Compiler.load("""
+                (defprotocol EqualityPartition
+                  (equality-partition [x] "Implementation detail. Subject to change."))
+                (defprotocol Diff
+                  (diff-similar [a b] "Implementation detail. Subject to change."))
+                (defn- atom-diff [a b]
+                  (if (= a b) [nil nil a] [a b nil]))
+                (extend-protocol EqualityPartition
+                  nil
+                  (equality-partition [_] :atom)
+                  Object
+                  (equality-partition [_] :atom)
+                  java.util.Set
+                  (equality-partition [_] :set)
+                  clojure.lang.IPersistentSet
+                  (equality-partition [_] :set)
+                  java.util.List
+                  (equality-partition [_] :sequential)
+                  clojure.lang.Sequential
+                  (equality-partition [_] :sequential)
+                  java.util.Map
+                  (equality-partition [_] :map)
+                  clojure.lang.IPersistentMap
+                  (equality-partition [_] :map))
+                (extend-protocol Diff
+                  nil
+                  (diff-similar [a b] (atom-diff a b))
+                  Object
+                  (diff-similar [a b] (atom-diff a b))
+                  java.util.Set
+                  (diff-similar [a b] (__diff-impl a b))
+                  clojure.lang.IPersistentSet
+                  (diff-similar [a b] (__diff-impl a b))
+                  java.util.List
+                  (diff-similar [a b] (__diff-impl a b))
+                  clojure.lang.Sequential
+                  (diff-similar [a b] (__diff-impl a b))
+                  java.util.Map
+                  (diff-similar [a b] (__diff-impl a b))
+                  clojure.lang.IPersistentMap
+                  (diff-similar [a b] (__diff-impl a b)))
+                (defn diff [a b]
+                  (if (= a b)
+                    [nil nil a]
+                    (if (= (equality-partition a) (equality-partition b))
+                      (diff-similar a b)
+                      (atom-diff a b))))
+                """, "clojure/data.clj");
+        } finally {
+            Var.popThreadBindings();
+        }
     }
 
     private static PersistentVector diffImpl(Object a, Object b) {
@@ -1073,13 +1126,19 @@ public final class StdLibMore {
                 root));
         ns.intern("xml-zip", xmlZip);
 
-        Fn nodeFn = Fn.of1("node", loc -> ((PersistentVector) loc).nth(0));
-        Fn pathFn = Fn.of1("path", loc -> ((PersistentVector) loc).nth(1));
+        Fn nodeFn = Fn.of1("node", loc -> loc == null ? null : ((PersistentVector) loc).nth(0));
+        Fn rawPathFn = Fn.of1("raw-path", loc -> loc == null ? null : ((PersistentVector) loc).nth(1));
+        Fn pathFn = Fn.of1("path", loc -> {
+            Object p = rawPathFn.invoke(loc);
+            return p == null ? null : RT.get(p, kPnodes);
+        });
         Fn branchFn = Fn.of1("branch?", loc -> {
+            if (loc == null) return Boolean.FALSE;
             Fn f = (Fn) ((IMeta) loc).meta().valAt(kBranch);
             return f.invoke(nodeFn.invoke(loc));
         });
         Fn childrenFn = Fn.of1("children", loc -> {
+            if (loc == null) return null;
             if (!RT.truthy(branchFn.invoke(loc))) throw new IllegalStateException("called children on a leaf node");
             Fn f = (Fn) ((IMeta) loc).meta().valAt(kChildren);
             return f.invoke(nodeFn.invoke(loc));
@@ -1089,19 +1148,19 @@ public final class StdLibMore {
             return f.invoke(node, children);
         });
         Fn leftsFn = Fn.of1("lefts", loc -> {
-            Object p = pathFn.invoke(loc);
+            Object p = rawPathFn.invoke(loc);
             return p == null ? null : RT.seq(RT.get(p, kL));
         });
         Fn rightsFn = Fn.of1("rights", loc -> {
-            Object p = pathFn.invoke(loc);
+            Object p = rawPathFn.invoke(loc);
             return p == null ? null : RT.get(p, kR);
         });
         Fn downFn = Fn.of1("down", loc -> {
-            if (!RT.truthy(branchFn.invoke(loc))) return null;
+            if (loc == null || !RT.truthy(branchFn.invoke(loc))) return null;
             Object cs = RT.seq(childrenFn.invoke(loc));
             if (cs == null) return null;
             Object n = nodeFn.invoke(loc);
-            Object p = pathFn.invoke(loc);
+            Object p = rawPathFn.invoke(loc);
             Object pnodes = p != null ? RT.conj(RT.get(p, kPnodes), n) : PersistentVector.createOwning(n);
             PersistentHashMap newPath = PersistentHashMap.create(
                     kL, PersistentVector.EMPTY,
@@ -1111,8 +1170,9 @@ public final class StdLibMore {
             return PersistentVector.createOwning(RT.first(cs), newPath).withMeta(((IMeta) loc).meta());
         });
         Fn upFn = Fn.of1("up", loc -> {
+            if (loc == null) return null;
             Object n = nodeFn.invoke(loc);
-            Object p = pathFn.invoke(loc);
+            Object p = rawPathFn.invoke(loc);
             if (p == null) return null;
             Object ppath = RT.get(p, kPpath);
             Object pnodes = RT.get(p, kPnodes);
@@ -1129,16 +1189,18 @@ public final class StdLibMore {
             }
         });
         Fn rootFn = Fn.of1("root", loc -> {
+            if (loc == null) return null;
             Object cur = loc;
             while (true) {
-                if (kEnd.equals(pathFn.invoke(cur))) return nodeFn.invoke(cur);
+                if (kEnd.equals(rawPathFn.invoke(cur))) return nodeFn.invoke(cur);
                 Object u = upFn.invoke(cur);
                 if (u == null) return nodeFn.invoke(cur);
                 cur = u;
             }
         });
         Fn rightFn = Fn.of1("right", loc -> {
-            Object p = pathFn.invoke(loc);
+            if (loc == null) return null;
+            Object p = rawPathFn.invoke(loc);
             Object r = p == null ? null : RT.seq(RT.get(p, kR));
             if (r == null) return null;
             PersistentHashMap newPath = (PersistentHashMap) RT.assoc(RT.assoc(p, kL, RT.conj(RT.get(p, kL), nodeFn.invoke(loc))),
@@ -1146,6 +1208,7 @@ public final class StdLibMore {
             return PersistentVector.createOwning(RT.first(r), newPath).withMeta(((IMeta) loc).meta());
         });
         Fn rightmostFn = Fn.of1("rightmost", loc -> {
+            if (loc == null) return null;
             Object cur = loc;
             while (true) {
                 Object r = rightFn.invoke(cur);
@@ -1154,7 +1217,8 @@ public final class StdLibMore {
             }
         });
         Fn leftFn = Fn.of1("left", loc -> {
-            Object p = pathFn.invoke(loc);
+            if (loc == null) return null;
+            Object p = rawPathFn.invoke(loc);
             Object l = p == null ? null : RT.get(p, kL);
             if (l == null || RT.count(l) == 0) return null;
             PersistentVector lv = (PersistentVector) l;
@@ -1163,10 +1227,11 @@ public final class StdLibMore {
             return PersistentVector.createOwning(lv.peek(), newPath).withMeta(((IMeta) loc).meta());
         });
         Fn leftmostFn = Fn.of1("leftmost", loc -> {
-            Object p = pathFn.invoke(loc);
+            if (loc == null) return null;
+            Object p = rawPathFn.invoke(loc);
             if (p == null) return loc;
             PersistentVector lv = (PersistentVector) RT.get(p, kL);
-            if (lv.count() == 0) return loc;
+            if (lv == null || lv.count() == 0) return loc;
             List<Object> newR = new ArrayList<>();
             for (int i = 1; i < lv.count(); i++) newR.add(lv.nth(i));
             newR.add(nodeFn.invoke(loc));
@@ -1176,7 +1241,7 @@ public final class StdLibMore {
             return PersistentVector.createOwning(lv.nth(0), newPath).withMeta(((IMeta) loc).meta());
         });
         Fn replaceFn = Fn.of2("replace", (loc, node) -> {
-            Object p = pathFn.invoke(loc);
+            Object p = rawPathFn.invoke(loc);
             Object np = p != null ? RT.assoc(p, kChanged, Boolean.TRUE) : PersistentHashMap.create(kChanged, Boolean.TRUE);
             return PersistentVector.createOwning(node, np).withMeta(((IMeta) loc).meta());
         });
@@ -1189,14 +1254,14 @@ public final class StdLibMore {
             return replaceFn.invoke(loc, f.applyTo(fargs));
         });
         Fn insertLeftFn = Fn.of2("insert-left", (loc, item) -> {
-            Object p = pathFn.invoke(loc);
+            Object p = rawPathFn.invoke(loc);
             if (p == null) throw new IllegalStateException("Insert at top");
             PersistentHashMap np = (PersistentHashMap) RT.assoc(RT.assoc(p, kL, RT.conj(RT.get(p, kL), item)),
                     kChanged, Boolean.TRUE);
             return PersistentVector.createOwning(nodeFn.invoke(loc), np).withMeta(((IMeta) loc).meta());
         });
         Fn insertRightFn = Fn.of2("insert-right", (loc, item) -> {
-            Object p = pathFn.invoke(loc);
+            Object p = rawPathFn.invoke(loc);
             if (p == null) throw new IllegalStateException("Insert at top");
             PersistentHashMap np = (PersistentHashMap) RT.assoc(RT.assoc(p, kR, RT.cons(item, RT.get(p, kR))),
                     kChanged, Boolean.TRUE);
@@ -1209,9 +1274,10 @@ public final class StdLibMore {
             cs.add(item);
             return replaceFn.invoke(loc, makeNodeFn.invoke(loc, nodeFn.invoke(loc), PersistentList.create(cs)));
         });
-        Fn endPFn = Fn.of1("end?", loc -> kEnd.equals(pathFn.invoke(loc)));
+        Fn endPFn = Fn.of1("end?", loc -> loc != null && kEnd.equals(rawPathFn.invoke(loc)));
         Fn nextFn = Fn.of1("next", loc -> {
-            if (kEnd.equals(pathFn.invoke(loc))) return loc;
+            if (loc == null) return null;
+            if (kEnd.equals(rawPathFn.invoke(loc))) return loc;
             Object d = RT.truthy(branchFn.invoke(loc)) ? downFn.invoke(loc) : null;
             if (d != null) return d;
             Object r = rightFn.invoke(loc);
@@ -1226,6 +1292,7 @@ public final class StdLibMore {
             }
         });
         Fn prevFn = Fn.of1("prev", loc -> {
+            if (loc == null) return null;
             Object l = leftFn.invoke(loc);
             if (l != null) {
                 Object cur = l;
@@ -1239,7 +1306,7 @@ public final class StdLibMore {
             return upFn.invoke(loc);
         });
         Fn removeFn = Fn.of1("remove", loc -> {
-            Object p = pathFn.invoke(loc);
+            Object p = rawPathFn.invoke(loc);
             if (p == null) throw new IllegalStateException("Remove at top");
             PersistentVector lv = (PersistentVector) RT.get(p, kL);
             if (lv.count() > 0) {

@@ -474,11 +474,11 @@ public final class BytecodeJIT {
     }
 
     public static boolean isMap(Object x) {
-        return x instanceof PersistentHashMap || x instanceof Map<?, ?>;
+        return x instanceof PersistentHashMap || x instanceof IPersistentMap || x instanceof Map<?, ?>;
     }
 
     public static boolean isSet(Object x) {
-        return x instanceof PersistentHashSet || x instanceof Set<?>;
+        return x instanceof PersistentHashSet || x instanceof IPersistentSet || x instanceof Set<?>;
     }
 
     // ========================================================================

@@ -637,8 +637,8 @@ public final class RT {
     }
 
     public static boolean isVector(Object x) {
-        return x instanceof PersistentVector || x instanceof PersistentVector.SubVec
-                || x instanceof PersistentHashMap.MapEntry;
+        return x instanceof IPersistentVector || x instanceof PersistentVector
+                || x instanceof PersistentVector.SubVec || x instanceof PersistentHashMap.MapEntry;
     }
 
     public static Object get(Object coll, Object key) {

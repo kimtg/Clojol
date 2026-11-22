@@ -2492,7 +2492,67 @@
     (is (= 'clojure.core (.getName (find-ns 'clojure.core))))
     (is (instance? clojure.lang.MapEquivalence {:a 1}))
     (let [it (clojure.lang.SeqIterator. [10 20 30])]
-      (is (= [10 20 30] (vec (iterator-seq it)))))))
+      (is (= [10 20 30] (vec (iterator-seq it))))))
+
+  (testing "Wave 7 compatibility: Fn toString format, nil-safe clojure.zip & path, clojure.data protocols, definterface hyphen munging & dynamic import, ArrayManager/ams/mk-am/VecNode/Delay, reducers ForkJoin, IPersistentVector vector?"
+    ;; Fn.toString uses official Clojure ns$munged@hex format (needed by expound / demunge)
+    (is (some? (re-matches #"clojure\.core\$int_QMARK_@[0-9a-f]+" (str int?))))
+    (is (some? (re-matches #".*\$fn__\d+@[0-9a-f]+" (str (fn [x] x)))))
+    (eval '(do
+             (defn __w7-named-fn [x] x)
+             (is (some? (re-matches #".*\$__w7_named_fn@[0-9a-f]+" (str __w7-named-fn))))))
+    ;; Nil-safe clojure.zip and official (zip/path loc) returning ancestor nodes vector
+    (eval '(require '[clojure.zip :as w7z]))
+    (eval '(do
+             (is (nil? (w7z/node nil)))
+             (is (nil? (w7z/path nil)))
+             (is (nil? (w7z/right nil)))
+             (is (nil? (w7z/left nil)))
+             (is (nil? (w7z/up nil)))
+             (is (nil? (w7z/down nil)))
+             (is (false? (w7z/end? nil)))
+             (let [loc (-> (w7z/vector-zip [1 [2 3]]) w7z/down w7z/right w7z/down)]
+               (is (= 2 (w7z/node loc)))
+               (is (= [[1 [2 3]] [2 3]] (w7z/path loc))))))
+    ;; clojure.data EqualityPartition & Diff protocols
+    (eval '(require '[clojure.data :as w7d]))
+    (eval '(do
+             (is (= :map (w7d/equality-partition {:a 1})))
+             (is (= :set (w7d/equality-partition #{1})))
+             (is (= :sequential (w7d/equality-partition [1 2])))
+             (is (= :atom (w7d/equality-partition 42)))
+             (is (= [{:a 1} {:a 2} {:b 3}] (w7d/diff {:a 1 :b 3} {:a 2 :b 3})))))
+    ;; definterface in hyphenated namespace munges '-' to '_' and resolves across namespaces
+    (let [saved *ns*]
+      (try
+        (eval '(do
+                 (in-ns 'w7-hyphen.iface-ns)
+                 (clojure.core/refer-clojure)
+                 (definterface W7TypedIface
+                   (^boolean flag [^int n]))))
+        (eval '(do
+                 (in-ns 'w7-hyphen.consumer-ns)
+                 (clojure.core/refer-clojure)
+                 (import '(w7_hyphen.iface_ns W7TypedIface))))
+        (eval '(let [obj (reify W7TypedIface (flag [_ n] (> n 0)))]
+                 (clojure.test/is (true? (.flag obj 5)))
+                 (clojure.test/is (false? (.flag obj 0)))))
+        (finally
+          (in-ns (.getName saved)))))
+    ;; ArrayManager / ams / mk-am / EMPTY-NODE / VecNode / clojure.lang.Delay
+    (is (instance? clojure.core.VecNode clojure.core/EMPTY-NODE))
+    (is (instance? clojure.core.ArrayManager (:long clojure.core/ams)))
+    (let [^clojure.core.ArrayManager am (:int clojure.core/ams)
+          arr (.array am 3)]
+      (.aset am arr 1 77)
+      (is (= 3 (.alength am arr)))
+      (is (= 77 (.aget am arr 1))))
+    (is (instance? clojure.lang.Delay (delay 1)))
+    ;; vector? recognizes IPersistentVector (e.g. vector-of)
+    (is (true? (vector? (vector-of :int 1 2 3))))
+    ;; clojure.core.reducers ForkJoin helpers
+    (eval '(require '[clojure.core.reducers :as w7r]))
+    (eval '(is (= 42 (w7r/fjinvoke #(w7r/fjjoin (w7r/fjfork (w7r/fjtask (fn [] 42))))))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

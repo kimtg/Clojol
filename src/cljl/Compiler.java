@@ -2621,7 +2621,17 @@ public final class Compiler {
             copy.jitAttempted = this.jitAttempted;
             return copy;
         }
-        @Override public String toString() { return "#<fn " + name + ">"; }
+        @Override public String toString() {
+            String hex = Integer.toHexString(System.identityHashCode(this));
+            Var ov = this.ownerVar;
+            if (ov != null && ov.ns != null && ov.sym != null) {
+                return Compiler.munge(ov.ns.name.name) + "$" + Compiler.munge(ov.sym.name) + "@" + hex;
+            }
+            if (name != null && !"fn".equals(name)) {
+                return "user$" + Compiler.munge(name) + "@" + hex;
+            }
+            return "user$fn__" + (System.identityHashCode(this) & 0x7fffffff) + "@" + hex;
+        }
     }
 
     // ========================================================================

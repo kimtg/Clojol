@@ -15,9 +15,9 @@ public final class Vec extends Fn
 
     public static final class VecNode {
         public final AtomicReference<Thread> edit;
-        public final Object[] arr;
+        public final Object arr;
 
-        public VecNode(AtomicReference<Thread> edit, Object[] arr) {
+        public VecNode(AtomicReference<Thread> edit, Object arr) {
             this.edit = edit;
             this.arr = arr;
         }
@@ -45,8 +45,9 @@ public final class Vec extends Fn
 
         @Override
         public IChunk chunkedFirst() {
-            return new ArrayChunk(anode.arr[0] != null && anode.arr.length == 1 && anode.arr[0].getClass().isArray()
-                    ? anode.arr[0] : anode.arr, offset,
+            Object target = (anode.arr instanceof Object[] oa && oa.length == 1 && oa[0] != null && oa[0].getClass().isArray())
+                    ? oa[0] : anode.arr;
+            return new ArrayChunk(target, offset,
                     Math.min(32, vec.cnt - (i - offset)));
         }
 
@@ -114,7 +115,7 @@ public final class Vec extends Fn
             if (i >= tailoff()) return tail instanceof VecNode vn ? vn.arr : tail;
             Object node = root;
             for (int level = shift; level > 0; level -= 5) {
-                node = ((VecNode) node).arr[(i >>> level) & 0x01f];
+                node = ((Object[]) ((VecNode) node).arr)[(i >>> level) & 0x01f];
             }
             return ((VecNode) node).arr;
         }
@@ -128,7 +129,7 @@ public final class Vec extends Fn
             }
             VecNode node = root;
             for (int level = shift; level > 0; level -= 5) {
-                node = (VecNode) node.arr[(i >>> level) & 0x01f];
+                node = (VecNode) ((Object[]) node.arr)[(i >>> level) & 0x01f];
             }
             return node;
         }

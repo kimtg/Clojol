@@ -39,7 +39,9 @@ public final class TypeFactory {
     public static synchronized Class<?> defineRawClass(String binaryName, byte[] bytes) {
         Class<?> existing = LOADER.findAlreadyLoaded(binaryName);
         if (existing != null) return existing;
-        return LOADER.define(binaryName, bytes);
+        Class<?> defined = LOADER.define(binaryName, bytes);
+        Interop.invalidateClassCache(binaryName);
+        return defined;
     }
 
     public static final class DynamicClassLoader extends java.net.URLClassLoader {

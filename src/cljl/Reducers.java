@@ -654,6 +654,24 @@ public final class Reducers {
                 return new ReducibleColl(coll, CoreExtras.createTransducer1(6, "drop", n));
             }
         });
+
+        // ForkJoin primitives (used by core.rrb-vector and custom foldable collections)
+        Atom.Delay poolDelay = new Atom.Delay(Fn.of0("pool", ForkJoinPool::commonPool));
+        ns.intern("pool", poolDelay);
+        ns.intern("fjtask", Fn.of1("fjtask", f -> {
+            Fn fn = (Fn) f;
+            return java.util.concurrent.ForkJoinTask.adapt((java.util.concurrent.Callable<Object>) fn::invoke);
+        }));
+        ns.intern("fjinvoke", Fn.of1("fjinvoke", f -> {
+            Fn fn = (Fn) f;
+            if (java.util.concurrent.ForkJoinTask.inForkJoinPool()) {
+                return fn.invoke();
+            }
+            return ((ForkJoinPool) poolDelay.deref()).invoke(
+                    java.util.concurrent.ForkJoinTask.adapt((java.util.concurrent.Callable<Object>) fn::invoke));
+        }));
+        ns.intern("fjfork", Fn.of1("fjfork", task -> ((java.util.concurrent.ForkJoinTask<?>) task).fork()));
+        ns.intern("fjjoin", Fn.of1("fjjoin", task -> ((java.util.concurrent.ForkJoinTask<?>) task).join()));
     }
 
     private static int catSize(Object x) {

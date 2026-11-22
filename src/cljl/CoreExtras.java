@@ -361,7 +361,20 @@ public final class CoreExtras {
         def(ns, "->Vec", new ExtraFnV(18, "->Vec"));
         def(ns, "->VecSeq", new ExtraFnV(19, "->VecSeq"));
         def(ns, "->Eduction", new ExtraFn2(20, "->Eduction"));
-        def(ns, "EMPTY-NODE", PersistentHashMap.BitmapIndexedNode.EMPTY);
+        def(ns, "EMPTY-NODE", new Vec.VecNode(null, new Object[32]));
+        def(ns, "ams", PersistentHashMap.create(
+                Keyword.intern("int"), new PrimArrayManager("int"),
+                Keyword.intern("long"), new PrimArrayManager("long"),
+                Keyword.intern("float"), new PrimArrayManager("float"),
+                Keyword.intern("double"), new PrimArrayManager("double"),
+                Keyword.intern("byte"), new PrimArrayManager("byte"),
+                Keyword.intern("short"), new PrimArrayManager("short"),
+                Keyword.intern("char"), new PrimArrayManager("char"),
+                Keyword.intern("boolean"), new PrimArrayManager("boolean")));
+        def(ns, "__make-array-manager", Fn.of1("__make-array-manager", t -> new PrimArrayManager(String.valueOf(t))));
+        defMacro(ns, "mk-am", Fn.of1("mk-am", t -> PersistentList.createFromArray(
+                Symbol.intern("clojure.core", "__make-array-manager"),
+                PersistentList.createFromArray(Symbol.intern("quote"), t))));
         def(ns, "primitives-classnames", PersistentHashMap.create(
                 Boolean.TYPE, "Boolean",
                 Byte.TYPE, "Byte",
@@ -371,6 +384,62 @@ public final class CoreExtras {
                 Long.TYPE, "Long",
                 Float.TYPE, "Float",
                 Double.TYPE, "Double"));
+    }
+
+    private static final class PrimArrayManager implements cljl.lang.ArrayManager {
+        private final String kind;
+
+        PrimArrayManager(String kind) {
+            this.kind = kind;
+        }
+
+        @Override
+        public Object array(int size) {
+            return switch (kind) {
+                case "int" -> new int[size];
+                case "long" -> new long[size];
+                case "float" -> new float[size];
+                case "double" -> new double[size];
+                case "byte" -> new byte[size];
+                case "short" -> new short[size];
+                case "char" -> new char[size];
+                case "boolean" -> new boolean[size];
+                default -> new Object[size];
+            };
+        }
+
+        @Override
+        public int alength(Object arr) {
+            if (arr instanceof Object[] oa) return oa.length;
+            return java.lang.reflect.Array.getLength(arr);
+        }
+
+        @Override
+        public Object aclone(Object arr) {
+            if (arr instanceof Object[] oa) return oa.clone();
+            if (arr instanceof int[] a) return a.clone();
+            if (arr instanceof long[] a) return a.clone();
+            if (arr instanceof double[] a) return a.clone();
+            if (arr instanceof float[] a) return a.clone();
+            if (arr instanceof byte[] a) return a.clone();
+            if (arr instanceof short[] a) return a.clone();
+            if (arr instanceof char[] a) return a.clone();
+            if (arr instanceof boolean[] a) return a.clone();
+            int len = java.lang.reflect.Array.getLength(arr);
+            Object copy = java.lang.reflect.Array.newInstance(arr.getClass().getComponentType(), len);
+            System.arraycopy(arr, 0, copy, 0, len);
+            return copy;
+        }
+
+        @Override
+        public Object aget(Object arr, int i) {
+            return RT.aget(arr, i);
+        }
+
+        @Override
+        public void aset(Object arr, int i, Object val) {
+            RT.aset(arr, i, val);
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -2278,7 +2347,7 @@ public final class CoreExtras {
             return new ChunkedCons(ch, RT.seq(rest));
         
             }
-            case 19: { Object edit = _a; Object arr = _b; return (new Vec.VecNode((java.util.concurrent.atomic.AtomicReference<Thread>) edit, (Object[]) arr)); }
+            case 19: { Object edit = _a; Object arr = _b; return (new Vec.VecNode((java.util.concurrent.atomic.AtomicReference<Thread>) edit, arr)); }
             case 20: { Object xf = _a; Object coll = _b; return (new Eduction((Fn) xf, coll)); }
             case 21: {
                 Object n = _a; Object coll = _b;
@@ -2447,15 +2516,36 @@ public final class CoreExtras {
             case 52: {
                 Object nameSym = _a; Object sigs = _b;
             Namespace cur = RT.currentNS();
-            String binaryName = cur.name.name + "." + ((Symbol) nameSym).name;
+            String binaryName = cur.name.name.replace('-', '_') + "." + ((Symbol) nameSym).name;
             List<TypeFactory.MethodSig> ms = new ArrayList<>();
+            Keyword tagKw = Keyword.intern("tag");
             for (ISeq s = RT.seq(sigs); s != null; s = s.next()) {
                 ISeq sig = (ISeq) s.first();
-                String mname = sig.first().toString();
+                Object mhead = sig.first();
+                String mname = mhead.toString();
+                Class<?> retType = Object.class;
+                if (mhead instanceof IMeta im && im.meta() != null) {
+                    Object rtag = im.meta().valAt(tagKw);
+                    if (rtag != null) {
+                        Class<?> rc = Interop.resolveClass(cur, rtag.toString());
+                        if (rc != null) retType = rc;
+                    }
+                }
                 PersistentVector pv = (PersistentVector) RT.second(sig);
                 Class<?>[] ptypes = new Class<?>[pv.count()];
-                Arrays.fill(ptypes, Object.class);
-                ms.add(new TypeFactory.MethodSig(mname, Object.class, ptypes));
+                for (int pi = 0; pi < pv.count(); pi++) {
+                    Class<?> pt = Object.class;
+                    Object p = pv.nth(pi);
+                    if (p instanceof IMeta pim && pim.meta() != null) {
+                        Object ptag = pim.meta().valAt(tagKw);
+                        if (ptag != null) {
+                            Class<?> pc = Interop.resolveClass(cur, ptag.toString());
+                            if (pc != null) pt = pc;
+                        }
+                    }
+                    ptypes[pi] = pt;
+                }
+                ms.add(new TypeFactory.MethodSig(mname, retType, ptypes));
             }
             Class<?> cls = TypeFactory.defineInterface(binaryName, ms);
             cur.importClass((Symbol) nameSym, cls);

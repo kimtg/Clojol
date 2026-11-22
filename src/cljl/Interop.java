@@ -215,6 +215,10 @@ public final class Interop {
         }
     }
 
+    static void invalidateClassCache(String name) {
+        if (name != null) CLASS_CACHE.remove(name);
+    }
+
     public static Class<?> findClass(String name) {
         Class<?> cached = CLASS_CACHE.get(name);
         if (cached != null) return cached == NOT_A_CLASS ? null : cached;
@@ -262,7 +266,11 @@ public final class Interop {
             case "clojure.lang.IChunk" -> cljl.lang.IChunk.class;
             case "clojure.lang.IChunkedSeq" -> cljl.lang.IChunkedSeq.class;
             case "clojure.lang.ChunkedCons" -> cljl.lang.ChunkedCons.class;
-            case "clojure.lang.ArrayChunk" -> cljl.lang.ArrayChunk.class;
+            case "clojure.lang.ArrayChunk", "clojure.core.ArrayChunk" -> cljl.lang.ArrayChunk.class;
+            case "clojure.core.ArrayManager" -> cljl.lang.ArrayManager.class;
+            case "clojure.core.Vec" -> cljl.lang.Vec.class;
+            case "clojure.core.VecNode" -> cljl.lang.Vec.VecNode.class;
+            case "clojure.core.VecSeq" -> cljl.lang.Vec.VecSeq.class;
             case "clojure.lang.IPersistentMap" -> cljl.lang.IPersistentMap.class;
             case "clojure.lang.MapEquivalence" -> cljl.lang.MapEquivalence.class;
             case "clojure.lang.IPersistentVector" -> cljl.lang.IPersistentVector.class;
@@ -315,6 +323,7 @@ public final class Interop {
             case "clojure.lang.MultiFn" -> MultiFn.class;
             case "clojure.lang.Var" -> Var.class;
             case "clojure.lang.Atom" -> Atom.class;
+            case "clojure.lang.Delay" -> Atom.Delay.class;
             case "clojure.lang.Volatile" -> Atom.Volatile.class;
             case "clojure.lang.Agent" -> Agent.class;
             case "clojure.lang.Ref" -> Ref.class;
@@ -337,6 +346,9 @@ public final class Interop {
             default -> null;
         };
 
+        if (found == null) {
+            found = TypeFactory.findDynamicClass(name);
+        }
         if (found == null) {
             ClassLoader loader = RT.baseLoader();
             try {
