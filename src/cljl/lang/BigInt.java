@@ -9,11 +9,26 @@ import java.math.BigInteger;
  * Arbitrary-precision Clojure integer distinct from java.math.BigInteger (clojure.lang.BigInt).
  * Stores 64-bit signed values unboxed in lpart (with bipart == null) and overflows to BigInteger.
  */
-public final class BigInt extends Number implements IHashEq, Comparable<Object>, Serializable {
+public final class BigInt extends clojure.lang.BigInt implements IHashEq, Comparable<Object>, Serializable {
     private static final long serialVersionUID = 1L;
 
-    public static final BigInt ZERO = new BigInt(0L, null);
-    public static final BigInt ONE = new BigInt(1L, null);
+    private static BigInt _zero;
+    private static BigInt _one;
+
+    public static BigInt zeroInstance() {
+        BigInt z = _zero;
+        if (z == null) { z = new BigInt(0L, null); _zero = z; }
+        return z;
+    }
+
+    public static BigInt oneInstance() {
+        BigInt o = _one;
+        if (o == null) { o = new BigInt(1L, null); _one = o; }
+        return o;
+    }
+
+    public static final BigInt ZERO = zeroInstance();
+    public static final BigInt ONE = oneInstance();
 
     public final long lpart;
     public final BigInteger bipart;

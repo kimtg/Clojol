@@ -125,13 +125,13 @@ public final class TypeFactory {
         return cls;
     }
 
-    public static final class DynamicClassLoader extends java.net.URLClassLoader {
+    public static final class DynamicClassLoader extends clojure.lang.DynamicClassLoader {
         public DynamicClassLoader() {
-            super(new java.net.URL[0], TypeFactory.class.getClassLoader());
+            super(TypeFactory.class.getClassLoader());
         }
 
         public DynamicClassLoader(ClassLoader parent) {
-            super(new java.net.URL[0], parent);
+            super(parent);
         }
 
         @Override
@@ -160,9 +160,32 @@ public final class TypeFactory {
         }
     }
 
-    public interface ProxyObject {
+    public interface ProxyObject extends clojure.lang.IProxy {
         PersistentHashMap __getMappings();
         void __setMappings(PersistentHashMap m);
+
+        @Override
+        default void __initClojureFnMappings(clojure.lang.IPersistentMap m) {
+            __setMappings(PersistentHashMap.fromMap(m));
+        }
+
+        @Override
+        default void __updateClojureFnMappings(clojure.lang.IPersistentMap m) {
+            PersistentHashMap cur = __getMappings();
+            PersistentHashMap next = cur != null ? cur : PersistentHashMap.EMPTY;
+            if (m != null) {
+                for (clojure.lang.ISeq s = m.seq(); s != null; s = s.next()) {
+                    Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                    next = next.assoc(e.getKey(), e.getValue());
+                }
+            }
+            __setMappings(next);
+        }
+
+        @Override
+        default clojure.lang.IPersistentMap __getClojureFnMappings() {
+            return __getMappings();
+        }
     }
 
     public record MethodSig(String name, Class<?> returnType, Class<?>[] paramTypes) {}
@@ -701,7 +724,9 @@ public final class TypeFactory {
         List<Class<?>> uniqueIfaces = new ArrayList<>();
         Set<Class<?>> seenIface = new LinkedHashSet<>();
         for (Class<?> c : interfaces) {
-            if (c != null && c.isInterface() && c != IObj.class && c != IMeta.class
+            if (c != null && c.isInterface()
+                    && c != IObj.class && c != IMeta.class
+                    && c != clojure.lang.IObj.class && c != clojure.lang.IMeta.class
                     && c != Protocol.Dispatchable.class && seenIface.add(c)) {
                 uniqueIfaces.add(c);
             }
@@ -743,7 +768,8 @@ public final class TypeFactory {
 
         Set<String> emitted = new HashSet<>();
         emitted.add("meta()Lcljl/lang/PersistentHashMap;");
-        emitted.add("withMeta(Lcljl/lang/PersistentHashMap;)Ljava/lang/Object;");
+        emitted.add("meta()Lclojure/lang/IPersistentMap;");
+        emitted.add("withMeta(Lcljl/lang/PersistentHashMap;)Lcljl/lang/IObj;");
         emitted.add("__protocolFn(Lcljl/Protocol;Lcljl/Keyword;)Lcljl/Fn;");
         emitted.add("__satisfies(Lcljl/Protocol;)Z");
         emitted.add("__protocolImpls(Lcljl/Protocol;)Ljava/util/Map;");
@@ -1631,7 +1657,9 @@ public final class TypeFactory {
             gm.aload(0);
             gm.getfield(className, "__meta", "Lcljl/lang/PersistentHashMap;");
             gm.areturn();
-            addCodeMethod(0x0001, "meta", "()Lcljl/lang/PersistentHashMap;", 2, 1, gm.toBytes());
+            byte[] gmBytes = gm.toBytes();
+            addCodeMethod(0x0001, "meta", "()Lcljl/lang/PersistentHashMap;", 2, 1, gmBytes);
+            addCodeMethod(0x1041, "meta", "()Lclojure/lang/IPersistentMap;", 2, 1, gmBytes);
 
             // withMeta(PersistentHashMap)
             MethodAssembler wm = new MethodAssembler(this);
@@ -1644,7 +1672,7 @@ public final class TypeFactory {
             wm.getfield(className, "__protoImpls", "Ljava/util/Map;");
             wm.invokespecial(className, "<init>", "(Lcljl/lang/PersistentHashMap;Ljava/util/Map;Ljava/util/Map;)V");
             wm.areturn();
-            addCodeMethod(0x0001, "withMeta", "(Lcljl/lang/PersistentHashMap;)Ljava/lang/Object;", 6, 2, wm.toBytes());
+            addCodeMethod(0x0001, "withMeta", "(Lcljl/lang/PersistentHashMap;)Lcljl/lang/IObj;", 6, 2, wm.toBytes());
 
             // __protocolFn(Protocol, Keyword)
             MethodAssembler pf = new MethodAssembler(this);

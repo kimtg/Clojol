@@ -10,7 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Clojure multimethod supporting arbitrary dispatch functions and hierarchy/isa? matching.
  */
-public final class MultiFn extends Fn implements IObj {
+public final class MultiFn extends clojure.lang.MultiFn implements IObj {
     public final String name;
     public final Fn dispatchFn;
     public final Object defaultDispatchVal;
@@ -250,7 +250,7 @@ public final class MultiFn extends Fn implements IObj {
     }
 
     @Override
-    public Object withMeta(PersistentHashMap m) {
+    public IObj withMeta(PersistentHashMap m) {
         return m == null ? this : new MetaFn(this, m);
     }
 

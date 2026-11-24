@@ -5,11 +5,17 @@ import cljl.RT;
 import java.io.Serializable;
 import java.util.*;
 
-public final class PersistentHashSet extends Fn
+public final class PersistentHashSet extends clojure.lang.PersistentHashSet
         implements IPersistentSet, IObj, IEditableCollection, IHashEq, Set<Object>, Serializable {
 
     private static final long serialVersionUID = 1L;
-    public static final PersistentHashSet EMPTY = new PersistentHashSet(null, PersistentHashMap.EMPTY);
+    private static PersistentHashSet _empty;
+    public static PersistentHashSet emptyInstance() {
+        PersistentHashSet e = _empty;
+        if (e == null) { e = new PersistentHashSet(null, PersistentHashMap.emptyInstance()); _empty = e; }
+        return e;
+    }
+    public static final PersistentHashSet EMPTY = emptyInstance();
 
     public final PersistentHashMap impl;
     private final PersistentHashMap meta;

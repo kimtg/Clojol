@@ -1,0 +1,8 @@
+package clojure.lang;
+
+public interface IPersistentVector extends Associative, Sequential, IPersistentStack, Reversible, Indexed {
+    int length();
+    IPersistentVector assocN(int i, Object val);
+    @Override
+    IPersistentVector cons(Object o);
+}

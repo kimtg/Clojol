@@ -8,7 +8,7 @@ import java.io.Reader;
 /**
  * PushbackReader tracking 1-based line and column numbers (Clojure-compatible API).
  */
-public class LineNumberingPushbackReader extends PushbackReader {
+public class LineNumberingPushbackReader extends clojure.lang.LineNumberingPushbackReader {
     private static final int NEWLINE = '\n';
     private boolean atLineStart = true;
     private boolean prevAtLineStart = true;

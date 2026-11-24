@@ -7,7 +7,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.MathContext;
 
-public final class Ratio extends Number implements Comparable<Number> {
+public final class Ratio extends clojure.lang.Ratio implements Comparable<Number> {
     private static final long serialVersionUID = 1L;
     public final BigInteger numerator;
     public final BigInteger denominator;

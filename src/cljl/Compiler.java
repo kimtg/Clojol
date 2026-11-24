@@ -32,20 +32,15 @@ public final class Compiler {
     public static final Var SOURCE = Var.create("NO_SOURCE_FILE").setDynamic();
     public static final Var SOURCE_PATH = Var.create("NO_SOURCE_PATH").setDynamic();
 
-    public static class CompilerException extends RuntimeException {
-        public final String source;
-        public final int line;
+    public static class CompilerException extends clojure.lang.Compiler.CompilerException {
+        private static final long serialVersionUID = 1L;
 
         public CompilerException(String source, int line, Throwable cause) {
-            super("Syntax error compiling at (" + source + ":" + line + ")", cause);
-            this.source = source;
-            this.line = line;
+            super(source, line, cause);
         }
 
         public CompilerException(String message, Throwable cause) {
             super(message, cause);
-            this.source = null;
-            this.line = -1;
         }
     }
 
@@ -3468,7 +3463,7 @@ public final class Compiler {
         public final Class<?>[] paramTags;
         public NewNode(Class<?> clazz, Node[] args) { this(clazz, args, null); }
         public NewNode(Class<?> clazz, Node[] args, Class<?>[] paramTags) {
-            this.clazz = clazz;
+            this.clazz = Interop.concreteClass(clazz);
             this.args = args;
             this.paramTags = paramTags;
         }

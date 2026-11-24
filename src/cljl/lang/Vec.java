@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Primitive-array-backed persistent vector (Vec, VecNode, VecSeq) for ->Vec / ->VecNode / ->VecSeq.
  */
-public final class Vec extends Fn
+public final class Vec extends clojure.lang.APersistentVector
         implements IPersistentVector, IObj, IHashEq, List<Object>, RandomAccess, Comparable<Object>, java.io.Serializable {
     private static final long serialVersionUID = 1L;
 
@@ -241,7 +241,7 @@ public final class Vec extends Fn
     @Override public void add(int index, Object element) { throw new UnsupportedOperationException(); }
     @Override public Object remove(int index) { throw new UnsupportedOperationException(); }
 
-    @Override public IPersistentCollection cons(Object o) { return toPersistentVector().conj(o); }
+    @Override public PersistentVector cons(Object o) { return toPersistentVector().conj(o); }
     @Override public IPersistentCollection empty() { return PersistentVector.EMPTY; }
     @Override public Object peek() { return cnt > 0 ? nth(cnt - 1) : null; }
     @Override public IPersistentStack pop() { return toPersistentVector().pop(); }

@@ -1,0 +1,4 @@
+package clojure.lang;
+
+public interface Sequential {
+}

@@ -5,7 +5,7 @@ package cljl.lang;
  * Unlike {@link PersistentList}, {@code Cons} does not implement {@link Counted}
  * so lazily produced sequences retain accurate O(n) counting semantics.
  */
-public final class Cons extends ASeq {
+public final class Cons extends clojure.lang.Cons {
     private final Object first;
     private final ISeq _more;
 

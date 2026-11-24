@@ -3,7 +3,7 @@ package cljl.lang;
 import cljl.Keyword;
 import cljl.RT;
 
-public final class ReaderConditional implements ILookup {
+public final class ReaderConditional extends clojure.lang.ReaderConditional implements ILookup {
     private static final Keyword FORM_KW = Keyword.intern("form");
     private static final Keyword SPLICING_KW = Keyword.intern("splicing?");
 

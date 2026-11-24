@@ -9,7 +9,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
-public final class Namespace implements IMeta, IReference {
+public final class Namespace extends clojure.lang.Namespace implements IMeta, IReference {
     public interface LazyLoader {
         boolean loadSymbol(Symbol sym);
         void loadAll();

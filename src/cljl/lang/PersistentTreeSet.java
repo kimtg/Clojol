@@ -8,11 +8,17 @@ import java.util.*;
 /**
  * Persistent sorted set backed by PersistentTreeMap.
  */
-public final class PersistentTreeSet extends Fn
+public final class PersistentTreeSet extends clojure.lang.PersistentTreeSet
         implements IPersistentSet, IObj, Sorted, Reversible, IHashEq, Set<Object>, Iterable<Object>, Serializable {
 
     private static final long serialVersionUID = 1L;
-    public static final PersistentTreeSet EMPTY = new PersistentTreeSet(null, PersistentTreeMap.EMPTY);
+    private static PersistentTreeSet _empty;
+    public static PersistentTreeSet emptyInstance() {
+        PersistentTreeSet e = _empty;
+        if (e == null) { e = new PersistentTreeSet(null, PersistentTreeMap.emptyInstance()); _empty = e; }
+        return e;
+    }
+    public static final PersistentTreeSet EMPTY = emptyInstance();
 
     public final PersistentTreeMap impl;
     private final PersistentHashMap meta;

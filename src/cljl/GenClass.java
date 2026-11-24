@@ -3,17 +3,24 @@ package cljl;
 import cljl.lang.*;
 import java.io.*;
 import java.lang.reflect.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * Clean-room JVM bytecode generator for Clojure's `gen-class` and AOT `compile`.
- * Emits standard JVM v49.0 .class bytecode (supports :name, :extends, :implements,
- * :prefix, :main, :state, :init, :post-init, :constructors, :methods, :impl-ns),
- * defines the class dynamically at runtime, and writes .class files to *compile-path*
- * when *compile-files* is true.
+ * Emits standard JVM v49.0 .class bytecode supporting:
+ *   :name, :extends, :implements, :prefix, :main, :state, :init, :post-init,
+ *   :constructors (including super-arg forwarding from -init), :methods, :impl-ns,
+ *   :exposes, :exposes-methods, :factory, :load-impl-ns, and automatic superclass
+ *   method overrides with super fallback,
+ * plus full AOT `<munged_ns>__init.class` emission for source-free AOT loading.
  */
 public final class GenClass {
+
+    private static final int CHUNK_SIZE = 28000;
 
     private GenClass() {}
 
@@ -43,6 +50,76 @@ public final class GenClass {
         return libSym;
     }
 
+    /**
+     * Emits `<munged_ns>__init.class` into *compile-path* when *compile-files* is true.
+     * The generated class exposes `public static void load()` and a `<clinit>` that invokes `load()`,
+     * matching Clojure's AOT namespace initialization contract so namespaces load cleanly without .clj sources.
+     */
+    public static void emitNamespaceInitClass(String nsName, String sourceName, String sourceText) {
+        if (!RT.truthy(RT.COMPILE_FILES.deref())) return;
+        if (nsName == null || nsName.isEmpty()) return;
+        String binaryName = mungeClassName(nsName) + "__init";
+        String internalName = binaryName.replace('.', '/');
+
+        // Compress source text with GZIP and Base64-encode into <= 28KB chunks (well below 65535 UTF-8 limit)
+        byte[] gzipped;
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (GZIPOutputStream gz = new GZIPOutputStream(baos)) {
+                gz.write(sourceText.getBytes(StandardCharsets.UTF_8));
+            }
+            gzipped = baos.toByteArray();
+        } catch (IOException e) {
+            throw RT.sneakyThrow(e);
+        }
+        String b64 = Base64.getEncoder().encodeToString(gzipped);
+        int numChunks = Math.max(1, (b64.length() + CHUNK_SIZE - 1) / CHUNK_SIZE);
+        String[] chunks = new String[numChunks];
+        for (int i = 0; i < numChunks; i++) {
+            int start = i * CHUNK_SIZE;
+            int end = Math.min(b64.length(), start + CHUNK_SIZE);
+            chunks[i] = b64.substring(start, end);
+        }
+
+        GenClassWriter cw = new GenClassWriter(internalName, "java/lang/Object", new String[0]);
+        cw.emitNamespaceInitMethods(nsName, sourceName != null ? sourceName : (internalName + ".clj"), chunks);
+        byte[] bytes = cw.toByteArray();
+        writeClassFileIfCompiling(binaryName, bytes);
+    }
+
+    /**
+     * Runtime entrypoint invoked by `<munged_ns>__init.load()` to initialize an AOT-compiled namespace
+     * without requiring original `.clj` source files on the classpath.
+     */
+    public static void loadCompiledNamespace(String nsName, String sourceName, String[] base64GzipChunks) {
+        RT.ensureInit();
+        if (Core.isLibLoaded(nsName) && Namespace.find(nsName) != null) return;
+        if (Core.isLibLoading(nsName)) return;
+
+        StringBuilder sb = new StringBuilder();
+        if (base64GzipChunks != null) {
+            for (String c : base64GzipChunks) sb.append(c);
+        }
+        byte[] compressed = Base64.getDecoder().decode(sb.toString());
+        String src;
+        try (GZIPInputStream gz = new GZIPInputStream(new ByteArrayInputStream(compressed))) {
+            src = new String(gz.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw RT.sneakyThrow(e);
+        }
+
+        Namespace savedNs = RT.currentNS();
+        Var.pushThreadBindings(Map.of(RT.CURRENT_NS, savedNs, RT.COMPILE_FILES, Boolean.FALSE));
+        Core.beginLibLoading(nsName);
+        try {
+            Compiler.load(src, sourceName);
+            Core.markLibLoaded(nsName);
+        } finally {
+            Core.endLibLoading(nsName);
+            Var.popThreadBindings();
+        }
+    }
+
     public static void writeClassFileIfCompiling(String binaryName, byte[] bytes) {
         if (!RT.truthy(RT.COMPILE_FILES.deref())) return;
         if (binaryName == null || binaryName.isEmpty() || binaryName.contains("..") || binaryName.indexOf('\0') >= 0) {
@@ -64,6 +141,7 @@ public final class GenClass {
         }
     }
 
+    @SuppressWarnings("unchecked")
     public static Class<?> defineGenClass(PersistentHashMap opts, Namespace curNs) {
         Object nameObj = opts.valAt(Keyword.intern("name"));
         String binaryName = nameObj != null ? mungeClassName(String.valueOf(nameObj))
@@ -74,6 +152,8 @@ public final class GenClass {
                 ? String.valueOf(opts.valAt(Keyword.intern("prefix")))
                 : "-";
         boolean genMain = RT.truthy(opts.valAt(Keyword.intern("main")));
+        Object loadImplNsObj = opts.valAt(Keyword.intern("load-impl-ns"), Boolean.TRUE);
+        boolean loadImplNs = RT.truthy(loadImplNsObj);
         String stateField = opts.valAt(Keyword.intern("state")) != null
                 ? String.valueOf(opts.valAt(Keyword.intern("state")))
                 : null;
@@ -82,6 +162,9 @@ public final class GenClass {
                 : null;
         String postInitName = opts.valAt(Keyword.intern("post-init")) != null
                 ? String.valueOf(opts.valAt(Keyword.intern("post-init")))
+                : null;
+        String factoryName = opts.valAt(Keyword.intern("factory")) != null
+                ? String.valueOf(opts.valAt(Keyword.intern("factory")))
                 : null;
 
         Class<?> superClass = Object.class;
@@ -111,19 +194,102 @@ public final class GenClass {
             cw.addField(0x0011, stateField, "Ljava/lang/Object;"); // PUBLIC | FINAL
         }
 
-        // Constructors
+        // Static initializer: auto-load impl-ns when :load-impl-ns is true (default)
+        if (loadImplNs) {
+            cw.emitClinit(implNsName);
+        }
+
+        // Constructors (with :init super-arg forwarding and optional :factory static methods)
+        List<Class<?>[]> ctorParamLists = new ArrayList<>();
         Object ctorsObj = opts.valAt(Keyword.intern("constructors"));
         if (ctorsObj instanceof Map<?, ?> cm && !cm.isEmpty()) {
             for (Map.Entry<?, ?> e : cm.entrySet()) {
                 Class<?>[] pTypes = resolveTypeList(curNs, e.getKey());
                 Class<?>[] superPTypes = resolveTypeList(curNs, e.getValue());
-                cw.emitCtor(implNsName, prefix, initName, postInitName, stateField, superInternal, pTypes, superPTypes);
+                cw.emitCtor(implNsName, prefix, initName, postInitName, stateField, loadImplNs,
+                        superInternal, pTypes, superPTypes);
+                ctorParamLists.add(pTypes);
             }
         } else {
-            cw.emitCtor(implNsName, prefix, initName, postInitName, stateField, superInternal, new Class<?>[0], new Class<?>[0]);
+            // Mirror accessible superclass constructors (default [] -> [] for Object)
+            List<Class<?>[]> mirrored = new ArrayList<>();
+            for (Constructor<?> c : superClass.getDeclaredConstructors()) {
+                int mods = c.getModifiers();
+                if (Modifier.isPublic(mods) || Modifier.isProtected(mods)) {
+                    mirrored.add(c.getParameterTypes());
+                }
+            }
+            if (mirrored.isEmpty()) mirrored.add(new Class<?>[0]);
+            for (Class<?>[] pTypes : mirrored) {
+                cw.emitCtor(implNsName, prefix, initName, postInitName, stateField, loadImplNs,
+                        superInternal, pTypes, pTypes);
+                ctorParamLists.add(pTypes);
+            }
         }
 
         Set<String> emitted = new HashSet<>();
+
+        // :factory static factory methods calling each constructor
+        if (factoryName != null) {
+            for (Class<?>[] pTypes : ctorParamLists) {
+                String desc = methodDescRaw("L" + internalName + ";", pTypes);
+                if (emitted.add(factoryName + desc)) {
+                    cw.emitFactoryMethod(factoryName, pTypes);
+                }
+            }
+        }
+
+        // :exposes {superField {:get getSuperField :set setSuperField}}
+        Object exposesObj = opts.valAt(Keyword.intern("exposes"));
+        if (exposesObj instanceof Map<?, ?> em) {
+            for (Map.Entry<?, ?> e : em.entrySet()) {
+                String fieldName = String.valueOf(e.getKey());
+                Field f = findAccessibleField(superClass, fieldName);
+                if (f == null) {
+                    throw new IllegalArgumentException("No accessible field '" + fieldName + "' on " + superClass.getName());
+                }
+                Class<?> fType = f.getType();
+                String ownerInternal = f.getDeclaringClass().getName().replace('.', '/');
+                if (e.getValue() instanceof Map<?, ?> spec) {
+                    Object getSym = spec.get(Keyword.intern("get"));
+                    if (getSym != null) {
+                        String gName = String.valueOf(getSym);
+                        String desc = methodDesc(fType, new Class<?>[0]);
+                        if (emitted.add(gName + desc)) {
+                            cw.emitFieldGetter(ownerInternal, fieldName, fType, gName);
+                        }
+                    }
+                    Object setSym = spec.get(Keyword.intern("set"));
+                    if (setSym != null) {
+                        String sName = String.valueOf(setSym);
+                        String desc = methodDesc(void.class, new Class<?>[]{fType});
+                        if (emitted.add(sName + desc)) {
+                            cw.emitFieldSetter(ownerInternal, fieldName, fType, sName);
+                        }
+                    }
+                }
+            }
+        }
+
+        // :exposes-methods {superMethod exposedName}
+        Object exposesMethodsObj = opts.valAt(Keyword.intern("exposes-methods"));
+        if (exposesMethodsObj instanceof Map<?, ?> emm) {
+            for (Map.Entry<?, ?> e : emm.entrySet()) {
+                String superMName = String.valueOf(e.getKey());
+                String exposedName = String.valueOf(e.getValue());
+                List<Method> matches = findAccessibleMethodsByName(superClass, superMName);
+                if (matches.isEmpty()) {
+                    throw new IllegalArgumentException("No accessible method '" + superMName + "' on " + superClass.getName());
+                }
+                for (Method m : matches) {
+                    if (Modifier.isAbstract(m.getModifiers())) continue;
+                    String desc = methodDesc(m.getReturnType(), m.getParameterTypes());
+                    if (emitted.add(exposedName + desc)) {
+                        cw.emitExposedSuperMethod(superInternal, superMName, exposedName, m.getReturnType(), m.getParameterTypes());
+                    }
+                }
+            }
+        }
 
         // Explicit :methods
         Object methodsObj = opts.valAt(Keyword.intern("methods"));
@@ -137,7 +303,7 @@ public final class GenClass {
                 if (retType == null) retType = Object.class;
                 String desc = methodDesc(retType, pTypes);
                 if (emitted.add(mName + desc)) {
-                    cw.emitMethod(implNsName, prefix, mName, isStatic, retType, pTypes);
+                    cw.emitMethod(implNsName, prefix, mName, isStatic, loadImplNs, retType, pTypes);
                 }
             }
         }
@@ -148,8 +314,20 @@ public final class GenClass {
                 if (Modifier.isStatic(m.getModifiers())) continue;
                 String desc = methodDesc(m.getReturnType(), m.getParameterTypes());
                 if (emitted.add(m.getName() + desc)) {
-                    cw.emitMethod(implNsName, prefix, m.getName(), false, m.getReturnType(), m.getParameterTypes());
+                    cw.emitMethod(implNsName, prefix, m.getName(), false, loadImplNs, m.getReturnType(), m.getParameterTypes());
                 }
+            }
+        }
+
+        // Overridable superclass methods (abstract -> dispatch directly; concrete -> dispatch if var exists else super)
+        for (Method m : collectOverridableSuperMethods(superClass)) {
+            String desc = methodDesc(m.getReturnType(), m.getParameterTypes());
+            if (!emitted.add(m.getName() + desc)) continue;
+            if (Modifier.isAbstract(m.getModifiers())) {
+                cw.emitMethod(implNsName, prefix, m.getName(), false, loadImplNs, m.getReturnType(), m.getParameterTypes());
+            } else {
+                cw.emitSuperFallbackMethod(implNsName, prefix, m.getName(), loadImplNs,
+                        superInternal, m.getReturnType(), m.getParameterTypes());
             }
         }
 
@@ -168,53 +346,148 @@ public final class GenClass {
         return cls;
     }
 
+    private static Field findAccessibleField(Class<?> cls, String name) {
+        for (Class<?> c = cls; c != null; c = c.getSuperclass()) {
+            try {
+                Field f = c.getDeclaredField(name);
+                int mods = f.getModifiers();
+                if ((Modifier.isPublic(mods) || Modifier.isProtected(mods)) && !Modifier.isStatic(mods)) {
+                    return f;
+                }
+            } catch (NoSuchFieldException ignored) {}
+        }
+        return null;
+    }
+
+    private static List<Method> findAccessibleMethodsByName(Class<?> cls, String name) {
+        List<Method> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (Class<?> c = cls; c != null; c = c.getSuperclass()) {
+            for (Method m : c.getDeclaredMethods()) {
+                if (!m.getName().equals(name)) continue;
+                int mods = m.getModifiers();
+                if (Modifier.isStatic(mods) || Modifier.isPrivate(mods) || m.isSynthetic() || m.isBridge()) continue;
+                if (!Modifier.isPublic(mods) && !Modifier.isProtected(mods)) continue;
+                String sig = m.getName() + methodDesc(m.getReturnType(), m.getParameterTypes());
+                if (seen.add(sig)) result.add(m);
+            }
+        }
+        return result;
+    }
+
+    private static List<Method> collectOverridableSuperMethods(Class<?> superClass) {
+        List<Method> result = new ArrayList<>();
+        Set<String> seenSigs = new HashSet<>();
+        Set<String> finalSigs = new HashSet<>();
+        for (Class<?> c = superClass; c != null; c = c.getSuperclass()) {
+            for (Method m : c.getDeclaredMethods()) {
+                int mods = m.getModifiers();
+                if (Modifier.isStatic(mods) || Modifier.isPrivate(mods) || m.isSynthetic() || m.isBridge()) continue;
+                if (!Modifier.isPublic(mods) && !Modifier.isProtected(mods)) continue;
+                String name = m.getName();
+                if (c == Object.class && ("getClass".equals(name) || "notify".equals(name)
+                        || "notifyAll".equals(name) || "wait".equals(name) || "finalize".equals(name))) {
+                    continue;
+                }
+                String paramSig = name + paramDescOnly(m.getParameterTypes());
+                if (Modifier.isFinal(mods)) {
+                    finalSigs.add(paramSig);
+                    continue;
+                }
+                if (finalSigs.contains(paramSig)) continue;
+                if (seenSigs.add(paramSig)) {
+                    result.add(m);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static String paramDescOnly(Class<?>[] params) {
+        StringBuilder sb = new StringBuilder("(");
+        for (Class<?> p : params) sb.append(typeDesc(p));
+        sb.append(')');
+        return sb.toString();
+    }
+
     // ========================================================================
     // Runtime Dispatch Hooks Called by Generated GenClass Bytecode
     // ========================================================================
 
-    private static Var resolveImplVar(String nsName, String fnName) {
+    public static void ensureImplNsLoaded(String nsName) {
+        RT.ensureInit();
+        if (Namespace.find(nsName) == null) {
+            Core.loadLib(nsName);
+        }
+    }
+
+    public static Var findImplVar(String nsName, String fnName, boolean loadImplNs) {
         RT.ensureInit();
         Namespace ns = Namespace.find(nsName);
-        if (ns == null) {
+        if (ns == null && loadImplNs) {
             Core.loadLib(nsName);
             ns = Namespace.find(nsName);
         }
-        if (ns == null) throw new IllegalStateException("Namespace not found for gen-class: " + nsName);
+        if (ns == null) return null;
         Var v = ns.findInternedVar(Symbol.intern(fnName));
-        if (v == null || !v.isBound()) {
+        return (v != null && v.isBound()) ? v : null;
+    }
+
+    private static Var resolveImplVar(String nsName, String fnName, boolean loadImplNs) {
+        Var v = findImplVar(nsName, fnName, loadImplNs);
+        if (v == null) {
+            Namespace ns = Namespace.find(nsName);
+            if (ns == null) {
+                throw new IllegalStateException("Namespace not found for gen-class: " + nsName);
+            }
             throw new UnsupportedOperationException("gen-class function not defined: " + nsName + "/" + fnName);
         }
         return v;
     }
 
-    public static Object dispatchInit(String nsName, String fnName, Object[] args) {
-        Var v = resolveImplVar(nsName, fnName);
-        Object[] boxed = boxArgs(args);
-        Object res = ((Fn) v.deref()).applyTo(boxed);
-        if (res instanceof PersistentVector pv && pv.count() >= 2) {
-            return pv.nth(1);
+    /**
+     * Invokes the `:init` function before `super(...)` and returns a 2-element array:
+     * `[0]` = `Object[]` of arguments to pass to `super(...)`, `[1]` = initial state value.
+     */
+    public static Object[] dispatchInitPair(String nsName, String fnName, boolean loadImplNs, Object[] args) {
+        Var v = resolveImplVar(nsName, fnName, loadImplNs);
+        Object res = ((Fn) v.deref()).applyTo(boxArgs(args));
+        if (res instanceof clojure.lang.IPersistentVector pv && pv.count() >= 1) {
+            Object superArgsObj = pv.nth(0);
+            Object[] superArgs = superArgsObj != null ? RT.toArray(superArgsObj) : Fn.EMPTY_ARGS;
+            Object stateVal = pv.count() >= 2 ? pv.nth(1) : null;
+            return new Object[]{superArgs, stateVal};
         }
-        return res;
+        return new Object[]{Fn.EMPTY_ARGS, res};
     }
 
-    public static void dispatchPostInit(String nsName, String fnName, Object self, Object[] args) {
-        Var v = resolveImplVar(nsName, fnName);
+    public static Object dispatchInit(String nsName, String fnName, Object[] args) {
+        Object[] pair = dispatchInitPair(nsName, fnName, true, args);
+        return pair[1];
+    }
+
+    public static void dispatchPostInit(String nsName, String fnName, boolean loadImplNs, Object self, Object[] args) {
+        Var v = resolveImplVar(nsName, fnName, loadImplNs);
         Object[] callArgs = new Object[1 + args.length];
         callArgs[0] = self;
         for (int i = 0; i < args.length; i++) callArgs[i + 1] = Interop.boxResult(args[i]);
         ((Fn) v.deref()).applyTo(callArgs);
     }
 
-    public static Object dispatchInstance(String nsName, String fnName, Object self, Object[] args) {
-        Var v = resolveImplVar(nsName, fnName);
+    public static Object dispatchInstance(String nsName, String fnName, boolean loadImplNs, Object self, Object[] args) {
+        Var v = resolveImplVar(nsName, fnName, loadImplNs);
+        return invokeVarInstance(v, self, args);
+    }
+
+    public static Object invokeVarInstance(Var v, Object self, Object[] args) {
         Object[] callArgs = new Object[1 + args.length];
         callArgs[0] = self;
         for (int i = 0; i < args.length; i++) callArgs[i + 1] = Interop.boxResult(args[i]);
         return ((Fn) v.deref()).applyTo(callArgs);
     }
 
-    public static Object dispatchStatic(String nsName, String fnName, Object[] args) {
-        Var v = resolveImplVar(nsName, fnName);
+    public static Object dispatchStatic(String nsName, String fnName, boolean loadImplNs, Object[] args) {
+        Var v = resolveImplVar(nsName, fnName, loadImplNs);
         return ((Fn) v.deref()).applyTo(boxArgs(args));
     }
 
@@ -241,7 +514,7 @@ public final class GenClass {
         return out;
     }
 
-    private static String mungeClassName(String s) {
+    public static String mungeClassName(String s) {
         return s.replace('-', '_');
     }
 
@@ -283,14 +556,18 @@ public final class GenClass {
     }
 
     private static String methodDesc(Class<?> ret, Class<?>[] params) {
+        return methodDescRaw(typeDesc(ret), params);
+    }
+
+    private static String methodDescRaw(String retDesc, Class<?>[] params) {
         StringBuilder sb = new StringBuilder("(");
         for (Class<?> p : params) sb.append(typeDesc(p));
-        sb.append(')').append(typeDesc(ret));
+        sb.append(')').append(retDesc);
         return sb.toString();
     }
 
     // ========================================================================
-    // Minimal Self-Contained v49.0 Classfile Writer for GenClass
+    // Self-Contained v49.0 Classfile Writer for GenClass and AOT __init
     // ========================================================================
 
     private static final class GenClassWriter {
@@ -410,6 +687,34 @@ public final class GenClass {
             else { code.write(0x11); code.write(v >> 8); code.write(v); }
         }
 
+        private void emitLoadTypedParam(ByteArrayOutputStream code, Class<?> pt, int slot) {
+            if (pt == long.class) { code.write(0x16); code.write(slot); }
+            else if (pt == double.class) { code.write(0x18); code.write(slot); }
+            else if (pt == float.class) { code.write(0x17); code.write(slot); }
+            else if (pt == int.class || pt == short.class || pt == byte.class || pt == boolean.class || pt == char.class) {
+                code.write(0x15); code.write(slot);
+            } else {
+                code.write(0x19); code.write(slot);
+            }
+        }
+
+        private void emitLoadTypedParams(ByteArrayOutputStream code, Class<?>[] pTypes, int firstLocal) {
+            int slot = firstLocal;
+            for (Class<?> pt : pTypes) {
+                emitLoadTypedParam(code, pt, slot);
+                slot += (pt == long.class || pt == double.class) ? 2 : 1;
+            }
+        }
+
+        private void emitTypedReturn(ByteArrayOutputStream code, Class<?> retType) {
+            if (retType == void.class) code.write(0xb1);
+            else if (retType == long.class) code.write(0xad);
+            else if (retType == double.class) code.write(0xaf);
+            else if (retType == float.class) code.write(0xae);
+            else if (retType.isPrimitive()) code.write(0xac);
+            else code.write(0xb0);
+        }
+
         private void emitPackArgs(ByteArrayOutputStream code, Class<?>[] paramTypes, int firstLocal) {
             emitIntConst(code, paramTypes.length);
             int objCls = cpClass("java/lang/Object");
@@ -420,40 +725,72 @@ public final class GenClass {
                 emitIntConst(code, i);
                 Class<?> pt = paramTypes[i];
                 if (pt == long.class) {
-                    code.write(0x16); code.write(slot); // lload
+                    code.write(0x16); code.write(slot);
                     int m = cpMethodref("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;");
                     code.write(0xb8); code.write(m >> 8); code.write(m);
                     slot += 2;
                 } else if (pt == double.class) {
-                    code.write(0x18); code.write(slot); // dload
+                    code.write(0x18); code.write(slot);
                     int m = cpMethodref("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;");
                     code.write(0xb8); code.write(m >> 8); code.write(m);
                     slot += 2;
                 } else if (pt == int.class || pt == short.class || pt == byte.class) {
-                    code.write(0x15); code.write(slot); // iload
+                    code.write(0x15); code.write(slot);
                     int m = cpMethodref("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;");
                     code.write(0xb8); code.write(m >> 8); code.write(m);
                     slot += 1;
                 } else if (pt == float.class) {
-                    code.write(0x17); code.write(slot); // fload
+                    code.write(0x17); code.write(slot);
                     int m = cpMethodref("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;");
                     code.write(0xb8); code.write(m >> 8); code.write(m);
                     slot += 1;
                 } else if (pt == boolean.class) {
-                    code.write(0x15); code.write(slot); // iload
+                    code.write(0x15); code.write(slot);
                     int m = cpMethodref("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;");
                     code.write(0xb8); code.write(m >> 8); code.write(m);
                     slot += 1;
                 } else if (pt == char.class) {
-                    code.write(0x15); code.write(slot); // iload
+                    code.write(0x15); code.write(slot);
                     int m = cpMethodref("java/lang/Character", "valueOf", "(C)Ljava/lang/Character;");
                     code.write(0xb8); code.write(m >> 8); code.write(m);
                     slot += 1;
                 } else {
-                    code.write(0x19); code.write(slot); // aload
+                    code.write(0x19); code.write(slot);
                     slot += 1;
                 }
                 code.write(0x53); // aastore
+            }
+        }
+
+        private void emitUnboxOrCastValue(ByteArrayOutputStream code, Class<?> targetType) {
+            if (targetType == boolean.class) {
+                int tr = cpMethodref("cljl/RT", "truthy", "(Ljava/lang/Object;)Z");
+                code.write(0xb8); code.write(tr >> 8); code.write(tr);
+            } else if (targetType == long.class) {
+                int nl = cpMethodref("cljl/Numbers", "toLong", "(Ljava/lang/Object;)J");
+                code.write(0xb8); code.write(nl >> 8); code.write(nl);
+            } else if (targetType == int.class) {
+                int nl = cpMethodref("cljl/Numbers", "intCast", "(Ljava/lang/Object;)I");
+                code.write(0xb8); code.write(nl >> 8); code.write(nl);
+            } else if (targetType == double.class) {
+                int nd = cpMethodref("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D");
+                code.write(0xb8); code.write(nd >> 8); code.write(nd);
+            } else if (targetType == float.class) {
+                int nd = cpMethodref("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D");
+                code.write(0xb8); code.write(nd >> 8); code.write(nd);
+                code.write(0x90); // d2f
+            } else if (targetType == short.class) {
+                int nl = cpMethodref("cljl/Numbers", "shortCast", "(Ljava/lang/Object;)S");
+                code.write(0xb8); code.write(nl >> 8); code.write(nl);
+            } else if (targetType == byte.class) {
+                int nl = cpMethodref("cljl/Numbers", "byteCast", "(Ljava/lang/Object;)B");
+                code.write(0xb8); code.write(nl >> 8); code.write(nl);
+            } else if (targetType == char.class) {
+                int nl = cpMethodref("cljl/Numbers", "charCast", "(Ljava/lang/Object;)C");
+                code.write(0xb8); code.write(nl >> 8); code.write(nl);
+            } else if (targetType != Object.class) {
+                int cls = cpClass(targetType.getName().replace('.', '/'));
+                code.write(0xc0); code.write(cls >> 8); code.write(cls); // checkcast
             }
         }
 
@@ -463,114 +800,184 @@ public final class GenClass {
                 code.write(0xb1); // return
                 return;
             }
-            if (retType.isPrimitive()) {
-                int m = cpMethodref("cljl/TypeFactory", "coerceReturn", "(Ljava/lang/Class;Ljava/lang/Object;)Ljava/lang/Object;");
-                // Simpler: convert directly via Numbers / RT
-                if (retType == boolean.class) {
-                    int tr = cpMethodref("cljl/RT", "truthy", "(Ljava/lang/Object;)Z");
-                    code.write(0xb8); code.write(tr >> 8); code.write(tr);
-                    code.write(0xac); // ireturn
-                } else if (retType == long.class) {
-                    int nl = cpMethodref("cljl/Numbers", "toLong", "(Ljava/lang/Object;)J");
-                    code.write(0xb8); code.write(nl >> 8); code.write(nl);
-                    code.write(0xad); // lreturn
-                } else if (retType == int.class) {
-                    int nl = cpMethodref("cljl/Numbers", "intCast", "(Ljava/lang/Object;)I");
-                    code.write(0xb8); code.write(nl >> 8); code.write(nl);
-                    code.write(0xac); // ireturn
-                } else if (retType == double.class) {
-                    int nd = cpMethodref("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D");
-                    code.write(0xb8); code.write(nd >> 8); code.write(nd);
-                    code.write(0xaf); // dreturn
-                } else if (retType == float.class) {
-                    int nd = cpMethodref("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D");
-                    code.write(0xb8); code.write(nd >> 8); code.write(nd);
-                    code.write(0x90); // d2f
-                    code.write(0xae); // freturn
-                } else if (retType == short.class) {
-                    int nl = cpMethodref("cljl/Numbers", "shortCast", "(Ljava/lang/Object;)S");
-                    code.write(0xb8); code.write(nl >> 8); code.write(nl);
-                    code.write(0xac);
-                } else if (retType == byte.class) {
-                    int nl = cpMethodref("cljl/Numbers", "byteCast", "(Ljava/lang/Object;)B");
-                    code.write(0xb8); code.write(nl >> 8); code.write(nl);
-                    code.write(0xac);
-                } else if (retType == char.class) {
-                    int nl = cpMethodref("cljl/Numbers", "charCast", "(Ljava/lang/Object;)C");
-                    code.write(0xb8); code.write(nl >> 8); code.write(nl);
-                    code.write(0xac);
-                }
-                return;
+            emitUnboxOrCastValue(code, retType);
+            emitTypedReturn(code, retType);
+        }
+
+        void emitClinit(String implNsName) {
+            ByteArrayOutputStream code = new ByteArrayOutputStream();
+            emitLdc(code, cpString(implNsName));
+            int m = cpMethodref("cljl/GenClass", "ensureImplNsLoaded", "(Ljava/lang/String;)V");
+            code.write(0xb8); code.write(m >> 8); code.write(m);
+            code.write(0xb1); // return
+            addMethod(0x0008, "<clinit>", "()V", 4, 0, code.toByteArray());
+        }
+
+        void emitNamespaceInitMethods(String nsName, String sourceName, String[] chunks) {
+            // public static synchronized void load()
+            ByteArrayOutputStream code = new ByteArrayOutputStream();
+            emitLdc(code, cpString(nsName));
+            emitLdc(code, cpString(sourceName));
+            emitIntConst(code, chunks.length);
+            int strCls = cpClass("java/lang/String");
+            code.write(0xbd); code.write(strCls >> 8); code.write(strCls); // anewarray String
+            for (int i = 0; i < chunks.length; i++) {
+                code.write(0x59); // dup
+                emitIntConst(code, i);
+                emitLdc(code, cpString(chunks[i]));
+                code.write(0x53); // aastore
             }
-            if (retType != Object.class) {
-                int cls = cpClass(retType.isArray() ? retType.getName().replace('.', '/') : retType.getName().replace('.', '/'));
-                code.write(0xc0); code.write(cls >> 8); code.write(cls); // checkcast
-            }
-            code.write(0xb0); // areturn
+            int loadRef = cpMethodref("cljl/GenClass", "loadCompiledNamespace",
+                    "(Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V");
+            code.write(0xb8); code.write(loadRef >> 8); code.write(loadRef);
+            code.write(0xb1);
+            addMethod(0x0029, "load", "()V", 8, 0, code.toByteArray()); // PUBLIC | STATIC | SYNCHRONIZED
+
+            // static { load(); }
+            ByteArrayOutputStream clinit = new ByteArrayOutputStream();
+            int selfLoad = cpMethodref(thisInternal, "load", "()V");
+            clinit.write(0xb8); clinit.write(selfLoad >> 8); clinit.write(selfLoad);
+            clinit.write(0xb1);
+            addMethod(0x0008, "<clinit>", "()V", 2, 0, clinit.toByteArray());
         }
 
         void emitCtor(
                 String implNsName, String prefix, String initName, String postInitName,
-                String stateField, String superInternal, Class<?>[] pTypes, Class<?>[] superPTypes) {
+                String stateField, boolean loadImplNs, String superInternal,
+                Class<?>[] pTypes, Class<?>[] superPTypes) {
             ByteArrayOutputStream code = new ByteArrayOutputStream();
-            code.write(0x2a); // aload_0
-            // Pass matching prefix of args to super if superPTypes matches pTypes prefix
-            int slot = 1;
-            for (int i = 0; i < superPTypes.length && i < pTypes.length; i++) {
-                Class<?> pt = pTypes[i];
-                if (pt == long.class) { code.write(0x16); code.write(slot); slot += 2; }
-                else if (pt == double.class) { code.write(0x18); code.write(slot); slot += 2; }
-                else if (pt == int.class || pt == short.class || pt == byte.class || pt == boolean.class || pt == char.class) {
-                    code.write(0x15); code.write(slot); slot += 1;
-                } else if (pt == float.class) { code.write(0x17); code.write(slot); slot += 1; }
-                else { code.write(0x19); code.write(slot); slot += 1; }
-            }
-            int superCtor = cpMethodref(superInternal, "<init>", methodDesc(void.class, superPTypes));
-            code.write(0xb7); code.write(superCtor >> 8); code.write(superCtor); // invokespecial
+            int firstFreeLocal = 1;
+            for (Class<?> pt : pTypes) firstFreeLocal += (pt == long.class || pt == double.class) ? 2 : 1;
 
-            if (initName != null && stateField != null) {
-                code.write(0x2a); // aload_0
+            if (initName != null) {
+                // Invoke :init BEFORE super(...) so returned [super-args state] can be forwarded to super(...)
                 emitLdc(code, cpString(implNsName));
                 emitLdc(code, cpString(prefix + initName));
+                code.write(loadImplNs ? 0x04 : 0x03);
                 emitPackArgs(code, pTypes, 1);
-                int disp = cpMethodref("cljl/GenClass", "dispatchInit", "(Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;");
+                int disp = cpMethodref("cljl/GenClass", "dispatchInitPair",
+                        "(Ljava/lang/String;Ljava/lang/String;Z[Ljava/lang/Object;)[Ljava/lang/Object;");
                 code.write(0xb8); code.write(disp >> 8); code.write(disp);
-                int fref = cpFieldref(thisInternal, stateField, "Ljava/lang/Object;");
-                code.write(0xb5); code.write(fref >> 8); code.write(fref); // putfield
-            } else if (stateField != null) {
+                code.write(0x3a); code.write(firstFreeLocal); // astore initPair
+
                 code.write(0x2a); // aload_0
-                code.write(0x01); // aconst_null
-                int fref = cpFieldref(thisInternal, stateField, "Ljava/lang/Object;");
-                code.write(0xb5); code.write(fref >> 8); code.write(fref);
+                int objArrCls = cpClass("[Ljava/lang/Object;");
+                for (int i = 0; i < superPTypes.length; i++) {
+                    code.write(0x19); code.write(firstFreeLocal); // aload initPair
+                    code.write(0x03); // iconst_0 -> superArgs
+                    code.write(0x32); // aaload
+                    code.write(0xc0); code.write(objArrCls >> 8); code.write(objArrCls); // checkcast Object[]
+                    emitIntConst(code, i);
+                    code.write(0x32); // aaload
+                    emitUnboxOrCastValue(code, superPTypes[i]);
+                }
+                int superCtor = cpMethodref(superInternal, "<init>", methodDesc(void.class, superPTypes));
+                code.write(0xb7); code.write(superCtor >> 8); code.write(superCtor); // invokespecial
+
+                if (stateField != null) {
+                    code.write(0x2a); // aload_0
+                    code.write(0x19); code.write(firstFreeLocal); // aload initPair
+                    code.write(0x04); // iconst_1 -> stateVal
+                    code.write(0x32); // aaload
+                    int fref = cpFieldref(thisInternal, stateField, "Ljava/lang/Object;");
+                    code.write(0xb5); code.write(fref >> 8); code.write(fref); // putfield
+                }
+            } else {
+                code.write(0x2a); // aload_0
+                int slot = 1;
+                for (int i = 0; i < superPTypes.length && i < pTypes.length; i++) {
+                    emitLoadTypedParam(code, pTypes[i], slot);
+                    slot += (pTypes[i] == long.class || pTypes[i] == double.class) ? 2 : 1;
+                }
+                int superCtor = cpMethodref(superInternal, "<init>", methodDesc(void.class, superPTypes));
+                code.write(0xb7); code.write(superCtor >> 8); code.write(superCtor);
+
+                if (stateField != null) {
+                    code.write(0x2a); // aload_0
+                    code.write(0x01); // aconst_null
+                    int fref = cpFieldref(thisInternal, stateField, "Ljava/lang/Object;");
+                    code.write(0xb5); code.write(fref >> 8); code.write(fref);
+                }
             }
 
             if (postInitName != null) {
                 emitLdc(code, cpString(implNsName));
                 emitLdc(code, cpString(prefix + postInitName));
+                code.write(loadImplNs ? 0x04 : 0x03);
                 code.write(0x2a); // aload_0
                 emitPackArgs(code, pTypes, 1);
-                int disp = cpMethodref("cljl/GenClass", "dispatchPostInit", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;[Ljava/lang/Object;)V");
+                int disp = cpMethodref("cljl/GenClass", "dispatchPostInit",
+                        "(Ljava/lang/String;Ljava/lang/String;ZLjava/lang/Object;[Ljava/lang/Object;)V");
                 code.write(0xb8); code.write(disp >> 8); code.write(disp);
             }
 
             code.write(0xb1); // return
-            int maxLocals = 1;
-            for (Class<?> pt : pTypes) maxLocals += (pt == long.class || pt == double.class) ? 2 : 1;
-            addMethod(0x0001, "<init>", methodDesc(void.class, pTypes), 12, maxLocals + 2, code.toByteArray());
+            int maxStack = Math.max(12, 4 + superPTypes.length * 2);
+            addMethod(0x0001, "<init>", methodDesc(void.class, pTypes), maxStack, firstFreeLocal + 2, code.toByteArray());
         }
 
-        void emitMethod(String implNsName, String prefix, String mName, boolean isStatic, Class<?> retType, Class<?>[] pTypes) {
+        void emitFactoryMethod(String factoryName, Class<?>[] pTypes) {
+            ByteArrayOutputStream code = new ByteArrayOutputStream();
+            code.write(0xbb); code.write(thisClassIdx >> 8); code.write(thisClassIdx); // new thisInternal
+            code.write(0x59); // dup
+            emitLoadTypedParams(code, pTypes, 0);
+            int ctorRef = cpMethodref(thisInternal, "<init>", methodDesc(void.class, pTypes));
+            code.write(0xb7); code.write(ctorRef >> 8); code.write(ctorRef); // invokespecial
+            code.write(0xb0); // areturn
+            int maxLocals = 0;
+            for (Class<?> pt : pTypes) maxLocals += (pt == long.class || pt == double.class) ? 2 : 1;
+            addMethod(0x0009, factoryName, methodDescRaw("L" + thisInternal + ";", pTypes),
+                    Math.max(4, maxLocals + 3), maxLocals, code.toByteArray());
+        }
+
+        void emitFieldGetter(String ownerInternal, String fieldName, Class<?> fieldType, String getterName) {
+            ByteArrayOutputStream code = new ByteArrayOutputStream();
+            code.write(0x2a); // aload_0
+            int fref = cpFieldref(ownerInternal, fieldName, typeDesc(fieldType));
+            code.write(0xb4); code.write(fref >> 8); code.write(fref); // getfield
+            emitTypedReturn(code, fieldType);
+            addMethod(0x0001, getterName, methodDesc(fieldType, new Class<?>[0]), 4, 1, code.toByteArray());
+        }
+
+        void emitFieldSetter(String ownerInternal, String fieldName, Class<?> fieldType, String setterName) {
+            ByteArrayOutputStream code = new ByteArrayOutputStream();
+            code.write(0x2a); // aload_0
+            emitLoadTypedParam(code, fieldType, 1);
+            int fref = cpFieldref(ownerInternal, fieldName, typeDesc(fieldType));
+            code.write(0xb5); code.write(fref >> 8); code.write(fref); // putfield
+            code.write(0xb1); // return
+            int locals = 1 + ((fieldType == long.class || fieldType == double.class) ? 2 : 1);
+            addMethod(0x0001, setterName, methodDesc(void.class, new Class<?>[]{fieldType}), 4, locals, code.toByteArray());
+        }
+
+        void emitExposedSuperMethod(String superInternal, String superMName, String exposedName, Class<?> retType, Class<?>[] pTypes) {
+            ByteArrayOutputStream code = new ByteArrayOutputStream();
+            code.write(0x2a); // aload_0
+            emitLoadTypedParams(code, pTypes, 1);
+            int superRef = cpMethodref(superInternal, superMName, methodDesc(retType, pTypes));
+            code.write(0xb7); code.write(superRef >> 8); code.write(superRef); // invokespecial
+            emitTypedReturn(code, retType);
+            int maxLocals = 1;
+            for (Class<?> pt : pTypes) maxLocals += (pt == long.class || pt == double.class) ? 2 : 1;
+            addMethod(0x0001, exposedName, methodDesc(retType, pTypes), Math.max(4, maxLocals + 2), maxLocals, code.toByteArray());
+        }
+
+        void emitMethod(String implNsName, String prefix, String mName, boolean isStatic, boolean loadImplNs,
+                        Class<?> retType, Class<?>[] pTypes) {
             ByteArrayOutputStream code = new ByteArrayOutputStream();
             emitLdc(code, cpString(implNsName));
             emitLdc(code, cpString(prefix + mName));
+            code.write(loadImplNs ? 0x04 : 0x03);
             if (!isStatic) {
                 code.write(0x2a); // aload_0
                 emitPackArgs(code, pTypes, 1);
-                int disp = cpMethodref("cljl/GenClass", "dispatchInstance", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
+                int disp = cpMethodref("cljl/GenClass", "dispatchInstance",
+                        "(Ljava/lang/String;Ljava/lang/String;ZLjava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
                 code.write(0xb8); code.write(disp >> 8); code.write(disp);
             } else {
                 emitPackArgs(code, pTypes, 0);
-                int disp = cpMethodref("cljl/GenClass", "dispatchStatic", "(Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;");
+                int disp = cpMethodref("cljl/GenClass", "dispatchStatic",
+                        "(Ljava/lang/String;Ljava/lang/String;Z[Ljava/lang/Object;)Ljava/lang/Object;");
                 code.write(0xb8); code.write(disp >> 8); code.write(disp);
             }
             emitUnboxAndReturn(code, retType);
@@ -578,6 +985,44 @@ public final class GenClass {
             for (Class<?> pt : pTypes) maxLocals += (pt == long.class || pt == double.class) ? 2 : 1;
             int flags = isStatic ? 0x0009 : 0x0001;
             addMethod(flags, mName, methodDesc(retType, pTypes), 12, maxLocals + 2, code.toByteArray());
+        }
+
+        void emitSuperFallbackMethod(String implNsName, String prefix, String mName, boolean loadImplNs,
+                                     String superInternal, Class<?> retType, Class<?>[] pTypes) {
+            ByteArrayOutputStream code = new ByteArrayOutputStream();
+            emitLdc(code, cpString(implNsName));
+            emitLdc(code, cpString(prefix + mName));
+            code.write(loadImplNs ? 0x04 : 0x03);
+            int findRef = cpMethodref("cljl/GenClass", "findImplVar", "(Ljava/lang/String;Ljava/lang/String;Z)Lcljl/Var;");
+            code.write(0xb8); code.write(findRef >> 8); code.write(findRef);
+            code.write(0x59); // dup -> [Var, Var]
+
+            ByteArrayOutputStream foundBranch = new ByteArrayOutputStream();
+            foundBranch.write(0x2a); // aload_0
+            emitPackArgs(foundBranch, pTypes, 1);
+            int invRef = cpMethodref("cljl/GenClass", "invokeVarInstance",
+                    "(Lcljl/Var;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
+            foundBranch.write(0xb8); foundBranch.write(invRef >> 8); foundBranch.write(invRef);
+            emitUnboxAndReturn(foundBranch, retType);
+            byte[] foundBytes = foundBranch.toByteArray();
+
+            int offset = 3 + foundBytes.length;
+            code.write(0xc6); // ifnull L_super
+            code.write((offset >> 8) & 0xFF);
+            code.write(offset & 0xFF);
+            code.write(foundBytes, 0, foundBytes.length);
+
+            // L_super: pop the null Var and delegate via invokespecial super.<mName>
+            code.write(0x57); // pop
+            code.write(0x2a); // aload_0
+            emitLoadTypedParams(code, pTypes, 1);
+            int superRef = cpMethodref(superInternal, mName, methodDesc(retType, pTypes));
+            code.write(0xb7); code.write(superRef >> 8); code.write(superRef);
+            emitTypedReturn(code, retType);
+
+            int maxLocals = 1;
+            for (Class<?> pt : pTypes) maxLocals += (pt == long.class || pt == double.class) ? 2 : 1;
+            addMethod(0x0001, mName, methodDesc(retType, pTypes), Math.max(12, maxLocals + 6), maxLocals + 2, code.toByteArray());
         }
 
         void emitMainMethod(String implNsName, String mainFnName) {

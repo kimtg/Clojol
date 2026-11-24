@@ -5,7 +5,7 @@ import cljl.RT;
 import cljl.Symbol;
 import java.util.Objects;
 
-public final class TaggedLiteral implements ILookup {
+public final class TaggedLiteral extends clojure.lang.TaggedLiteral implements ILookup {
     private static final Keyword TAG_KW = Keyword.intern("tag");
     private static final Keyword FORM_KW = Keyword.intern("form");
 

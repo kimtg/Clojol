@@ -3,13 +3,20 @@ package cljl.lang;
 import cljl.RT;
 import java.util.*;
 
-public final class PersistentList extends ASeq implements IPersistentList {
+public final class PersistentList extends clojure.lang.PersistentList implements IPersistentList {
     private static final long serialVersionUID = 1L;
     public final Object first;
     public final ISeq rest;
     public final int count;
 
-    public static final EmptyList EMPTY = new EmptyList(null);
+    private static EmptyList _empty;
+    public static EmptyList emptyInstance() {
+        EmptyList e = _empty;
+        if (e == null) { e = new EmptyList(null); _empty = e; }
+        return e;
+    }
+
+    public static final EmptyList EMPTY = emptyInstance();
 
     public PersistentList(Object first) {
         super(null);
@@ -25,8 +32,8 @@ public final class PersistentList extends ASeq implements IPersistentList {
         this.count = count;
     }
 
-    public static ISeq create(List<?> list) {
-        ISeq ret = EMPTY;
+    public static IPersistentList create(List<?> list) {
+        IPersistentList ret = EMPTY;
         for (int i = list.size() - 1; i >= 0; i--) {
             ret = ret.cons(list.get(i));
         }

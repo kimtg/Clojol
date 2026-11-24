@@ -40,11 +40,15 @@ public final class Reader {
     private static final Keyword END_COLUMN_KW = Keyword.intern("end-column");
 
     /** Clojure 1.12 LispReader.Resolver interface for *reader-resolver*. */
-    public interface Resolver {
-        Symbol currentNS();
+    public interface Resolver extends clojure.lang.LispReader.Resolver {
+        @Override Symbol currentNS();
         Symbol resolveClass(Symbol sym);
         Symbol resolveAlias(Symbol sym);
         Symbol resolveVar(Symbol sym);
+
+        @Override default clojure.lang.Symbol resolveClass(clojure.lang.Symbol sym) { return resolveClass((Symbol) sym); }
+        @Override default clojure.lang.Symbol resolveAlias(clojure.lang.Symbol sym) { return resolveAlias((Symbol) sym); }
+        @Override default clojure.lang.Symbol resolveVar(clojure.lang.Symbol sym) { return resolveVar((Symbol) sym); }
     }
 
     private static final class NumberPatterns {
@@ -902,16 +906,16 @@ public final class Reader {
             readChar();
             Object resolverObj = RT.READER_RESOLVER.get();
             if (peek() == '{') {
-                if (resolverObj instanceof Resolver res) {
-                    Symbol cns = res.currentNS();
+                if (resolverObj instanceof clojure.lang.LispReader.Resolver res) {
+                    Symbol cns = (Symbol) res.currentNS();
                     nsStr = cns != null ? cns.name : RT.currentNS().name.name;
                 } else {
                     nsStr = RT.currentNS().name.name;
                 }
             } else {
                 String aliasName = readRawToken((char) readChar());
-                if (resolverObj instanceof Resolver res) {
-                    Symbol resolved = res.resolveAlias(Symbol.intern(aliasName));
+                if (resolverObj instanceof clojure.lang.LispReader.Resolver res) {
+                    Symbol resolved = (Symbol) res.resolveAlias(Symbol.intern(aliasName));
                     if (resolved == null) throw readerError("Invalid alias: " + aliasName);
                     nsStr = resolved.name;
                 } else {
@@ -1046,26 +1050,26 @@ public final class Reader {
             return sym;
         }
         Object resolverObj = RT.READER_RESOLVER.get();
-        if (resolverObj instanceof Resolver res) {
+        if (resolverObj instanceof clojure.lang.LispReader.Resolver res) {
             if (sym.ns == null && sym.name.endsWith(".") && sym.name.length() > 1) {
                 Symbol baseSym = Symbol.intern(sym.name.substring(0, sym.name.length() - 1));
-                Symbol rc = res.resolveClass(baseSym);
+                Symbol rc = (Symbol) res.resolveClass(baseSym);
                 return rc != null ? Symbol.intern(null, rc.name + ".") : sym;
             }
             if (sym.ns != null) {
                 Symbol nsSym = Symbol.intern(sym.ns);
-                Symbol alias = res.resolveAlias(nsSym);
+                Symbol alias = (Symbol) res.resolveAlias(nsSym);
                 if (alias != null) return Symbol.intern(alias.name, sym.name);
-                Symbol cls = res.resolveClass(nsSym);
+                Symbol cls = (Symbol) res.resolveClass(nsSym);
                 if (cls != null) return Symbol.intern(cls.name, sym.name);
                 return sym;
             }
-            Symbol cls = res.resolveClass(sym);
+            Symbol cls = (Symbol) res.resolveClass(sym);
             if (cls != null) return cls;
-            Symbol varSym = res.resolveVar(sym);
+            Symbol varSym = (Symbol) res.resolveVar(sym);
             if (varSym != null) return varSym;
             if (sym.name.indexOf('.') >= 0) return sym;
-            Symbol cns = res.currentNS();
+            Symbol cns = (Symbol) res.currentNS();
             return Symbol.intern(cns != null ? cns.name : RT.currentNS().name.name, sym.name);
         }
         Namespace cur = RT.currentNS();
@@ -1233,16 +1237,16 @@ public final class Reader {
                 int slash = k.indexOf('/');
                 Object resolverObj = RT.READER_RESOLVER.get();
                 if (slash == -1) {
-                    if (resolverObj instanceof Resolver res) {
-                        Symbol cns = res.currentNS();
+                    if (resolverObj instanceof clojure.lang.LispReader.Resolver res) {
+                        Symbol cns = (Symbol) res.currentNS();
                         return Keyword.intern(cns != null ? cns.name : RT.currentNS().name.name, k);
                     }
                     return Keyword.intern(RT.currentNS().name.name, k);
                 } else {
                     String alias = k.substring(0, slash);
                     String name = k.substring(slash + 1);
-                    if (resolverObj instanceof Resolver res) {
-                        Symbol resolved = res.resolveAlias(Symbol.intern(alias));
+                    if (resolverObj instanceof clojure.lang.LispReader.Resolver res) {
+                        Symbol resolved = (Symbol) res.resolveAlias(Symbol.intern(alias));
                         if (resolved == null) throw readerError("Invalid token: " + s);
                         return Keyword.intern(resolved.name, name);
                     }
@@ -1374,14 +1378,11 @@ public final class Reader {
         }
     }
 
-    public static class ReaderException extends RuntimeException {
-        public final int line;
-        public final int column;
+    public static class ReaderException extends clojure.lang.LispReader.ReaderException {
+        private static final long serialVersionUID = 1L;
 
         public ReaderException(int line, int column, String msg) {
-            super(msg);
-            this.line = line;
-            this.column = column;
+            super(line, column, msg);
         }
     }
 

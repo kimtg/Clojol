@@ -17,8 +17,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * Clojure Var with ultra-fast root access (zero ThreadLocal overhead unless dynamic)
  * and thread-local dynamic binding frame stack.
  */
-public final class Var extends Fn implements IRef, IMeta, IReference {
-    public static final class Unbound extends Fn {
+public final class Var extends clojure.lang.Var implements IRef, IMeta, IReference, clojure.lang.Settable {
+    public static final class Unbound extends clojure.lang.Var.Unbound {
         public final Var v;
 
         public Unbound(Var v) {
@@ -408,17 +408,32 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
         return resetMeta(PersistentHashMap.fromMap(alter.applyTo(callArgs)));
     }
 
-    public void addWatch(Object key, Fn callback) {
+    @Override
+    public IRef addWatch(Object key, Fn callback) {
         if (watches == null) {
             synchronized (this) {
                 if (watches == null) watches = new ConcurrentHashMap<>();
             }
         }
         watches.put(key, callback);
+        return this;
     }
 
-    public void removeWatch(Object key) {
+    @Override
+    public IRef removeWatch(Object key) {
         if (watches != null) watches.remove(key);
+        return this;
+    }
+
+    @Override
+    public Object doSet(Object val) {
+        return set(val);
+    }
+
+    @Override
+    public Object doReset(Object val) {
+        bindRoot(val);
+        return val;
     }
 
     private void notifyWatches(Object oldVal, Object newVal) {

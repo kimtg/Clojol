@@ -10,11 +10,17 @@ import java.util.*;
  * Matches clojure.lang.PersistentQueue semantics, including sequential equality
  * and pop on empty returning EMPTY.
  */
-public final class PersistentQueue extends AbstractList<Object>
+public final class PersistentQueue extends clojure.lang.PersistentQueue
         implements IPersistentStack, PersistentColl, Seqable, Counted, IObj, IReduceInit, Sequential, IHashEq, Serializable {
 
     private static final long serialVersionUID = 1L;
-    public static final PersistentQueue EMPTY = new PersistentQueue(null, 0, null, null);
+    private static PersistentQueue _empty;
+    public static PersistentQueue emptyInstance() {
+        PersistentQueue e = _empty;
+        if (e == null) { e = new PersistentQueue(null, 0, null, null); _empty = e; }
+        return e;
+    }
+    public static final PersistentQueue EMPTY = emptyInstance();
 
     private final PersistentHashMap meta;
     private final int cnt;

@@ -9,14 +9,26 @@ import java.util.concurrent.atomic.AtomicReference;
  * 32-way bit-partitioned persistent vector trie with tail buffer optimization
  * and TransientVector support for O(1) amortized batch construction.
  */
-public final class PersistentVector extends Fn
+public final class PersistentVector extends clojure.lang.PersistentVector
         implements IPersistentVector, IObj, IEditableCollection, IReduce, IKVReduce, IHashEq,
         List<Object>, RandomAccess, Comparable<Object>, java.io.Serializable {
     private static final long serialVersionUID = 1L;
 
     private static final AtomicReference<Thread> NO_EDIT = new AtomicReference<>(null);
-    public static final Node EMPTY_NODE = new Node(NO_EDIT, new Object[32]);
-    public static final PersistentVector EMPTY = new PersistentVector(null, 0, 5, EMPTY_NODE, new Object[0]);
+    private static Node _emptyNode;
+    public static Node emptyNode() {
+        Node n = _emptyNode;
+        if (n == null) { n = new Node(new AtomicReference<>(null), new Object[32]); _emptyNode = n; }
+        return n;
+    }
+    private static PersistentVector _empty;
+    public static PersistentVector emptyInstance() {
+        PersistentVector e = _empty;
+        if (e == null) { e = new PersistentVector(null, 0, 5, emptyNode(), new Object[0]); _empty = e; }
+        return e;
+    }
+    public static final Node EMPTY_NODE = emptyNode();
+    public static final PersistentVector EMPTY = emptyInstance();
 
     public final int cnt;
     public final int shift;
@@ -686,7 +698,7 @@ public final class PersistentVector extends Fn
         }
     }
 
-    public static final class SubVec extends Fn
+    public static final class SubVec extends clojure.lang.APersistentVector
             implements IPersistentVector, IObj, IReduce, IKVReduce, IHashEq, PersistentColl,
             List<Object>, RandomAccess, Comparable<Object>, java.io.Serializable {
         private static final long serialVersionUID = 1L;

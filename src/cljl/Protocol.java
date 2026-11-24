@@ -71,8 +71,8 @@ public final class Protocol implements IPersistentMap, Map<Object, Object>, IHas
     }
 
     private Fn resolveMetadataImpl(Keyword methodKey, Object target) {
-        if (!extendViaMetadata || !(target instanceof IMeta im)) return null;
-        PersistentHashMap m = im.meta();
+        if (!extendViaMetadata || !(target instanceof clojure.lang.IMeta im)) return null;
+        clojure.lang.IPersistentMap m = im.meta();
         if (m == null) return null;
         Object v = m.valAt(metaSymFor(methodKey));
         return (v instanceof Fn f) ? f : null;
@@ -261,8 +261,8 @@ public final class Protocol implements IPersistentMap, Map<Object, Object>, IHas
     }
 
     public boolean satisfies(Object x) {
-        if (extendViaMetadata && x instanceof IMeta im) {
-            PersistentHashMap m = im.meta();
+        if (extendViaMetadata && x instanceof clojure.lang.IMeta im) {
+            clojure.lang.IPersistentMap m = im.meta();
             if (m != null && m.count() > 0) {
                 for (ISeq s = sigs.seq(); s != null; s = s.next()) {
                     Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
@@ -409,8 +409,8 @@ public final class Protocol implements IPersistentMap, Map<Object, Object>, IHas
     }
 
     public PersistentHashMap findImplFor(Object target) {
-        if (extendViaMetadata && target instanceof IMeta im) {
-            PersistentHashMap m = im.meta();
+        if (extendViaMetadata && target instanceof clojure.lang.IMeta im) {
+            clojure.lang.IPersistentMap m = im.meta();
             if (m != null && m.count() > 0) {
                 PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
                 boolean found = false;

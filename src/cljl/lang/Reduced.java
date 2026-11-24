@@ -1,6 +1,6 @@
 package cljl.lang;
 
-public final class Reduced implements IDeref {
+public final class Reduced extends clojure.lang.Reduced implements IDeref {
     public final Object val;
 
     public Reduced(Object val) {

@@ -1,0 +1,6 @@
+package clojure.lang;
+
+public interface ITransientCollection {
+    ITransientCollection conj(Object val);
+    IPersistentCollection persistent();
+}

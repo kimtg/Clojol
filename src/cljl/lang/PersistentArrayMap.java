@@ -10,14 +10,20 @@ import java.util.*;
  * Backs `array-map` and small map literals (<= 8 entries), upgrading to PersistentHashMap
  * when assoc'd beyond HASHTABLE_THRESHOLD.
  */
-public final class PersistentArrayMap extends Fn
+public final class PersistentArrayMap extends clojure.lang.PersistentArrayMap
         implements IPersistentMap, IObj, IEditableCollection, IHashEq, IKVReduce, MapEquivalence,
                    Map<Object, Object>, Iterable<Map.Entry<Object, Object>>, Serializable {
 
     private static final long serialVersionUID = 1L;
     public static final int HASHTABLE_THRESHOLD = 16; // 8 key-value pairs
 
-    public static final PersistentArrayMap EMPTY = new PersistentArrayMap(null, new Object[0]);
+    private static PersistentArrayMap _empty;
+    public static PersistentArrayMap emptyInstance() {
+        PersistentArrayMap e = _empty;
+        if (e == null) { e = new PersistentArrayMap(null, new Object[0]); _empty = e; }
+        return e;
+    }
+    public static final PersistentArrayMap EMPTY = emptyInstance();
 
     private final PersistentHashMap meta;
     final Object[] array;

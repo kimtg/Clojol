@@ -8,7 +8,7 @@ import cljl.lang.Util;
 import java.io.Serializable;
 import java.util.Objects;
 
-public final class Symbol extends Fn implements IObj, cljl.lang.Named, IHashEq, Comparable<Symbol>, Serializable {
+public final class Symbol extends clojure.lang.Symbol implements IObj, cljl.lang.Named, IHashEq, Comparable<Symbol>, Serializable {
     private static final long serialVersionUID = 1L;
     public final String ns;
     public final String name;

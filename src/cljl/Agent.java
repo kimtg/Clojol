@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Clojure Agent: uncoordinated asynchronous reference with serialized per-agent action queue,
  * error handling (:continue / :fail), watches, validators, and STM integration.
  */
-public final class Agent extends Fn implements IRef, IReference {
+public final class Agent extends clojure.lang.Agent implements IRef, IReference {
 
     private static final boolean NON_DAEMON_POOLS = Boolean.getBoolean("cljl.agent.non-daemon");
 
@@ -106,12 +106,16 @@ public final class Agent extends Fn implements IRef, IReference {
         }
     }
 
-    public void addWatch(Object key, Fn callback) {
+    @Override
+    public IRef addWatch(Object key, Fn callback) {
         watches.put(key, callback);
+        return this;
     }
 
-    public void removeWatch(Object key) {
+    @Override
+    public IRef removeWatch(Object key) {
         watches.remove(key);
+        return this;
     }
 
     private void notifyWatches(Object oldVal, Object newVal) {

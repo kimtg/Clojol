@@ -8,23 +8,39 @@ import java.util.*;
 /**
  * Persistent sorted map implemented as an immutable AVL tree with structural sharing.
  */
-public final class PersistentTreeMap extends Fn
+public final class PersistentTreeMap extends clojure.lang.PersistentTreeMap
         implements IPersistentMap, IObj, Sorted, Reversible, IHashEq, IKVReduce,
         Map<Object, Object>, Iterable<Map.Entry<Object, Object>>, java.io.Serializable {
     private static final long serialVersionUID = 1L;
 
+    private static Comparator<Object> _defaultComp;
     @SuppressWarnings({"unchecked", "rawtypes"})
-    public static final Comparator<Object> DEFAULT_COMPARATOR = (Comparator<Object> & java.io.Serializable) (k1, k2) -> {
-        if (k1 == k2) return 0;
-        if (k1 == null) return -1;
-        if (k2 == null) return 1;
-        if (k1 instanceof Number n1 && k2 instanceof Number n2) {
-            return Numbers.compare(n1, n2);
+    public static Comparator<Object> defaultComparator() {
+        Comparator<Object> c = _defaultComp;
+        if (c == null) {
+            c = (Comparator<Object> & java.io.Serializable) (k1, k2) -> {
+                if (k1 == k2) return 0;
+                if (k1 == null) return -1;
+                if (k2 == null) return 1;
+                if (k1 instanceof Number n1 && k2 instanceof Number n2) {
+                    return Numbers.compare(n1, n2);
+                }
+                return ((Comparable) k1).compareTo(k2);
+            };
+            _defaultComp = c;
         }
-        return ((Comparable) k1).compareTo(k2);
-    };
+        return c;
+    }
 
-    public static final PersistentTreeMap EMPTY = new PersistentTreeMap(null, DEFAULT_COMPARATOR, null, 0);
+    public static final Comparator<Object> DEFAULT_COMPARATOR = defaultComparator();
+
+    private static PersistentTreeMap _empty;
+    public static PersistentTreeMap emptyInstance() {
+        PersistentTreeMap e = _empty;
+        if (e == null) { e = new PersistentTreeMap(null, defaultComparator(), null, 0); _empty = e; }
+        return e;
+    }
+    public static final PersistentTreeMap EMPTY = emptyInstance();
 
     public final Comparator<Object> comp;
     public final Node tree;

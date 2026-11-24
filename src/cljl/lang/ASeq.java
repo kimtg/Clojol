@@ -4,7 +4,7 @@ import cljl.RT;
 import java.io.Serializable;
 import java.util.*;
 
-public abstract class ASeq implements ISeq, IObj, Sequential, IHashEq, Serializable {
+public abstract class ASeq extends clojure.lang.ASeq implements ISeq, IObj, Sequential, IHashEq, Serializable {
     private static final long serialVersionUID = 1L;
     protected final PersistentHashMap meta;
     private int hash;

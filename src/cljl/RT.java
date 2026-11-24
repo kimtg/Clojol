@@ -382,6 +382,15 @@ public final class RT {
     }
 
     private static ISeq seqFrom(Object coll) {
+        if (coll instanceof clojure.lang.ISeq extSeq) {
+            return wrapExternalSeq(extSeq);
+        }
+        if (coll instanceof clojure.lang.Seqable extSeqable) {
+            clojure.lang.ISeq s = extSeqable.seq();
+            if (s == null) return null;
+            if (s instanceof ISeq cs) return cs;
+            return wrapExternalSeq(s);
+        }
         if (coll instanceof CharSequence cs) {
             if (cs.isEmpty()) return null;
             return new StringSeq(cs, 0);
@@ -414,6 +423,20 @@ public final class RT {
             return PersistentList.createFromArray(arr);
         }
         throw new IllegalArgumentException("Don't know how to create ISeq from: " + coll.getClass().getName());
+    }
+
+    private static ISeq wrapExternalSeq(clojure.lang.ISeq ext) {
+        if (ext == null) return null;
+        if (ext instanceof ISeq cs) return cs;
+        return new ASeq() {
+            private static final long serialVersionUID = 1L;
+            @Override public Object first() { return ext.first(); }
+            @Override public ISeq next() {
+                clojure.lang.ISeq n = ext.next();
+                return n == null ? null : wrapExternalSeq(n);
+            }
+            @Override public IObj withMeta(PersistentHashMap m) { return this; }
+        };
     }
 
     public static ISeq iteratorSeq(Iterator<?> iter) {
@@ -562,13 +585,13 @@ public final class RT {
 
     public static Object pop(Object coll) {
         if (coll == null) return null;
-        if (coll instanceof IPersistentStack s) return s.pop();
+        if (coll instanceof clojure.lang.IPersistentStack s) return s.pop();
         if (coll instanceof PersistentColl pc) return pc.pop();
         throw new IllegalArgumentException("pop not supported on: " + coll.getClass().getName());
     }
 
     public static Object deref(Object ref) {
-        if (ref instanceof IDeref d) return d.deref();
+        if (ref instanceof clojure.lang.IDeref d) return d.deref();
         if (ref instanceof java.util.concurrent.Future<?> f) {
             try {
                 return f.get();
@@ -581,7 +604,8 @@ public final class RT {
     }
 
     public static Object deref(Object ref, long timeoutMs, Object timeoutVal) {
-        if (ref instanceof IDeref d) return d.deref(timeoutMs, timeoutVal);
+        if (ref instanceof clojure.lang.IBlockingDeref bd) return bd.deref(timeoutMs, timeoutVal);
+        if (ref instanceof clojure.lang.IDeref d) return d.deref();
         if (ref instanceof java.util.concurrent.Future<?> f) {
             try {
                 return f.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
@@ -600,7 +624,7 @@ public final class RT {
         if (coll instanceof PersistentHashMap pm) return pm.asTransient();
         if (coll instanceof PersistentArrayMap am) return am.asTransient();
         if (coll instanceof PersistentHashSet ps) return ps.asTransient();
-        if (coll instanceof IEditableCollection ec) return ec.asTransient();
+        if (coll instanceof clojure.lang.IEditableCollection ec) return ec.asTransient();
         throw new IllegalArgumentException("Cannot create transient from: " + coll);
     }
 
@@ -608,7 +632,7 @@ public final class RT {
         if (t instanceof PersistentVector.TransientVector tv) return tv.persistent();
         if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.persistent();
         if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.persistent();
-        if (t instanceof ITransientCollection tc) return tc.persistent();
+        if (t instanceof clojure.lang.ITransientCollection tc) return tc.persistent();
         throw new IllegalArgumentException("Not a transient: " + t);
     }
 
@@ -616,19 +640,19 @@ public final class RT {
         if (t instanceof PersistentVector.TransientVector tv) return tv.conj(x);
         if (t instanceof PersistentHashSet.TransientHashSet ts) return ts.conj(x);
         if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.conj(x);
-        if (t instanceof ITransientCollection tc) return tc.conj(x);
+        if (t instanceof clojure.lang.ITransientCollection tc) return tc.conj(x);
         throw new IllegalArgumentException("Not a transient: " + t);
     }
 
     public static Object assocBang(Object t, Object k, Object v) {
         if (t instanceof PersistentHashMap.TransientHashMap tm) return tm.assoc(k, v);
         if (t instanceof PersistentVector.TransientVector tv) return tv.assocN((int) Numbers.toLong(k), v);
-        if (t instanceof ITransientAssociative ta) return ta.assoc(k, v);
+        if (t instanceof clojure.lang.ITransientAssociative ta) return ta.assoc(k, v);
         throw new IllegalArgumentException("Not an associative transient: " + t);
     }
 
     public static boolean isVector(Object x) {
-        return x instanceof IPersistentVector;
+        return x instanceof clojure.lang.IPersistentVector;
     }
 
     public static Object get(Object coll, Object key) {
@@ -638,9 +662,10 @@ public final class RT {
     public static Object get(Object coll, Object key, Object notFound) {
         if (coll == null) return notFound;
         if (coll instanceof PersistentHashMap m) return m.valAt(key, notFound);
-        if (coll instanceof ILookup lu) return lu.valAt(key, notFound);
+        if (coll instanceof clojure.lang.ILookup lu) return lu.valAt(key, notFound);
         if (coll instanceof PersistentHashSet s) return s.get(key, notFound);
         if (coll instanceof PersistentTreeSet s) return s.get(key, notFound);
+        if (coll instanceof clojure.lang.IPersistentSet ps) return ps.contains(key) ? ps.get(key) : notFound;
         if (coll instanceof Map<?, ?> m) {
             if (m.containsKey(key)) return m.get(key);
             return notFound;
@@ -660,7 +685,7 @@ public final class RT {
             int i = n.intValue();
             return (i >= 0 && i < tv.count()) ? tv.nth(i) : notFound;
         }
-        if (coll instanceof ITransientMap tm) {
+        if (coll instanceof clojure.lang.ITransientMap tm) {
             return tm.valAt(key, notFound);
         }
         if (coll instanceof PersistentHashSet.TransientHashSet ts) {
@@ -671,9 +696,10 @@ public final class RT {
 
     public static boolean contains(Object coll, Object key) {
         if (coll == null) return false;
-        if (coll instanceof Associative a) return a.containsKey(key);
+        if (coll instanceof clojure.lang.Associative a) return a.containsKey(key);
         if (coll instanceof PersistentHashSet s) return s.contains(key);
         if (coll instanceof PersistentTreeSet s) return s.contains(key);
+        if (coll instanceof clojure.lang.IPersistentSet s) return s.contains(key);
         if (coll instanceof Map<?, ?> m) return m.containsKey(key);
         if (coll instanceof Set<?> s) return s.contains(key);
         if (coll instanceof CharSequence cs && key instanceof Number n) {
@@ -689,14 +715,14 @@ public final class RT {
 
     public static Object find(Object coll, Object key) {
         if (coll == null) return null;
-        if (coll instanceof IPersistentVector v) {
+        if (coll instanceof clojure.lang.IPersistentVector v) {
             if (key instanceof Number n) {
                 int i = n.intValue();
                 if (i >= 0 && i < v.count()) return new PersistentHashMap.MapEntry(i, v.nth(i));
             }
             return null;
         }
-        if (coll instanceof Associative a) return a.entryAt(key);
+        if (coll instanceof clojure.lang.Associative a) return a.entryAt(key);
         if (coll instanceof Map<?, ?> m) {
             if (m.containsKey(key)) return new PersistentHashMap.MapEntry(key, m.get(key));
         }
@@ -705,14 +731,14 @@ public final class RT {
 
     public static int count(Object o) {
         if (o == null) return 0;
-        if (o instanceof Counted c) return c.count();
+        if (o instanceof clojure.lang.Counted c) return c.count();
         if (o instanceof CharSequence cs) return cs.length();
         if (o instanceof Collection<?> c) return c.size();
         if (o instanceof Map<?, ?> m) return m.size();
         if (o.getClass().isArray()) return Array.getLength(o);
         int i = 0;
         for (ISeq s = seq(o); s != null; s = s.next()) {
-            if (s instanceof Counted c) return i + c.count();
+            if (s instanceof clojure.lang.Counted c) return i + c.count();
             i++;
         }
         return i;

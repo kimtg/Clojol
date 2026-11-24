@@ -16,7 +16,7 @@ import java.util.concurrent.*;
  * Concurrency and state primitives: Atom, Volatile, Delay, Promise, FutureObj.
  * Futures run on Java 25 Virtual Threads for near-zero overhead concurrency.
  */
-public final class Atom implements IRef, IMeta, IReference {
+public final class Atom extends clojure.lang.Atom implements IRef, IMeta, IReference, clojure.lang.IAtom2 {
     public static final ExecutorService VIRTUAL_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
     /**
@@ -65,6 +65,7 @@ public final class Atom implements IRef, IMeta, IReference {
     private volatile ConcurrentHashMap<Object, Fn> watches;
 
     public Atom(long state) {
+        super(true);
         if (isFastLong(state)) {
             this.state = UNBOXED;
             this.fastVal = state << 1;
@@ -80,6 +81,7 @@ public final class Atom implements IRef, IMeta, IReference {
     }
 
     public Atom(Object state, PersistentHashMap meta) {
+        super(true);
         if (state instanceof Long l && isFastLong(l)) {
             this.state = UNBOXED;
             this.fastVal = l << 1;
@@ -225,7 +227,8 @@ public final class Atom implements IRef, IMeta, IReference {
         reset(Long.valueOf(newval));
     }
 
-    public Object resetVals(Object newval) {
+    @Override
+    public PersistentVector resetVals(Object newval) {
         if (newval instanceof Long nl && isFastLong(nl)) {
             long encoded = nl << 1;
             for (;;) {
@@ -592,7 +595,7 @@ public final class Atom implements IRef, IMeta, IReference {
         }
     }
 
-    public Object swapVals(Fn f) {
+    public PersistentVector swapVals(Fn f) {
         if (f == Core.incFn || f == Core.uncheckedIncFn) {
             long fv = this.fastVal;
             if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
@@ -630,7 +633,7 @@ public final class Atom implements IRef, IMeta, IReference {
         }
     }
 
-    public Object swapVals(Fn f, Object x) {
+    public PersistentVector swapVals(Fn f, Object x) {
         if (x instanceof Long lx) {
             long y = lx.longValue();
             if ((f == Core.addFn || f == Core.uncheckedAddFn) && y >= -MAX_XADD_DELTA && y <= MAX_XADD_DELTA) {
@@ -671,7 +674,7 @@ public final class Atom implements IRef, IMeta, IReference {
         }
     }
 
-    public Object swapVals(Fn f, Object x, Object y) {
+    public PersistentVector swapVals(Fn f, Object x, Object y) {
         Object v = readBoxedState();
         for (;;) {
             Object newv = f.invoke(v, x, y);
@@ -686,7 +689,7 @@ public final class Atom implements IRef, IMeta, IReference {
         }
     }
 
-    public Object swapVals(Fn f, Object[] extra) {
+    public PersistentVector swapVals(Fn f, Object[] extra) {
         Object v = readBoxedState();
         Object[] all = new Object[1 + extra.length];
         System.arraycopy(extra, 0, all, 1, extra.length);
@@ -704,7 +707,8 @@ public final class Atom implements IRef, IMeta, IReference {
         }
     }
 
-    public void addWatch(Object key, Fn callback) {
+    @Override
+    public IRef addWatch(Object key, Fn callback) {
         ensureBoxed();
         if (watches == null) {
             synchronized (this) {
@@ -713,13 +717,40 @@ public final class Atom implements IRef, IMeta, IReference {
         }
         watches.put(key, callback);
         this.hasHooks = true;
+        return this;
     }
 
-    public void removeWatch(Object key) {
+    @Override
+    public IRef removeWatch(Object key) {
         if (watches != null) {
             watches.remove(key);
             updateHasHooks();
         }
+        return this;
+    }
+
+    // clojure.lang.IAtom / IAtom2 binary-compatible overloads
+    @Override public Object swap(clojure.lang.IFn f) { return swap(Fn.fromIFn(f)); }
+    @Override public Object swap(clojure.lang.IFn f, Object arg) { return swap(Fn.fromIFn(f), arg); }
+    @Override public Object swap(clojure.lang.IFn f, Object arg1, Object arg2) { return swap(Fn.fromIFn(f), arg1, arg2); }
+    @Override public Object swap(clojure.lang.IFn f, Object x, Object y, clojure.lang.ISeq args) {
+        Object[] rest = RT.toArray(args);
+        Object[] extra = new Object[2 + rest.length];
+        extra[0] = x;
+        extra[1] = y;
+        if (rest.length > 0) System.arraycopy(rest, 0, extra, 2, rest.length);
+        return swap(Fn.fromIFn(f), extra);
+    }
+    @Override public PersistentVector swapVals(clojure.lang.IFn f) { return swapVals(Fn.fromIFn(f)); }
+    @Override public PersistentVector swapVals(clojure.lang.IFn f, Object arg) { return swapVals(Fn.fromIFn(f), arg); }
+    @Override public PersistentVector swapVals(clojure.lang.IFn f, Object arg1, Object arg2) { return swapVals(Fn.fromIFn(f), arg1, arg2); }
+    @Override public PersistentVector swapVals(clojure.lang.IFn f, Object x, Object y, clojure.lang.ISeq args) {
+        Object[] rest = RT.toArray(args);
+        Object[] extra = new Object[2 + rest.length];
+        extra[0] = x;
+        extra[1] = y;
+        if (rest.length > 0) System.arraycopy(rest, 0, extra, 2, rest.length);
+        return swapVals(Fn.fromIFn(f), extra);
     }
 
     private void notifyWatches(Object oldVal, Object newVal) {
@@ -757,7 +788,7 @@ public final class Atom implements IRef, IMeta, IReference {
         return "#<Atom " + RT.printString(deref()) + ">";
     }
 
-    public static final class Volatile implements IDeref {
+    public static final class Volatile extends clojure.lang.Volatile implements IDeref {
         private static final boolean STRICT_VOLATILE = Boolean.getBoolean("cljl.volatile.strict");
         private static final Object VOL_UNBOXED = new Object();
         private static final Object BOXED_DOUBLE = new Object();
@@ -1358,7 +1389,7 @@ public final class Atom implements IRef, IMeta, IReference {
         }
     }
 
-    public static final class Delay implements IDeref {
+    public static final class Delay extends clojure.lang.Delay implements IDeref, cljl.lang.IPending {
         private volatile Fn fn;
         private Object val;
         private Throwable exception;

@@ -9,13 +9,19 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * 32-way Hash Array Mapped Trie (HAMT) persistent map with MapEntry and TransientHashMap.
  */
-public final class PersistentHashMap extends Fn
+public final class PersistentHashMap extends clojure.lang.PersistentHashMap
         implements IPersistentMap, IObj, IEditableCollection, IHashEq, IKVReduce,
         Map<Object, Object>, Iterable<Map.Entry<Object, Object>>, java.io.Serializable {
     private static final long serialVersionUID = 1L;
 
     private static final Object NOT_FOUND = new Object();
-    public static final PersistentHashMap EMPTY = new PersistentHashMap(null, 0, null, false, null);
+    private static PersistentHashMap _empty;
+    public static PersistentHashMap emptyInstance() {
+        PersistentHashMap e = _empty;
+        if (e == null) { e = new PersistentHashMap(null, 0, null, false, null); _empty = e; }
+        return e;
+    }
+    public static final PersistentHashMap EMPTY = emptyInstance();
 
     public final int count;
     public final INode root;
@@ -91,6 +97,16 @@ public final class PersistentHashMap extends Fn
         if (m instanceof PersistentHashMap phm) return phm;
         if (m instanceof PersistentArrayMap pam) return pam.toHashMap();
         if (m instanceof Map<?, ?> map) return createFromMap(map);
+        if (m instanceof clojure.lang.IPersistentMap pm) {
+            TransientHashMap t = EMPTY.asTransient();
+            for (clojure.lang.ISeq s = pm.seq(); s != null; s = s.next()) {
+                Object entry = s.first();
+                if (entry instanceof Map.Entry<?, ?> e) {
+                    t = t.assoc(e.getKey(), e.getValue());
+                }
+            }
+            return t.persistent();
+        }
         throw new IllegalArgumentException("Expected map, got: " + m.getClass().getName());
     }
 
@@ -255,7 +271,7 @@ public final class PersistentHashMap extends Fn
     @Override
     public boolean equals(Object obj) {
         if (this == obj) return true;
-        if (obj instanceof IRecord) return false;
+        if (obj instanceof clojure.lang.IRecord) return false;
         if (!(obj instanceof Map<?, ?> m)) return false;
         if (count != m.size()) return false;
         try {
@@ -781,7 +797,7 @@ public final class PersistentHashMap extends Fn
         }
     }
 
-    public static final class MapEntry extends Fn
+    public static final class MapEntry extends clojure.lang.MapEntry
             implements IMapEntry, IPersistentVector, IObj, IHashEq,
             Map.Entry<Object, Object>, List<Object>, RandomAccess, Comparable<Object>, java.io.Serializable {
         private static final long serialVersionUID = 1L;
@@ -837,7 +853,7 @@ public final class PersistentHashMap extends Fn
         @Override public ISeq rseq() { return PersistentList.createFromArray(val, key); }
         @Override public Object peek() { return val; }
         @Override public IPersistentStack pop() { return PersistentVector.createOwning(key); }
-        @Override public IPersistentCollection cons(Object o) { return toVector().conj(o); }
+        @Override public PersistentVector cons(Object o) { return toVector().conj(o); }
         @Override public IPersistentCollection empty() { return PersistentVector.EMPTY; }
 
         @Override

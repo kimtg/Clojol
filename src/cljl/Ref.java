@@ -10,7 +10,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 /**
  * Clojure coordinated STM Reference (Ref) with history chain, validator, and watches.
  */
-public final class Ref extends Fn implements IRef, IReference, Comparable<Ref> {
+public final class Ref extends clojure.lang.Ref implements IRef, IReference, Comparable<Ref> {
 
     private static final AtomicLong IDS = new AtomicLong(0);
     public final long id = IDS.incrementAndGet();
@@ -134,8 +134,10 @@ public final class Ref extends Fn implements IRef, IReference, Comparable<Ref> {
         }
     }
 
-    public void addWatch(Object key, Fn cb) { watches.put(key, cb); }
-    public void removeWatch(Object key) { watches.remove(key); }
+    @Override
+    public IRef addWatch(Object key, Fn cb) { watches.put(key, cb); return this; }
+    @Override
+    public IRef removeWatch(Object key) { watches.remove(key); return this; }
 
     void notifyWatches(Object oldVal, Object newVal) {
         for (Map.Entry<Object, Fn> e : watches.entrySet()) {

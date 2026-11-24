@@ -3085,6 +3085,195 @@
                (defmulti __m2-mm identity :hierarchy h)
                (is (= :from-p1 (__m2-mm ::child))))))))
 
+(deftest milestone-3-abi-aot-test
+  (testing "3.1 Real clojure.lang.* JVM binary ABI (interfaces, base classes, bridges, ArityException, ExceptionInfo)"
+    ;; Real JVM classes in package clojure.lang (not compile-time-only aliases)
+    (is (= "clojure.lang.IFn" (.getName clojure.lang.IFn)))
+    (is (= "clojure.lang.AFn" (.getName clojure.lang.AFn)))
+    (is (= "clojure.lang.AFunction" (.getName clojure.lang.AFunction)))
+    (is (= "clojure.lang.RestFn" (.getName clojure.lang.RestFn)))
+    (is (= "clojure.lang.ISeq" (.getName clojure.lang.ISeq)))
+    (is (= "clojure.lang.IPersistentMap" (.getName clojure.lang.IPersistentMap)))
+    (is (= "clojure.lang.IPersistentVector" (.getName clojure.lang.IPersistentVector)))
+    (is (= "clojure.lang.IPersistentSet" (.getName clojure.lang.IPersistentSet)))
+    (is (= "clojure.lang.PersistentVector" (.getName clojure.lang.PersistentVector)))
+    (is (= "clojure.lang.PersistentHashMap" (.getName clojure.lang.PersistentHashMap)))
+    (is (= "clojure.lang.PersistentArrayMap" (.getName clojure.lang.PersistentArrayMap)))
+    (is (= "clojure.lang.PersistentHashSet" (.getName clojure.lang.PersistentHashSet)))
+    (is (= "clojure.lang.PersistentList" (.getName clojure.lang.PersistentList)))
+    (is (= "clojure.lang.PersistentTreeMap" (.getName clojure.lang.PersistentTreeMap)))
+    (is (= "clojure.lang.PersistentTreeSet" (.getName clojure.lang.PersistentTreeSet)))
+    (is (= "clojure.lang.PersistentQueue" (.getName clojure.lang.PersistentQueue)))
+    (is (= "clojure.lang.Symbol" (.getName clojure.lang.Symbol)))
+    (is (= "clojure.lang.Keyword" (.getName clojure.lang.Keyword)))
+    (is (= "clojure.lang.Var" (.getName clojure.lang.Var)))
+    (is (= "clojure.lang.Namespace" (.getName clojure.lang.Namespace)))
+    (is (= "clojure.lang.Atom" (.getName clojure.lang.Atom)))
+    (is (= "clojure.lang.IAtom2" (.getName clojure.lang.IAtom2)))
+    (is (= "clojure.lang.Ref" (.getName clojure.lang.Ref)))
+    (is (= "clojure.lang.Agent" (.getName clojure.lang.Agent)))
+    (is (= "clojure.lang.Delay" (.getName clojure.lang.Delay)))
+    (is (= "clojure.lang.Volatile" (.getName clojure.lang.Volatile)))
+    (is (= "clojure.lang.BigInt" (.getName clojure.lang.BigInt)))
+    (is (= "clojure.lang.Ratio" (.getName clojure.lang.Ratio)))
+    (is (= "clojure.lang.Reduced" (.getName clojure.lang.Reduced)))
+    (is (= "clojure.lang.Box" (.getName clojure.lang.Box)))
+    (is (= "clojure.lang.ExceptionInfo" (.getName clojure.lang.ExceptionInfo)))
+    (is (= "clojure.lang.ArityException" (.getName clojure.lang.ArityException)))
+    (is (= "clojure.lang.RT" (.getName clojure.lang.RT)))
+    (is (= "clojure.lang.Numbers" (.getName clojure.lang.Numbers)))
+    (is (= "clojure.lang.Util" (.getName clojure.lang.Util)))
+    (is (= "clojure.lang.Murmur3" (.getName clojure.lang.Murmur3)))
+    (is (= "clojure.lang.Reflector" (.getName clojure.lang.Reflector)))
+    (is (= "clojure.lang.Compiler" (.getName clojure.lang.Compiler)))
+    ;; Real primitive IFn$* interfaces (0..4 args)
+    (is (.isInterface (Class/forName "clojure.lang.IFn$L")))
+    (is (.isInterface (Class/forName "clojure.lang.IFn$LL")))
+    (is (.isInterface (Class/forName "clojure.lang.IFn$DD")))
+    (is (.isInterface (Class/forName "clojure.lang.IFn$LLL")))
+    (is (.isInterface (Class/forName "clojure.lang.IFn$LLLL")))
+    (is (.isInterface (Class/forName "clojure.lang.IFn$LLLLL")))
+    ;; Zero-allocation instanceof parity across all runtime values
+    (is (instance? clojure.lang.AFn inc))
+    (is (instance? clojure.lang.Symbol 'foo/bar))
+    (is (instance? clojure.lang.Keyword :foo/bar))
+    (is (instance? clojure.lang.Var #'inc))
+    (is (instance? clojure.lang.Settable #'inc))
+    (is (instance? clojure.lang.Namespace *ns*))
+    (is (instance? clojure.lang.Atom (atom 1)))
+    (is (instance? clojure.lang.IAtom2 (atom 1)))
+    (is (instance? clojure.lang.Ref (ref 1)))
+    (is (instance? clojure.lang.Agent (agent 1)))
+    (is (instance? clojure.lang.Delay (delay 1)))
+    (is (instance? clojure.lang.Volatile (volatile! 1)))
+    (is (instance? clojure.lang.BigInt 42N))
+    (is (instance? clojure.lang.Ratio (/ 1 3)))
+    (is (instance? clojure.lang.Reduced (reduced 7)))
+    (is (instance? clojure.lang.PersistentVector [1 2]))
+    (is (instance? clojure.lang.APersistentVector [1 2]))
+    (is (instance? clojure.lang.APersistentVector (subvec [1 2 3] 0 2)))
+    (is (instance? clojure.lang.PersistentArrayMap {:a 1}))
+    (is (instance? clojure.lang.PersistentHashMap (hash-map :a 1)))
+    (is (instance? clojure.lang.PersistentHashSet #{1 2}))
+    (is (instance? clojure.lang.PersistentList '(1 2)))
+    (is (instance? clojure.lang.PersistentTreeMap (sorted-map :a 1)))
+    (is (instance? clojure.lang.PersistentTreeSet (sorted-set 1 2)))
+    (is (instance? clojure.lang.PersistentQueue clojure.lang.PersistentQueue/EMPTY))
+    (is (instance? clojure.lang.IProxy (proxy [Object] [])))
+    ;; Real ArityException with .actual and .name
+    (let [ex (try ((fn [x] x) 1 2 3) nil (catch clojure.lang.ArityException e e))]
+      (is (instance? clojure.lang.ArityException ex))
+      (is (= 3 (.-actual ex))))
+    ;; Real ExceptionInfo with .data
+    (let [ex (ex-info "m3-err" {:code 404})]
+      (is (= "clojure.lang.ExceptionInfo" (.getName (class ex))))
+      (is (= {:code 404} (.-data ex)))
+      (is (= {:code 404} (.getData ex))))
+    ;; Static runtime bridges
+    (is (= 10 (clojure.lang.Numbers/add 4 6)))
+    (is (= [1 2 3] (clojure.lang.RT/vector (into-array Object [1 2 3]))))
+    (is (= 3 (clojure.lang.RT/count [1 2 3])))
+    (is (= :ok (.deref (clojure.lang.Atom. :ok))))
+    (is (identical? clojure.lang.PersistentVector/EMPTY []))
+    (is (identical? clojure.lang.PersistentHashMap/EMPTY (hash-map)))
+    (is (identical? clojure.lang.PersistentHashSet/EMPTY #{})))
+
+  (testing "3.2 Complete gen-class (:constructors super-arg forwarding, :factory, :exposes, :exposes-methods, super fallback, :load-impl-ns)"
+    (eval '(do
+             (ns cljl.m3-genclass-full
+               (:gen-class
+                 :name cljl.M3RichEx
+                 :extends java.lang.RuntimeException
+                 :state detail
+                 :init init
+                 :constructors {[String Object] [String]}
+                 :factory make
+                 :exposes-methods {getMessage superGetMessage}
+                 :methods [[getDetail [] Object]]))
+             (defn -init [msg detail]
+               [[(str "wrapped:" msg)] detail])
+             (defn -getMessage [this]
+               (str (.superGetMessage this) " [" (.-detail this) "]"))
+             (defn -getDetail [this]
+               (.-detail this))
+             (let [e (cljl.M3RichEx/make "boom" :ctx)]
+               (assert (instance? RuntimeException e))
+               (assert (= "wrapped:boom" (.superGetMessage e)))
+               (assert (= "wrapped:boom [:ctx]" (.getMessage e)))
+               (assert (= :ctx (.getDetail e)))
+               ;; Unridden superclass method falls back to super (getCause -> nil)
+               (assert (nil? (.getCause e))))
+
+             ;; :exposes protected field on superclass (java.io.ByteArrayOutputStream.count)
+             (ns cljl.m3-genclass-exposes
+               (:gen-class
+                 :name cljl.M3Baos
+                 :extends java.io.ByteArrayOutputStream
+                 :exposes {count {:get getRawCount :set setRawCount}}))
+             (let [b (cljl.M3Baos.)]
+               (.write b 65)
+               (.write b 66)
+               (assert (= 2 (.getRawCount b)))
+               (.setRawCount b 1)
+               (assert (= 1 (.size b))))
+
+             ;; :load-impl-ns false does not auto-load nonexistent impl-ns at class init time
+             (ns cljl.m3-genclass-noload
+               (:gen-class
+                 :name cljl.M3NoLoad
+                 :impl-ns cljl.nonexistent-impl-ns-xyz
+                 :load-impl-ns false
+                 :methods [[ping [] String]]))
+             (assert (class? cljl.M3NoLoad))))
+    (in-ns 'cljl.core-test))
+
+  (testing "3.3 Full AOT namespace compilation (__init.class) & source-free loading"
+    (let [tmp (.toFile (java.nio.file.Files/createTempDirectory "cljl-m3-aot" (into-array java.nio.file.attribute.FileAttribute [])))
+          src-dir (java.io.File. tmp "src")
+          cls-dir (java.io.File. tmp "classes")
+          ns-dir (java.io.File. src-dir "m3aot")
+          src-file (java.io.File. ns-dir "demo_ns.clj")]
+      (.mkdirs ns-dir)
+      (.mkdirs cls-dir)
+      (spit src-file
+            "(ns m3aot.demo-ns
+               (:gen-class
+                 :name m3aot.DemoApp
+                 :main true))
+             (defrecord Boxed [v])
+             (defn greet [who] (str \"AOT-Hello, \" who \"!\"))
+             (defn make-box [x] (->Boxed (* x 2)))
+             (defn -main [& args] (println (str \"MAIN:\" (greet (first args)))))")
+      (try
+        (let [jar (str (.getAbsolutePath (java.io.File. "build/cljl.jar")))
+              run-proc (fn [cmd]
+                         (let [pb (ProcessBuilder. ^java.util.List cmd)
+                               _ (.redirectErrorStream pb true)
+                               p (.start pb)
+                               out (slurp (.getInputStream p))
+                               code (.waitFor p)]
+                           {:exit code :out (.trim out)}))
+              ;; 1. Compile namespace to classes/
+              c-res (run-proc ["java" "-jar" jar "-Scp" (str (.getAbsolutePath src-dir) ":" (.getAbsolutePath cls-dir))
+                               "-e" (str "(binding [*compile-path* " (pr-str (.getAbsolutePath cls-dir)) "] (compile 'm3aot.demo-ns))")])]
+          (is (= 0 (:exit c-res)) (:out c-res))
+          (is (.exists (java.io.File. cls-dir "m3aot/demo_ns__init.class")))
+          (is (.exists (java.io.File. cls-dir "m3aot/DemoApp.class")))
+          ;; 2. Delete original .clj source completely!
+          (.delete src-file)
+          (is (not (.exists src-file)))
+          ;; 3. Load namespace in a fresh JVM with ONLY classes/ on classpath (zero .clj sources!)
+          (let [r-res (run-proc ["java" "-jar" jar "-Scp" (.getAbsolutePath cls-dir)
+                                 "-e" "(require '[m3aot.demo-ns :as d]) (println (d/greet \"Clojol\") (:v (d/make-box 21)))"])]
+            (is (= 0 (:exit r-res)) (:out r-res))
+            (is (= "AOT-Hello, Clojol! 42" (:out r-res))))
+          ;; 4. Execute standalone gen-class main directly via `java -cp build/cljl.jar:classes m3aot.DemoApp`
+          (let [m-res (run-proc ["java" "-cp" (str jar ":" (.getAbsolutePath cls-dir)) "m3aot.DemoApp" "JVM"])]
+            (is (= 0 (:exit m-res)) (:out m-res))
+            (is (= "MAIN:AOT-Hello, JVM!" (:out m-res)))))
+        (finally
+          (doseq [f (reverse (file-seq tmp))] (.delete f)))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

@@ -5,7 +5,7 @@ import cljl.RT;
 import java.io.Serializable;
 import java.util.*;
 
-public final class PersistentStructMap extends Fn
+public final class PersistentStructMap extends clojure.lang.PersistentStructMap
         implements IPersistentMap, IObj, IHashEq, IKVReduce, Map<Object, Object>, Iterable<Map.Entry<Object, Object>>, Serializable {
 
     private static final long serialVersionUID = 1L;

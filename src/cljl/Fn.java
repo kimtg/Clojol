@@ -20,7 +20,7 @@ import java.util.function.Predicate;
  * Provides arity-specialized invoke() overloads (0 to 4 args) to eliminate Object[]
  * allocation on the vast majority of calls, plus applyTo(Object[]) for variable arity.
  */
-public abstract class Fn implements clojure.lang.IFn, Callable<Object>, Runnable,
+public abstract class Fn extends clojure.lang.AFn implements Callable<Object>, Runnable,
         Function<Object, Object>, Predicate<Object> {
 
     public static final Object[] EMPTY_ARGS = new Object[0];
@@ -86,7 +86,29 @@ public abstract class Fn implements clojure.lang.IFn, Callable<Object>, Runnable
         if (more != null && more.length > 0) System.arraycopy(more, 0, all, 20, more.length);
         return invokeVarargs(all);
     }
-    @Override public Object applyTo(cljl.lang.ISeq arglist) { return applyTo(RT.toArray(arglist)); }
+    @Override public Object applyTo(clojure.lang.ISeq arglist) { return applyTo(RT.toArray(arglist)); }
+
+    public static Fn fromIFn(clojure.lang.IFn f) {
+        if (f == null) return null;
+        if (f instanceof Fn fn) return fn;
+        return new IFnAdapter(f);
+    }
+
+    private static final class IFnAdapter extends Fn {
+        private final clojure.lang.IFn target;
+        IFnAdapter(clojure.lang.IFn target) { this.target = target; }
+        @Override public Object invoke() { return target.invoke(); }
+        @Override public Object invoke(Object a) { return target.invoke(a); }
+        @Override public Object invoke(Object a, Object b) { return target.invoke(a, b); }
+        @Override public Object invoke(Object a, Object b, Object c) { return target.invoke(a, b, c); }
+        @Override public Object invoke(Object a, Object b, Object c, Object d) { return target.invoke(a, b, c, d); }
+        @Override public Object invokeVarargs(Object[] args) {
+            return target.applyTo(cljl.lang.PersistentList.createFromArray(args));
+        }
+        @Override public Object applyTo(clojure.lang.ISeq arglist) {
+            return target.applyTo(arglist);
+        }
+    }
 
     public Object invokeVarargs(Object[] args) {
         throw arityError(args.length);
@@ -115,8 +137,7 @@ public abstract class Fn implements clojure.lang.IFn, Callable<Object>, Runnable
     }
 
     protected RuntimeException arityError(int actual) {
-        return new IllegalArgumentException(
-                "Wrong number of args (" + actual + ") passed to: " + getName());
+        return new clojure.lang.ArityException(actual, getName());
     }
 
     public String getName() {
@@ -236,7 +257,7 @@ public abstract class Fn implements clojure.lang.IFn, Callable<Object>, Runnable
         public NamedFn(String name) { this.name = name; }
         @Override public String getName() { return name; }
         @Override public cljl.lang.PersistentHashMap meta() { return null; }
-        @Override public Object withMeta(cljl.lang.PersistentHashMap m) {
+        @Override public cljl.lang.IObj withMeta(cljl.lang.PersistentHashMap m) {
             return m == null ? this : new MetaFn(this, m);
         }
         @Override public String toString() {
@@ -281,7 +302,7 @@ public abstract class Fn implements clojure.lang.IFn, Callable<Object>, Runnable
         @Override public Object invokePrim_OJ_O(Object a, long b) { return fn.invokePrim_OJ_O(a, b); }
         @Override public String getName() { return fn.getName(); }
         @Override public cljl.lang.PersistentHashMap meta() { return meta; }
-        @Override public Object withMeta(cljl.lang.PersistentHashMap m) {
+        @Override public cljl.lang.IObj withMeta(cljl.lang.PersistentHashMap m) {
             return m == this.meta ? this : new MetaFn(fn, m);
         }
         @Override public String toString() { return fn.toString(); }

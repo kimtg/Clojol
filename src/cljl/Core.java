@@ -2400,6 +2400,65 @@ public final class Core {
         }
     }
 
+    public static boolean isLibLoaded(String nsName) {
+        return nsName != null && LOADED_LIBS.contains(nsName);
+    }
+
+    public static boolean isLibLoading(String nsName) {
+        Set<String> loading = LOADING_LIBS.get();
+        return loading != null && loading.contains(nsName);
+    }
+
+    public static void beginLibLoading(String nsName) {
+        Set<String> loading = LOADING_LIBS.get();
+        if (loading == null) {
+            loading = new HashSet<>();
+            LOADING_LIBS.set(loading);
+        }
+        loading.add(nsName);
+    }
+
+    public static void endLibLoading(String nsName) {
+        Set<String> loading = LOADING_LIBS.get();
+        if (loading != null) {
+            loading.remove(nsName);
+            if (loading.isEmpty()) LOADING_LIBS.remove();
+        }
+    }
+
+    private static long urlLastModified(java.net.URL url) {
+        if (url == null) return 0L;
+        try {
+            java.net.URLConnection conn = url.openConnection();
+            long lm = conn.getLastModified();
+            try (InputStream is = conn.getInputStream()) { /* close cleanly */ } catch (IOException ignored) {}
+            return lm;
+        } catch (IOException e) {
+            return 0L;
+        }
+    }
+
+    private static boolean tryLoadAotInitClass(String nsName, String rel, ClassLoader loader) {
+        String initClassName = rel.replace('/', '.') + "__init";
+        try {
+            Class<?> initCls = Class.forName(initClassName, true, loader);
+            if (!LOADED_LIBS.contains(nsName) || Namespace.find(nsName) == null) {
+                try {
+                    java.lang.reflect.Method loadMethod = initCls.getMethod("load");
+                    loadMethod.invoke(null);
+                } catch (NoSuchMethodException ignored) {}
+            }
+            LOADED_LIBS.add(nsName);
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw RT.sneakyThrow(e.getTargetException());
+        } catch (ReflectiveOperationException e) {
+            throw RT.sneakyThrow(e);
+        }
+    }
+
     private static final ThreadLocal<Set<String>> LOADING_LIBS = new ThreadLocal<>();
 
     private static boolean isContribFallbackLib(String nsName) {
@@ -2423,8 +2482,7 @@ public final class Core {
             LOADED_LIBS.remove(nsName);
         }
         if (LOADED_LIBS.contains(nsName) && Namespace.find(nsName) != null) return;
-        Set<String> loading = LOADING_LIBS.get();
-        if (loading != null && loading.contains(nsName)) return;
+        if (isLibLoading(nsName)) return;
         boolean contribFallback = isContribFallbackLib(nsName);
         if (!contribFallback && StdLib.ensureLoaded(nsName)) {
             LOADED_LIBS.add(nsName);
@@ -2432,27 +2490,43 @@ public final class Core {
         }
         String rel = nsName.replace('.', '/').replace('-', '_');
         String[] exts = {".cljl", ".clj", ".cljc"};
-        // Check active classpath/runtime loader first
+        ClassLoader loader = RT.baseLoader();
+        boolean compiling = RT.truthy(RT.COMPILE_FILES.deref());
+
+        // Check active classpath/runtime loader for both AOT <rel>__init.class and source files
+        java.net.URL initUrl = compiling ? null : loader.getResource(rel + "__init.class");
+        java.net.URL srcUrl = null;
+        String srcExt = null;
         for (String ext : exts) {
-            try (InputStream is = RT.baseLoader().getResourceAsStream(rel + ext)) {
-                if (is != null) {
-                    Namespace savedNs = RT.currentNS();
-                    Var.pushThreadBindings(Map.of(RT.CURRENT_NS, savedNs));
-                    if (loading == null) {
-                        loading = new HashSet<>();
-                        LOADING_LIBS.set(loading);
+            java.net.URL u = loader.getResource(rel + ext);
+            if (u != null) {
+                srcUrl = u;
+                srcExt = ext;
+                break;
+            }
+        }
+        // Prefer AOT __init.class when source is absent, or when __init.class is newer/equal
+        if (initUrl != null && (srcUrl == null || urlLastModified(initUrl) >= urlLastModified(srcUrl))) {
+            if (tryLoadAotInitClass(nsName, rel, loader)) {
+                return;
+            }
+        }
+        if (srcUrl != null) {
+            try (InputStream is = srcUrl.openStream()) {
+                Namespace savedNs = RT.currentNS();
+                Var.pushThreadBindings(Map.of(RT.CURRENT_NS, savedNs));
+                beginLibLoading(nsName);
+                try {
+                    String src = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                    Compiler.load(src, rel + srcExt);
+                    if (compiling) {
+                        GenClass.emitNamespaceInitClass(nsName, rel + srcExt, src);
                     }
-                    loading.add(nsName);
-                    try {
-                        String src = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-                        Compiler.load(src, rel + ext);
-                        LOADED_LIBS.add(nsName);
-                        return;
-                    } finally {
-                        loading.remove(nsName);
-                        if (loading.isEmpty()) LOADING_LIBS.remove();
-                        Var.popThreadBindings();
-                    }
+                    LOADED_LIBS.add(nsName);
+                    return;
+                } finally {
+                    endLibLoading(nsName);
+                    Var.popThreadBindings();
                 }
             } catch (IOException e) {
                 throw RT.sneakyThrow(e);
@@ -2472,19 +2546,17 @@ public final class Core {
                         try {
                             Namespace savedNs = RT.currentNS();
                             Var.pushThreadBindings(Map.of(RT.CURRENT_NS, savedNs));
-                            if (loading == null) {
-                                loading = new HashSet<>();
-                                LOADING_LIBS.set(loading);
-                            }
-                            loading.add(nsName);
+                            beginLibLoading(nsName);
                             try {
                                 String src = Files.readString(p, StandardCharsets.UTF_8);
                                 Compiler.load(src, cand);
+                                if (compiling) {
+                                    GenClass.emitNamespaceInitClass(nsName, cand, src);
+                                }
                                 LOADED_LIBS.add(nsName);
                                 return;
                             } finally {
-                                loading.remove(nsName);
-                                if (loading.isEmpty()) LOADING_LIBS.remove();
+                                endLibLoading(nsName);
                                 Var.popThreadBindings();
                             }
                         } catch (IOException e) {
@@ -2525,33 +2597,25 @@ public final class Core {
         def(ns, "ex-cause", new CoreFn1(162, "ex-cause"));
     }
 
-    public static final class ExceptionInfo extends RuntimeException implements IExceptionInfo {
+    public static clojure.lang.ExceptionInfo createExInfo(Object msg, Object data, Throwable cause) {
+        if (data == null) {
+            throw new IllegalArgumentException("Additional data must be non-nil.");
+        }
+        clojure.lang.IPersistentMap map;
+        if (data instanceof clojure.lang.IPersistentMap pm) {
+            map = pm;
+        } else if (data instanceof Map<?, ?> m) {
+            map = PersistentHashMap.createFromMap(m);
+        } else {
+            throw new IllegalArgumentException("Additional data must be a map: " + data.getClass().getName());
+        }
+        return new clojure.lang.ExceptionInfo(msg != null ? msg.toString() : null, map, cause);
+    }
+
+    public static class ExceptionInfo extends clojure.lang.ExceptionInfo {
         private static final long serialVersionUID = 1L;
-        public final Object data;
-
-        public ExceptionInfo(String msg, Object data, Throwable cause) {
-            super(msg, cause);
-            if (data == null) {
-                throw new IllegalArgumentException("Additional data must be non-nil.");
-            }
-            this.data = data;
-        }
-
-        @Override
-        public Object getData() {
-            return data;
-        }
-
-        @Override
-        public String toString() {
-            return "clojure.lang.ExceptionInfo: " + getMessage() + " " + RT.printString(data);
-        }
-
-        private void readObject(java.io.ObjectInputStream in) throws IOException, ClassNotFoundException {
-            in.defaultReadObject();
-            if (data == null) {
-                throw new java.io.InvalidObjectException("ExceptionInfo data cannot be null");
-            }
+        public ExceptionInfo(String msg, clojure.lang.IPersistentMap data, Throwable cause) {
+            super(msg, data, cause);
         }
     }
 
@@ -3136,20 +3200,20 @@ public final class Core {
     @SuppressWarnings("unchecked")
     private static Object call1_1(int _id, Object _a) {
         switch (_id) {
-            case 32: { Object x = _a; return (x instanceof IPersistentList || x instanceof PersistentList || x instanceof PersistentList.EmptyList); }
+            case 32: { Object x = _a; return (x instanceof clojure.lang.IPersistentList || x instanceof PersistentList || x instanceof PersistentList.EmptyList); }
             case 33: { Object x = _a; return RT.isVector(x); }
-            case 34: { Object x = _a; return (x instanceof IPersistentMap); }
-            case 35: { Object x = _a; return (x instanceof IPersistentSet); }
-            case 36: { Object x = _a; return (x instanceof ISeq); }
-            case 37: { Object x = _a; return (x == null || x instanceof Seqable || x instanceof Iterable<?>
+            case 34: { Object x = _a; return (x instanceof clojure.lang.IPersistentMap); }
+            case 35: { Object x = _a; return (x instanceof clojure.lang.IPersistentSet); }
+            case 36: { Object x = _a; return (x instanceof clojure.lang.ISeq); }
+            case 37: { Object x = _a; return (x == null || x instanceof clojure.lang.Seqable || x instanceof Iterable<?>
                 || x instanceof Map<?, ?> || x instanceof CharSequence || x.getClass().isArray()); }
-            case 38: { Object x = _a; return (x instanceof IPersistentCollection); }
-            case 39: { Object x = _a; return (x instanceof Associative); }
-            case 40: { Object x = _a; return (x instanceof Sequential); }
-            case 41: { Object x = _a; return (x instanceof Counted); }
+            case 38: { Object x = _a; return (x instanceof clojure.lang.IPersistentCollection); }
+            case 39: { Object x = _a; return (x instanceof clojure.lang.Associative); }
+            case 40: { Object x = _a; return (x instanceof clojure.lang.Sequential); }
+            case 41: { Object x = _a; return (x instanceof clojure.lang.Counted); }
             case 42: { Object x = _a; return (x instanceof clojure.lang.IFn); }
-            case 43: { Object x = _a; return (x instanceof Fn && !(x instanceof Keyword || x instanceof Symbol
-                || x instanceof IPersistentCollection || x instanceof ITransientCollection || x instanceof PersistentColl)); }
+            case 43: { Object x = _a; return ((x instanceof clojure.lang.Fn || x instanceof Fn) && !(x instanceof Keyword || x instanceof Symbol
+                || x instanceof clojure.lang.IPersistentCollection || x instanceof clojure.lang.ITransientCollection || x instanceof PersistentColl)); }
             case 44: { Object x = _a; return (x instanceof Var); }
             case 45: { Object x = _a; return (x instanceof Class<?>); }
             case 46: { Object x = _a; return (RT.seq(x) == null); }
@@ -3161,7 +3225,7 @@ public final class Core {
             if (x instanceof Atom.Promise p) return p.isRealized();
             if (x instanceof Atom.FutureObj f) return f.isDone();
             if (x instanceof java.util.concurrent.Future<?> f) return f.isDone();
-            if (x instanceof IPending p) return p.isRealized();
+            if (x instanceof clojure.lang.IPending p) return p.isRealized();
             return true;
         
             }
@@ -3448,11 +3512,11 @@ public final class Core {
             if (ref instanceof Atom a) return a.getValidator();
             if (ref instanceof Agent ag) return ag.getValidator();
             if (ref instanceof Ref r) return r.getValidator();
-            if (ref instanceof IRef ir) return ir.getValidator();
+            if (ref instanceof clojure.lang.IRef ir) return ir.getValidator();
             return null;
         
             }
-            case 125: { Object x = _a; return (x instanceof IMeta m ? m.meta() : null); }
+            case 125: { Object x = _a; return (x instanceof clojure.lang.IMeta m ? m.meta() : null); }
             case 126: { Object v = _a; return (((Var) v).deref()); }
             case 127: {
                 Object sym = _a;
@@ -3615,7 +3679,7 @@ public final class Core {
     @SuppressWarnings("unchecked")
     private static Object call1_5(int _id, Object _a) {
         switch (_id) {
-            case 160: { Object ex = _a; return (ex instanceof IExceptionInfo ei ? ei.getData() : null); }
+            case 160: { Object ex = _a; return (ex instanceof clojure.lang.IExceptionInfo ei ? ei.getData() : null); }
             case 161: { Object ex = _a; return (((Throwable) ex).getMessage()); }
             case 162: { Object ex = _a; return (((Throwable) ex).getCause()); }
             case 163: { Object f = _a; return (new LazySeq((Fn) f)); }
@@ -4015,7 +4079,7 @@ public final class Core {
             else if (ref instanceof Var v) v.removeWatch(key);
             else if (ref instanceof Agent ag) ag.removeWatch(key);
             else if (ref instanceof Ref r) r.removeWatch(key);
-            else if (ref instanceof IRef ir) ir.removeWatch(key);
+            else if (ref instanceof clojure.lang.IRef ir) ir.removeWatch(key);
             return ref;
         
             }
@@ -4024,11 +4088,11 @@ public final class Core {
             if (ref instanceof Atom a) a.setValidator((Fn) fn);
             else if (ref instanceof Agent ag) ag.setValidator((Fn) fn);
             else if (ref instanceof Ref r) r.setValidator((Fn) fn);
-            else if (ref instanceof IRef ir) ir.setValidator((Fn) fn);
+            else if (ref instanceof clojure.lang.IRef ir) ir.setValidator((clojure.lang.IFn) fn);
             return null;
         
             }
-            case 78: { Object x = _a; Object m = _b; return (((IObj) x).withMeta(PersistentHashMap.fromMap(m))); }
+            case 78: { Object x = _a; Object m = _b; return (((clojure.lang.IObj) x).withMeta(PersistentHashMap.fromMap(m))); }
             case 79: { Object v = _a; Object val = _b; return (((Var) v).set(val)); }
             case 80: {
                 Object alias = _a; Object targetNsSym = _b;
@@ -4040,7 +4104,7 @@ public final class Core {
             }
             case 81: { Object mf = _a; Object val = _b; return (((MultiFn) mf).getMethod(val)); }
             case 82: { Object mf = _a; Object val = _b; return (((MultiFn) mf).removeMethod(val)); }
-            case 83: { Object msg = _a; Object data = _b; return (new ExceptionInfo(msg != null ? msg.toString() : null, data, null)); }
+            case 83: { Object msg = _a; Object data = _b; return createExInfo(msg, data, null); }
             case 84: {
                 Object name = _a;
                 Object expr = _b;
@@ -4072,7 +4136,7 @@ public final class Core {
                 Object f = _a; Object init = _b; Object coll = _c;
             Fn fn = (Fn) f;
             if (coll == null) return init;
-            if (coll instanceof IKVReduce kvr) {
+            if (coll instanceof clojure.lang.IKVReduce kvr) {
                 return kvr.kvreduce(fn, init);
             }
             Object acc = init;
@@ -4108,18 +4172,18 @@ public final class Core {
                 
             }
             case 14: { Object s = _a; Object start = _b; Object end = _c; return (((String) s).substring((int) Numbers.toLong(start), (int) Numbers.toLong(end))); }
-            case 15: { Object a = _a; Object o = _b; Object n = _c; return (((Atom) a).compareAndSet(o, n)); }
+            case 15: { Object a = _a; Object o = _b; Object n = _c; return (((clojure.lang.IAtom) a).compareAndSet(o, n)); }
             case 16: {
                 Object ref = _a; Object key = _b; Object fn = _c;
             if (ref instanceof Atom a) a.addWatch(key, (Fn) fn);
             else if (ref instanceof Var v) v.addWatch(key, (Fn) fn);
             else if (ref instanceof Agent ag) ag.addWatch(key, (Fn) fn);
             else if (ref instanceof Ref r) r.addWatch(key, (Fn) fn);
-            else if (ref instanceof IRef ir) ir.addWatch(key, (Fn) fn);
+            else if (ref instanceof clojure.lang.IRef ir) ir.addWatch(key, (clojure.lang.IFn) fn);
             return ref;
         
             }
-            case 17: { Object msg = _a; Object data = _b; Object cause = _c; return (new ExceptionInfo(msg != null ? msg.toString() : null, data, (Throwable) cause)); }
+            case 17: { Object msg = _a; Object data = _b; Object cause = _c; return createExInfo(msg, data, (Throwable) cause); }
             case 18: { Object name = _a; Object dispatchFn = _b; Object defaultVal = _c; return (new MultiFn(name.toString(), (Fn) dispatchFn, defaultVal)); }
             case 19: { Object mf = _a; Object dispatchVal = _b; Object methodFn = _c; return (((MultiFn) mf).addMethod(dispatchVal, (Fn) methodFn)); }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);

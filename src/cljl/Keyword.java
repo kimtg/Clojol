@@ -6,7 +6,7 @@ import cljl.lang.PersistentHashMap;
 import java.io.Serializable;
 import java.util.concurrent.ConcurrentHashMap;
 
-public final class Keyword extends Fn implements cljl.lang.Named, IHashEq, Comparable<Keyword>, Serializable {
+public final class Keyword extends clojure.lang.Keyword implements cljl.lang.Named, IHashEq, Comparable<Keyword>, Serializable {
     private static final long serialVersionUID = 1L;
     private static final ConcurrentHashMap<String, Keyword> TABLE = new ConcurrentHashMap<>(512);
 
@@ -74,7 +74,7 @@ public final class Keyword extends Fn implements cljl.lang.Named, IHashEq, Compa
         if (coll instanceof PersistentHashMap phm) {
             return phm.valAtKeyword(this, null);
         }
-        if (coll instanceof ILookup lu) {
+        if (coll instanceof clojure.lang.ILookup lu) {
             return lu.valAt(this, null);
         }
         return RT.get(coll, this);
@@ -85,7 +85,7 @@ public final class Keyword extends Fn implements cljl.lang.Named, IHashEq, Compa
         if (coll instanceof PersistentHashMap phm) {
             return phm.valAtKeyword(this, notFound);
         }
-        if (coll instanceof ILookup lu) {
+        if (coll instanceof clojure.lang.ILookup lu) {
             return lu.valAt(this, notFound);
         }
         return RT.get(coll, this, notFound);

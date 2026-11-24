@@ -486,11 +486,11 @@ public final class BytecodeJIT {
     }
 
     public static boolean isMap(Object x) {
-        return x instanceof IPersistentMap;
+        return x instanceof clojure.lang.IPersistentMap;
     }
 
     public static boolean isSet(Object x) {
-        return x instanceof IPersistentSet;
+        return x instanceof clojure.lang.IPersistentSet;
     }
 
     // ========================================================================

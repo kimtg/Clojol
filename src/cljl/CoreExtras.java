@@ -181,8 +181,8 @@ public final class CoreExtras {
             PersistentHashMap entry = PersistentHashMap.EMPTY
                     .assoc(Keyword.intern("type"), Symbol.intern(cur.getClass().getName()))
                     .assoc(Keyword.intern("message"), cur.getMessage());
-            if (cur instanceof Core.ExceptionInfo ei) {
-                entry = entry.assoc(Keyword.intern("data"), ei.data);
+            if (cur instanceof clojure.lang.IExceptionInfo ei) {
+                entry = entry.assoc(Keyword.intern("data"), ei.getData());
             }
             via.add(entry);
         }
@@ -199,7 +199,7 @@ public final class CoreExtras {
                 .assoc(Keyword.intern("via"), PersistentVector.create(via))
                 .assoc(Keyword.intern("trace"), PersistentVector.create(trace));
         if (t.getMessage() != null) res = res.assoc(Keyword.intern("cause"), t.getMessage());
-        if (t instanceof Core.ExceptionInfo ei) res = res.assoc(Keyword.intern("data"), ei.data);
+        if (t instanceof clojure.lang.IExceptionInfo ei) res = res.assoc(Keyword.intern("data"), ei.getData());
         return res;
     }
 
@@ -1742,7 +1742,7 @@ public final class CoreExtras {
                         || (x instanceof Symbol s && s.ns == null)); }
             case 4: { Object x = _a; return ((x instanceof Keyword k && k.getNamespace() != null)
                         || (x instanceof Symbol s && s.ns != null)); }
-            case 5: { Object x = _a; return (x instanceof PersistentVector || x instanceof RandomAccess); }
+            case 5: { Object x = _a; return (x instanceof clojure.lang.Indexed || x instanceof PersistentVector || x instanceof RandomAccess); }
             case 6: {
                 Object x = _a;
             double d = ((Number) x).doubleValue();
@@ -1754,9 +1754,9 @@ public final class CoreExtras {
             case 9: { Object x = _a; return (x instanceof UUID); }
             case 10: { Object x = _a; return (x instanceof URI); }
             case 11: { Object x = _a; return (x instanceof Map.Entry<?, ?>); }
-            case 12: { Object x = _a; return (x instanceof PersistentRecord); }
-            case 13: { Object x = _a; return (x instanceof Reversible); }
-            case 14: { Object x = _a; return (x instanceof Sorted); }
+            case 12: { Object x = _a; return (x instanceof clojure.lang.IRecord); }
+            case 13: { Object x = _a; return (x instanceof clojure.lang.Reversible); }
+            case 14: { Object x = _a; return (x instanceof clojure.lang.Sorted); }
             case 15: {
                 Object c = _a;
             if (c == null) return null;
@@ -2485,7 +2485,7 @@ public final class CoreExtras {
                     return target.intern((Symbol) sym);
                 
             }
-            case 41: { Object ref = _a; Object m = _b; return (((IReference) ref).resetMeta(PersistentHashMap.fromMap(m))); }
+            case 41: { Object ref = _a; Object m = _b; return (((clojure.lang.IReference) ref).resetMeta(PersistentHashMap.fromMap(m))); }
             case 42: {
                 Object bindingMap = _a; Object func = _b;
                 Map<Var, Object> saved = new LinkedHashMap<>();
@@ -3146,8 +3146,8 @@ public final class CoreExtras {
             }
             case 33: {
                 Object[] args = _args;
-            IReference ref = (IReference) args[0];
-            Fn f = (Fn) args[1];
+            clojure.lang.IReference ref = (clojure.lang.IReference) args[0];
+            clojure.lang.IFn f = (clojure.lang.IFn) args[1];
             ISeq extra = args.length > 2 ? PersistentList.createFromArraySlice(args, 2) : null;
             return ref.alterMeta(f, extra);
         
