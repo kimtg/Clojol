@@ -3385,6 +3385,201 @@
       (is (= 999 (with-redefs [m4-memo-fib (fn [_] 999)] (m4-memo-fib 35))))
       (is (= 9227465 (m4-memo-fib 35))))))
 
+(require '[clojure.java.basis :as m5-basis]
+         '[clojure.java.basis.impl :as m5-basis-impl]
+         '[clojure.test :as m5-ct]
+         '[clojure.test.junit :as m5-junit]
+         '[clojure.test.tap :as m5-tap]
+         '[clojure.inspector :as m5-insp]
+         '[clojure.uuid :as m5-cuuid]
+         '[clojure.main :as m5-cm]
+         '[clojure.datafy :as m5-df]
+         '[clojure.core.protocols :as m5-cp]
+         '[clojure.pprint :as m5-pp]
+         '[clojure.spec.alpha :as m5-s]
+         '[clojure.core.async :as m5-async])
+
+(deftest milestone-5-stdlib-test
+  (testing "5.1 clojure.java.basis & clojure.java.basis.impl"
+    (let [init-b (m5-basis/initial-basis)
+          cur-b (m5-basis/current-basis)]
+      (is (map? init-b))
+      (is (contains? init-b :libs))
+      (is (contains? init-b :classpath))
+      (is (vector? (:classpath-roots init-b)))
+      (is (= init-b cur-b))
+      (m5-basis-impl/update-basis! assoc :m5-test-marker :ok)
+      (try
+        (is (= :ok (:m5-test-marker (m5-basis/current-basis))))
+        (is (nil? (:m5-test-marker (m5-basis/initial-basis))))
+        (finally
+          (m5-basis-impl/update-basis! dissoc :m5-test-marker)))))
+
+  (testing "5.2 clojure.test ^:dynamic report, clojure.test.junit & clojure.test.tap"
+    (is (true? (:dynamic (meta #'m5-ct/report))))
+    (let [events (atom [])]
+      (binding [m5-ct/*report-counters* (atom {})
+                m5-ct/report (fn [m] (swap! events conj (:type m)))]
+        (m5-ct/do-report {:type :pass})
+        (m5-ct/do-report {:type :custom-event}))
+      (is (= [:pass :custom-event] @events)))
+    (is (= "a &lt; b &amp; &quot;c&quot;" (m5-junit/escape-xml "a < b & \"c\"")))
+    (let [xml-out (with-out-str
+                    (binding [m5-ct/*report-counters* (atom {})
+                              m5-ct/*test-out* *out*]
+                      (m5-junit/with-junit-output
+                        (m5-ct/do-report {:type :begin-test-ns :ns (the-ns 'cljl.core-test)})
+                        (m5-ct/do-report {:type :begin-test-var :var #'milestone-5-stdlib-test})
+                        (m5-ct/do-report {:type :pass})
+                        (m5-ct/do-report {:type :fail :message "nope" :expected 1 :actual 2})
+                        (m5-ct/do-report {:type :end-test-var :var #'milestone-5-stdlib-test})
+                        (m5-ct/do-report {:type :end-test-ns :ns (the-ns 'cljl.core-test)}))))]
+      (is (.contains xml-out "<testsuites>"))
+      (is (.contains xml-out "<testsuite"))
+      (is (.contains xml-out "<testcase"))
+      (is (.contains xml-out "<failure"))
+      (is (.contains xml-out "</testsuites>")))
+    (let [tap-out (with-out-str
+                    (binding [m5-ct/*report-counters* (atom {})
+                              m5-ct/*test-out* *out*]
+                      (m5-tap/with-tap-output
+                        (m5-ct/do-report {:type :pass})
+                        (m5-ct/do-report {:type :fail :message "bad" :expected 1 :actual 2})
+                        (m5-ct/do-report {:type :summary :pass 1 :fail 1 :error 0}))))]
+      (is (.contains tap-out "ok"))
+      (is (.contains tap-out "not ok"))
+      (is (.contains tap-out "1..2"))))
+
+  (testing "5.3 clojure.inspector & clojure.uuid"
+    (is (true? (m5-insp/atom? 42)))
+    (is (false? (m5-insp/atom? [1 2])))
+    (is (= :seq (m5-insp/collection-tag [1 2 3])))
+    (is (= :seqable (m5-insp/collection-tag {:a 1})))
+    (let [tm (m5-insp/tree-model {:a [10 20]})]
+      (is (= {:a [10 20]} (.getRoot tm)))
+      (is (= 1 (.getChildCount tm {:a [10 20]})))
+      (is (false? (.isLeaf tm [10 20])))
+      (is (true? (.isLeaf tm 10))))
+    (let [lm (m5-insp/list-model (m5-insp/list-provider [10 20 30]))]
+      (is (= 3 (.getRowCount lm)))
+      (is (= 2 (.getColumnCount lm)))
+      (is (= 20 (.getValueAt lm 1 1))))
+    (let [otm (m5-insp/old-table-model [{:x 1 :y 2} {:x 3 :y 4}])]
+      (is (= 2 (.getRowCount otm)))
+      (is (= 2 (.getColumnCount otm))))
+    (let [u (m5-cuuid/default-uuid-reader "f81d4fae-7dec-11d0-a765-00a0c91e6bf6")]
+      (is (instance? java.util.UUID u))
+      (is (= "f81d4fae-7dec-11d0-a765-00a0c91e6bf6" (str u)))))
+
+  (testing "5.4 clojure.main repl & ex-triage/ex-str"
+    (let [triage (m5-cm/ex-triage (ex-info "bad syntax"
+                                           {:clojure.error/phase :compile-syntax-check
+                                            :clojure.error/source "demo.clj"
+                                            :clojure.error/line 12
+                                            :clojure.error/symbol 'foo/bar}))
+          msg (m5-cm/ex-str triage)]
+      (is (= :compile-syntax-check (:clojure.error/phase triage)))
+      (is (.contains msg "Syntax error compiling"))
+      (is (.contains msg "demo.clj:12")))
+    (let [in (clojure.lang.LineNumberingPushbackReader. (java.io.StringReader. "(+ 20 22)\n(* *1 2)\n"))
+          results (atom [])]
+      (binding [*in* in]
+        (m5-cm/repl :prompt (fn [] nil)
+                    :print (fn [v] (swap! results conj v))))
+      (is (= [42 84] @results))))
+
+  (testing "5.5 clojure.datafy & clojure.core.protocols"
+    (let [d-atom (m5-df/datafy (atom 99))]
+      (is (= [99] d-atom))
+      (is (some? (:clojure.datafy/obj (meta d-atom)))))
+    (let [d-cls (m5-df/datafy String)]
+      (is (map? d-cls))
+      (is (= 'java.lang.String (:name d-cls))))
+    (let [d-ns (m5-df/datafy (the-ns 'clojure.core))]
+      (is (= 'clojure.core (:name d-ns)))
+      (is (map? (:publics d-ns))))
+    (let [custom (with-meta {:v 5} {'clojure.core.protocols/datafy (fn [m] (assoc m :datafied true))
+                                    'clojure.core.protocols/nav (fn [_ k v] [k (* v 10)])})]
+      (is (= {:v 5 :datafied true} (m5-df/datafy custom)))
+      (is (= [:v 50] (m5-df/nav custom :v 5)))))
+
+  (testing "5.6 clojure.pprint enhancements & mixed namespaced maps"
+    (is (= "#xff" (m5-pp/write 255 :stream nil :base 16 :radix true)))
+    (is (= "1111" (m5-pp/write 15 :stream nil :base 2)))
+    (is (= "[hello]" (with-out-str (m5-pp/pprint-logical-block [:prefix "[" :suffix "]"] (print "hello")))))
+    (is (= {:a/x 1 :y 2 :b/z 3} (read-string "#:a{:x 1 :_/y 2 :b/z 3}")))
+    (is (= '{a/x 1 y 2 b/z 3} (read-string "#:a{x 1 _/y 2 b/z 3}"))))
+
+  (testing "5.7 clojure.spec.alpha fdef/fspec, merge & regex"
+    (m5-s/def ::m5-a int?)
+    (m5-s/def ::m5-b string?)
+    (let [ms (m5-s/merge (m5-s/keys :req [::m5-a]) (m5-s/keys :req [::m5-b]))]
+      (is (m5-s/valid? ms {::m5-a 1 ::m5-b "hi"}))
+      (is (not (m5-s/valid? ms {::m5-a 1})))
+      (is (not (m5-s/valid? ms {::m5-a "no" ::m5-b "hi"}))))
+    (m5-s/fdef m5-sample-fn
+      :args (m5-s/cat :x int? :y int?)
+      :ret int?)
+    (let [fsp (m5-s/get-spec 'cljl.core-test/m5-sample-fn)]
+      (is (some? fsp))
+      (is (m5-s/valid? fsp +))
+      (is (not (m5-s/valid? fsp 42)))))
+
+  (testing "5.8 clojure.core.async promise-chan, go-loop, alt!!, mult, pub, mix, pipeline, reduce"
+    ;; promise-chan
+    (let [pc (m5-async/promise-chan)
+          f1 (m5-async/go (m5-async/<! pc))
+          f2 (m5-async/go (m5-async/<! pc))]
+      (m5-async/>!! pc :delivered)
+      (m5-async/>!! pc :ignored)
+      (is (= :delivered (m5-async/<!! f1)))
+      (is (= :delivered (m5-async/<!! f2)))
+      (m5-async/close! pc)
+      (is (= :delivered (m5-async/<!! pc))))
+    ;; go-loop & to-chan!! & reduce & into
+    (let [ch (m5-async/to-chan!! [1 2 3 4 5])]
+      (is (= 15 (m5-async/<!! (m5-async/reduce + 0 ch)))))
+    (let [ch (m5-async/to-chan!! [1 2 3])]
+      (is (= [1 2 3] (m5-async/<!! (m5-async/into [] ch)))))
+    ;; alt!! with :default
+    (let [c (m5-async/chan 1)]
+      (is (= :fallback (m5-async/alt!! c ([v] v) :default :fallback)))
+      (m5-async/>!! c :ready)
+      (is (= [:ready :got] (m5-async/alt!! c ([v] [v :got]) :default :fallback))))
+    ;; mult & tap
+    (let [src (m5-async/chan 4)
+          m (m5-async/mult src)
+          t1 (m5-async/chan 4)
+          t2 (m5-async/chan 4)]
+      (m5-async/tap m t1)
+      (m5-async/tap m t2)
+      (m5-async/>!! src :a)
+      (m5-async/>!! src :b)
+      (m5-async/close! src)
+      (is (= [:a :b] (m5-async/<!! (m5-async/into [] t1))))
+      (is (= [:a :b] (m5-async/<!! (m5-async/into [] t2)))))
+    ;; pub & sub
+    (let [src (m5-async/chan 8)
+          p (m5-async/pub src :type)
+          ev (m5-async/chan 4)
+          od (m5-async/chan 4)]
+      (m5-async/sub p :even ev)
+      (m5-async/sub p :odd od)
+      (m5-async/>!! src {:type :even :v 2})
+      (m5-async/>!! src {:type :odd :v 3})
+      (m5-async/>!! src {:type :even :v 4})
+      (m5-async/close! src)
+      (is (= [2 4] (mapv :v (m5-async/<!! (m5-async/into [] ev)))))
+      (is (= [3] (mapv :v (m5-async/<!! (m5-async/into [] od))))))
+    ;; split & pipe & merge
+    (let [[evens odds] (m5-async/split even? (m5-async/to-chan!! [1 2 3 4 5]) 8 8)]
+      (is (= [2 4] (m5-async/<!! (m5-async/into [] evens))))
+      (is (= [1 3 5] (m5-async/<!! (m5-async/into [] odds)))))
+    ;; pipeline
+    (let [out (m5-async/chan 10)]
+      (m5-async/pipeline 2 out (map #(* % 10)) (m5-async/to-chan!! [1 2 3 4]))
+      (is (= [10 20 30 40] (m5-async/<!! (m5-async/into [] out)))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

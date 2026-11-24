@@ -843,7 +843,7 @@ public final class StdLib {
         Var testingContexts = ns.intern(Symbol.intern("*testing-contexts*")).bindRoot(PersistentList.EMPTY).setDynamic();
         Var loadTests = ns.intern(Symbol.intern("*load-tests*")).bindRoot(Boolean.TRUE).setDynamic();
         Var stackTraceDepth = ns.intern(Symbol.intern("*stack-trace-depth*")).bindRoot(null).setDynamic();
-        ns.intern(Symbol.intern("*test-out*")).bindRoot(RT.OUT.deref()).setDynamic();
+        Var testOutVar = ns.intern(Symbol.intern("*test-out*")).bindRoot(RT.OUT.deref()).setDynamic();
 
         Keyword kTest = Keyword.intern("test");
         Keyword kPass = Keyword.intern("pass");
@@ -854,6 +854,11 @@ public final class StdLib {
         Keyword kEach = Keyword.intern("each");
         Keyword kOnceFixtures = Keyword.intern("clojure.test", "once-fixtures");
         Keyword kEachFixtures = Keyword.intern("clojure.test", "each-fixtures");
+        Keyword kBeginTestNs = Keyword.intern("begin-test-ns");
+        Keyword kEndTestNs = Keyword.intern("end-test-ns");
+        Keyword kBeginTestVar = Keyword.intern("begin-test-var");
+        Keyword kEndTestVar = Keyword.intern("end-test-var");
+        Keyword kSummary = Keyword.intern("summary");
 
         ns.intern("inc-report-counter", Fn.of1("inc-report-counter", name -> {
             Object aObj = counters.deref();
@@ -886,6 +891,16 @@ public final class StdLib {
             return String.join(" ", parts);
         }));
 
+        ns.intern("file-position", Fn.of1("file-position", nObj -> {
+            int n = toInt(nObj);
+            StackTraceElement[] st = new Throwable().getStackTrace();
+            if (n >= 0 && n < st.length) {
+                StackTraceElement ste = st[n];
+                return PersistentVector.createOwning(ste.getFileName(), (long) ste.getLineNumber());
+            }
+            return PersistentVector.createOwning(null, -1L);
+        }));
+
         ns.intern("function?", Fn.of1("function?", x -> x instanceof Fn));
 
         ns.intern("successful?", Fn.of1("successful?", summary -> {
@@ -895,8 +910,46 @@ public final class StdLib {
             return fails == 0L && errs == 0L;
         }));
 
+        ns.internMacro("with-test-out", Fn.ofVarargs("with-test-out", body -> {
+            List<Object> form = new ArrayList<>();
+            form.add(Symbol.intern("clojure.core", "binding"));
+            form.add(PersistentVector.createOwning(
+                    Symbol.intern("clojure.core", "*out*"),
+                    Symbol.intern("clojure.test", "*test-out*")));
+            for (Object b : body) form.add(b);
+            return PersistentList.create(form);
+        }));
+
+        java.util.function.Supplier<PrintWriter> testOutWriter = () -> {
+            Object w = testOutVar.deref();
+            if (w instanceof PrintWriter pw) return pw;
+            if (w instanceof Writer wr) return new PrintWriter(wr, true);
+            return outWriter();
+        };
+
         MultiFn reportMulti = new MultiFn("report", Fn.of1("report-dispatch", m -> RT.get(m, kType)), Keyword.intern("default"));
         reportMulti.addMethod(Keyword.intern("default"), Fn.of1("report-default", m -> null));
+        reportMulti.addMethod(kBeginTestNs, Fn.of1("report-begin-test-ns", m -> {
+            PrintWriter pw = testOutWriter.get();
+            Object tns = RT.get(m, Keyword.intern("ns"));
+            pw.println("\nTesting " + (tns instanceof Namespace tn ? tn.name : tns));
+            pw.flush();
+            return null;
+        }));
+        reportMulti.addMethod(kEndTestNs, Fn.of1("report-end-test-ns", m -> null));
+        reportMulti.addMethod(kBeginTestVar, Fn.of1("report-begin-test-var", m -> null));
+        reportMulti.addMethod(kEndTestVar, Fn.of1("report-end-test-var", m -> null));
+        reportMulti.addMethod(kSummary, Fn.of1("report-summary", m -> {
+            PrintWriter pw = testOutWriter.get();
+            long totalTest = Numbers.toLong(RT.get(m, kTest, 0L));
+            long totalPass = Numbers.toLong(RT.get(m, kPass, 0L));
+            long totalFail = Numbers.toLong(RT.get(m, kFail, 0L));
+            long totalErr = Numbers.toLong(RT.get(m, kError, 0L));
+            pw.println("Ran " + totalTest + " tests containing " + (totalPass + totalFail + totalErr) + " assertions.");
+            pw.println(totalFail + " failures, " + totalErr + " errors.");
+            pw.flush();
+            return null;
+        }));
         reportMulti.addMethod(kPass, Fn.of1("report-pass", m -> {
             ((Fn) ns.findInternedVar(Symbol.intern("inc-report-counter")).deref()).invoke(kPass);
             return null;
@@ -905,29 +958,43 @@ public final class StdLib {
             ((Fn) ns.findInternedVar(Symbol.intern("inc-report-counter")).deref()).invoke(kFail);
             String ctx = String.valueOf(((Fn) ns.findInternedVar(Symbol.intern("testing-contexts-str")).deref()).invoke());
             String vars = String.valueOf(((Fn) ns.findInternedVar(Symbol.intern("testing-vars-str")).deref()).invoke(m));
-            System.err.println("FAIL in (" + vars + ")" + (ctx.isEmpty() ? "" : " " + ctx)
+            PrintWriter pw = testOutWriter.get();
+            pw.println("FAIL in (" + vars + ")" + (ctx.isEmpty() ? "" : " " + ctx)
                     + ": " + RT.get(m, Keyword.intern("message"), "")
                     + " expected: " + RT.printString(RT.get(m, Keyword.intern("expected")))
                     + " actual: " + RT.printString(RT.get(m, Keyword.intern("actual"))));
+            pw.flush();
             return null;
         }));
         reportMulti.addMethod(kError, Fn.of1("report-error", m -> {
             ((Fn) ns.findInternedVar(Symbol.intern("inc-report-counter")).deref()).invoke(kError);
             String ctx = String.valueOf(((Fn) ns.findInternedVar(Symbol.intern("testing-contexts-str")).deref()).invoke());
             String vars = String.valueOf(((Fn) ns.findInternedVar(Symbol.intern("testing-vars-str")).deref()).invoke(m));
-            System.err.println("ERROR in (" + vars + ")" + (ctx.isEmpty() ? "" : " " + ctx)
+            PrintWriter pw = testOutWriter.get();
+            pw.println("ERROR in (" + vars + ")" + (ctx.isEmpty() ? "" : " " + ctx)
                     + ": " + RT.get(m, Keyword.intern("message"), "")
                     + " expected: " + RT.printString(RT.get(m, Keyword.intern("expected")))
                     + " actual: " + RT.printString(RT.get(m, Keyword.intern("actual"))));
+            pw.flush();
             return null;
         }));
-        Var reportVar = ns.intern("report", reportMulti);
+        Var reportVar = ns.intern("report", reportMulti).setDynamic();
 
         ns.intern("do-report", Fn.of1("do-report", m -> ((Fn) reportVar.deref()).invoke(m)));
 
         ns.internMacro("deftest", Fn.ofVarargs("deftest", args -> {
             Symbol name = (Symbol) args[0];
             Symbol named = name.withMeta(PersistentHashMap.EMPTY.assoc(kTest, Boolean.TRUE));
+            List<Object> body = new ArrayList<>();
+            body.add(Symbol.intern("do"));
+            for (int i = 1; i < args.length; i++) body.add(args[i]);
+            return PersistentList.createFromArray(
+                    Symbol.intern("defn"), named, PersistentVector.EMPTY, PersistentList.create(body));
+        }));
+
+        ns.internMacro("deftest-", Fn.ofVarargs("deftest-", args -> {
+            Symbol name = (Symbol) args[0];
+            Symbol named = name.withMeta(PersistentHashMap.EMPTY.assoc(kTest, Boolean.TRUE).assoc(Keyword.intern("private"), Boolean.TRUE));
             List<Object> body = new ArrayList<>();
             body.add(Symbol.intern("do"));
             for (int i = 1; i < args.length; i++) body.add(args[i]);
@@ -1142,14 +1209,21 @@ public final class StdLib {
             ((Fn) ns.findInternedVar(Symbol.intern("inc-report-counter")).deref()).invoke(kTest);
             Var.pushThreadBindings(Map.of(testingVars, RT.conj(testingVars.deref(), v)));
             try {
-                if (tMeta instanceof Fn tf) tf.invoke();
-                else v.invoke();
-            } catch (Throwable t) {
                 ((Fn) reportVar.deref()).invoke(PersistentHashMap.create(
-                        kType, kError,
-                        Keyword.intern("message"), "Uncaught exception, not in assertion.",
-                        Keyword.intern("expected"), null,
-                        Keyword.intern("actual"), t));
+                        kType, kBeginTestVar, Keyword.intern("var"), v));
+                try {
+                    if (tMeta instanceof Fn tf) tf.invoke();
+                    else v.invoke();
+                } catch (Throwable t) {
+                    ((Fn) reportVar.deref()).invoke(PersistentHashMap.create(
+                            kType, kError,
+                            Keyword.intern("message"), "Uncaught exception, not in assertion.",
+                            Keyword.intern("expected"), null,
+                            Keyword.intern("actual"), t));
+                } finally {
+                    ((Fn) reportVar.deref()).invoke(PersistentHashMap.create(
+                            kType, kEndTestVar, Keyword.intern("var"), v));
+                }
             } finally {
                 Var.popThreadBindings();
             }
@@ -1202,19 +1276,52 @@ public final class StdLib {
                     kTest, 0L, kPass, 0L, kFail, 0L, kError, 0L));
             Var.pushThreadBindings(Map.of(counters, report));
             try {
-                System.out.println("\nTesting " + targetNs.name);
+                ((Fn) reportVar.deref()).invoke(PersistentHashMap.create(
+                        kType, kBeginTestNs, Keyword.intern("ns"), targetNs));
                 Var hook = targetNs.findInternedVar(Symbol.intern("test-ns-hook"));
                 if (hook != null && hook.isBound() && hook.deref() instanceof Fn hookFn) {
                     hookFn.invoke();
                 } else {
                     testAllVarsFn.invoke(targetNs);
                 }
+                ((Fn) reportVar.deref()).invoke(PersistentHashMap.create(
+                        kType, kEndTestNs, Keyword.intern("ns"), targetNs));
                 return report.deref();
             } finally {
                 Var.popThreadBindings();
             }
         });
         ns.intern("test-ns", testNsFn);
+
+        ns.intern("run-test-var", Fn.of1("run-test-var", vObj -> {
+            Var v = (Var) vObj;
+            Atom report = new Atom(PersistentHashMap.create(
+                    kTest, 0L, kPass, 0L, kFail, 0L, kError, 0L));
+            Var.pushThreadBindings(Map.of(counters, report));
+            try {
+                ((Fn) reportVar.deref()).invoke(PersistentHashMap.create(
+                        kType, kBeginTestNs, Keyword.intern("ns"), v.ns));
+                testVarsFn.invoke(PersistentList.createFromArray(v));
+                ((Fn) reportVar.deref()).invoke(PersistentHashMap.create(
+                        kType, kEndTestNs, Keyword.intern("ns"), v.ns));
+                IPersistentMap m = (IPersistentMap) report.deref();
+                PersistentHashMap summary = PersistentHashMap.create(
+                        kTest, Numbers.toLong(m.valAt(kTest, 0L)),
+                        kPass, Numbers.toLong(m.valAt(kPass, 0L)),
+                        kFail, Numbers.toLong(m.valAt(kFail, 0L)),
+                        kError, Numbers.toLong(m.valAt(kError, 0L)),
+                        kType, kSummary);
+                ((Fn) reportVar.deref()).invoke(summary);
+                return summary;
+            } finally {
+                Var.popThreadBindings();
+            }
+        }));
+
+        ns.internMacro("run-test", Fn.of1("run-test", testSym ->
+                PersistentList.createFromArray(
+                        Symbol.intern("clojure.test", "run-test-var"),
+                        PersistentList.createFromArray(Symbol.intern("var"), testSym))));
 
         ns.intern("run-tests", Fn.ofVarargs("run-tests", args -> {
             List<Namespace> targets = new ArrayList<>();
@@ -1237,10 +1344,8 @@ public final class StdLib {
             }
             PersistentHashMap summary = PersistentHashMap.create(
                     kTest, totalTest, kPass, totalPass, kFail, totalFail, kError, totalErr,
-                    kType, Keyword.intern("summary"));
-            System.out.println("Ran " + totalTest + " tests containing "
-                    + (totalPass + totalFail + totalErr) + " assertions.");
-            System.out.println(totalFail + " failures, " + totalErr + " errors.");
+                    kType, kSummary);
+            ((Fn) reportVar.deref()).invoke(summary);
             return summary;
         }));
 

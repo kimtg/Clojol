@@ -505,7 +505,13 @@ public final class StdLibExtra {
     // ========================================================================
 
     public static void initUuid() {
-        Namespace.findOrCreate("clojure.uuid");
+        Namespace ns = Namespace.findOrCreate("clojure.uuid");
+        ns.intern("default-uuid-reader", Fn.of1("default-uuid-reader", form -> {
+            if (!(form instanceof String s)) {
+                throw new IllegalArgumentException("UUID literal expects a string: " + form);
+            }
+            return UUID.fromString(s);
+        }));
         Core.markLibLoaded("clojure.uuid");
     }
 }

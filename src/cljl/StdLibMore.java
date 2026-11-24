@@ -143,7 +143,7 @@ public final class StdLibMore {
                 yield true;
             }
             case "clojure.tools.deps.cli.api" -> { Deps.ensureDepsCliApiLoaded(); yield true; }
-            default -> false;
+            default -> StdLib112.ensureLoaded(nsName);
         };
     }
 
@@ -342,20 +342,58 @@ public final class StdLibMore {
             Object m = data instanceof Throwable t
                     ? ((Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("Throwable->map")).deref()).invoke(t)
                     : data;
-            String cause = String.valueOf(RT.get(m, Keyword.intern("cause"), ""));
+            String cause = RT.get(m, Keyword.intern("cause")) != null ? String.valueOf(RT.get(m, Keyword.intern("cause"))) : "";
             Object via = RT.get(m, Keyword.intern("via"));
             Object firstVia = via != null ? RT.first(via) : null;
+            Object exData = RT.get(m, Keyword.intern("data"));
+            if (exData == null && firstVia != null) exData = RT.get(firstVia, Keyword.intern("data"));
+            Object phase = exData != null ? RT.get(exData, Keyword.intern("clojure.error", "phase")) : null;
+            if (phase == null) phase = Keyword.intern("execution");
             Object cls = firstVia != null ? RT.get(firstVia, Keyword.intern("type")) : null;
             Object msg = firstVia != null ? RT.get(firstVia, Keyword.intern("message")) : cause;
-            return PersistentHashMap.create(
-                    Keyword.intern("clojure.error/phase"), Keyword.intern("execution"),
-                    Keyword.intern("clojure.error/class"), cls,
-                    Keyword.intern("clojure.error/cause"), msg != null ? msg : cause);
+            PersistentHashMap out = PersistentHashMap.create(
+                    Keyword.intern("clojure.error", "phase"), phase,
+                    Keyword.intern("clojure.error", "class"), cls,
+                    Keyword.intern("clojure.error", "cause"), msg != null ? msg : cause);
+            if (exData instanceof IPersistentMap dm) {
+                for (String kname : new String[]{"source", "line", "column", "symbol"}) {
+                    Keyword k = Keyword.intern("clojure.error", kname);
+                    Object v = dm.valAt(k);
+                    if (v != null) out = out.assoc(k, v);
+                }
+                Object probs = dm.valAt(Keyword.intern("clojure.spec.alpha", "problems"));
+                if (probs != null) out = out.assoc(Keyword.intern("clojure.spec.alpha", "problems"), probs);
+            }
+            return out;
         }));
         ns.intern("ex-str", Fn.of1("ex-str", triage -> {
-            Object cls = RT.get(triage, Keyword.intern("clojure.error/class"));
-            Object cause = RT.get(triage, Keyword.intern("clojure.error/cause"));
-            return "Execution error" + (cls != null ? " (" + cls + ")" : "") + (cause != null ? ": " + cause : "");
+            Object phase = RT.get(triage, Keyword.intern("clojure.error", "phase"), Keyword.intern("execution"));
+            Object cls = RT.get(triage, Keyword.intern("clojure.error", "class"));
+            Object cause = RT.get(triage, Keyword.intern("clojure.error", "cause"));
+            Object sym = RT.get(triage, Keyword.intern("clojure.error", "symbol"));
+            Object src = RT.get(triage, Keyword.intern("clojure.error", "source"));
+            Object line = RT.get(triage, Keyword.intern("clojure.error", "line"));
+            String prefix = switch (phase instanceof Keyword kw ? kw.getName() : "execution") {
+                case "read-source" -> "Syntax error reading source";
+                case "macro-syntax-check" -> "Syntax error macroexpanding";
+                case "macroexpansion" -> "Unexpected error macroexpanding";
+                case "compile-syntax-check" -> "Syntax error compiling";
+                case "compilation" -> "Unexpected error compiling";
+                case "print-eval-result" -> "Error printing return value";
+                default -> "Execution error";
+            };
+            StringBuilder sb = new StringBuilder(prefix);
+            if (cls != null) sb.append(" (").append(cls).append(")");
+            if (sym != null) sb.append(" ").append(sym);
+            if (src != null) {
+                sb.append(" at (").append(src);
+                if (line != null) sb.append(":").append(line);
+                sb.append(")");
+            }
+            if (cause != null && !String.valueOf(cause).isEmpty()) {
+                sb.append(": ").append(cause);
+            }
+            return sb.toString();
         }));
         ns.intern("err->msg", Fn.of1("err->msg", e -> {
             Fn triageFn = (Fn) ns.findInternedVar(Symbol.intern("ex-triage")).deref();
@@ -366,6 +404,13 @@ public final class StdLibMore {
         ns.intern("report-error", Fn.of12("report-error",
                 t -> reportErrorImpl(t, Keyword.intern("target"), Keyword.intern("file")),
                 (t, opts) -> reportErrorImpl(t, opts, Keyword.intern("file"))));
+        ns.intern("repl-exception", Fn.of1("repl-exception", t -> t));
+        ns.intern("repl-prompt", Fn.of0("repl-prompt", () -> {
+            PrintWriter pw = StdLib.outWriter();
+            pw.print(RT.currentNS().name.name + "=> ");
+            pw.flush();
+            return null;
+        }));
         ns.intern("repl-caught", Fn.of1("repl-caught", e -> {
             StdLib.errWriter().println(e);
             StdLib.errWriter().flush();
@@ -409,6 +454,87 @@ public final class StdLibMore {
             } catch (IOException e) {
                 throw RT.sneakyThrow(e);
             }
+        }));
+        ns.intern("repl-read", Fn.of2("repl-read", (requestPrompt, requestExit) -> {
+            Object inObj = RT.IN.deref();
+            java.io.PushbackReader pr = inObj instanceof java.io.PushbackReader p
+                    ? p
+                    : new cljl.lang.LineNumberingPushbackReader(
+                            inObj instanceof java.io.Reader r ? r : new InputStreamReader(System.in));
+            Fn skipWs = (Fn) ns.findInternedVar(Symbol.intern("skip-whitespace")).deref();
+            Fn skipEol = (Fn) ns.findInternedVar(Symbol.intern("skip-if-eol")).deref();
+            Object ws = skipWs.invoke(pr);
+            if (Keyword.intern("line-start").equals(ws)) return requestPrompt;
+            if (Keyword.intern("stream-end").equals(ws)) return requestExit;
+            Object form = Reader.readFromStream(pr, false, requestExit, null);
+            skipEol.invoke(pr);
+            return form;
+        }));
+        ns.intern("repl", Fn.ofVarargs("repl", args -> {
+            Map<Object, Object> opts = new HashMap<>();
+            for (int i = 0; i + 1 < args.length; i += 2) {
+                opts.put(args[i], args[i + 1]);
+            }
+            Fn initFn = opts.get(Keyword.intern("init")) instanceof Fn f ? f : Fn.of0("noop", () -> null);
+            Fn needPromptFn = opts.get(Keyword.intern("need-prompt")) instanceof Fn f ? f
+                    : Fn.of0("need-prompt", () -> RT.IN.deref() instanceof clojure.lang.LineNumberingPushbackReader lnr && lnr.atLineStart());
+            Fn promptFn = opts.get(Keyword.intern("prompt")) instanceof Fn f ? f
+                    : (Fn) ns.findInternedVar(Symbol.intern("repl-prompt")).deref();
+            Fn flushFn = opts.get(Keyword.intern("flush")) instanceof Fn f ? f
+                    : (Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("flush")).deref();
+            Fn readFn = opts.get(Keyword.intern("read")) instanceof Fn f ? f
+                    : (Fn) ns.findInternedVar(Symbol.intern("repl-read")).deref();
+            Fn evalFn = opts.get(Keyword.intern("eval")) instanceof Fn f ? f
+                    : (Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("eval")).deref();
+            Fn printFn = opts.get(Keyword.intern("print")) instanceof Fn f ? f
+                    : (Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("prn")).deref();
+            Fn caughtFn = opts.get(Keyword.intern("caught")) instanceof Fn f ? f
+                    : (Fn) ns.findInternedVar(Symbol.intern("repl-caught")).deref();
+
+            Object requestPrompt = new Object();
+            Object requestExit = new Object();
+
+            Map<Var, Object> bindings = new HashMap<>();
+            bindings.put(RT.CURRENT_NS, RT.CURRENT_NS.deref());
+            bindings.put(RT.WARN_ON_REFLECTION, RT.WARN_ON_REFLECTION.deref());
+            bindings.put(RT.UNCHECKED_MATH, RT.UNCHECKED_MATH.deref());
+            bindings.put(RT.DATA_READERS, RT.DATA_READERS.deref());
+            bindings.put(RT.DEFAULT_DATA_READER_FN, RT.DEFAULT_DATA_READER_FN.deref());
+            bindings.put(RT.READ_EVAL, RT.READ_EVAL.deref());
+            bindings.put(RT.PRINT_META, RT.PRINT_META.deref());
+            bindings.put(RT.PRINT_LENGTH, RT.PRINT_LENGTH.deref());
+            bindings.put(RT.PRINT_LEVEL, RT.PRINT_LEVEL.deref());
+            bindings.put(RT.PRINT_NAMESPACE_MAPS, RT.PRINT_NAMESPACE_MAPS.deref());
+            bindings.put(RT.STAR_1, null);
+            bindings.put(RT.STAR_2, null);
+            bindings.put(RT.STAR_3, null);
+            bindings.put(RT.STAR_E, null);
+            Var.pushThreadBindings(bindings);
+            try {
+                initFn.invoke();
+                while (true) {
+                    try {
+                        if (RT.truthy(needPromptFn.invoke())) {
+                            promptFn.invoke();
+                            flushFn.invoke();
+                        }
+                        Object input = readFn.invoke(requestPrompt, requestExit);
+                        if (input == requestExit) break;
+                        if (input == requestPrompt) continue;
+                        Object value = evalFn.invoke(input);
+                        RT.STAR_3.set(RT.STAR_2.deref());
+                        RT.STAR_2.set(RT.STAR_1.deref());
+                        RT.STAR_1.set(value);
+                        printFn.invoke(value);
+                    } catch (Throwable e) {
+                        RT.STAR_E.set(e);
+                        caughtFn.invoke(e);
+                    }
+                }
+            } finally {
+                Var.popThreadBindings();
+            }
+            return null;
         }));
         ns.intern("with-read-known", Fn.ofVarargs("with-read-known", args -> {
             // (binding [*read-eval* (if (= :unknown *read-eval*) true *read-eval*)] & body)
@@ -638,37 +764,68 @@ public final class StdLibMore {
 
     private static synchronized void initDatafy() {
         if (LOADED.contains("clojure.datafy")) return;
+        ensureLoaded("clojure.core.protocols");
         Namespace ns = Namespace.findOrCreate("clojure.datafy");
+        Namespace protoNs = Namespace.findOrCreate("clojure.core.protocols");
         Symbol datafyMeta = Symbol.intern("clojure.core.protocols", "datafy");
         Symbol navMeta = Symbol.intern("clojure.core.protocols", "nav");
+        Keyword kDatafyObj = Keyword.intern("clojure.datafy", "obj");
+        Keyword kDatafyClass = Keyword.intern("clojure.datafy", "class");
+        Protocol datafiableProto = (Protocol) protoNs.findInternedVar(Symbol.intern("Datafiable")).deref();
+        Protocol navigableProto = (Protocol) protoNs.findInternedVar(Symbol.intern("Navigable")).deref();
 
         ns.intern("datafy", Fn.of1("datafy", x -> {
             if (x == null) return null;
+            Object res = x;
             if (x instanceof IMeta im && im.meta() != null) {
                 Object fn = im.meta().valAt(datafyMeta);
-                if (fn instanceof Fn f) return f.invoke(x);
+                if (fn == null) fn = im.meta().valAt(Keyword.intern("clojure.core.protocols", "datafy"));
+                if (fn instanceof Fn f) {
+                    res = f.invoke(x);
+                } else {
+                    Fn impl = datafiableProto.resolveMethodOrNull(Keyword.intern("datafy"), x);
+                    if (impl != null) res = impl.invoke(x);
+                }
+            } else {
+                Fn impl = datafiableProto.resolveMethodOrNull(Keyword.intern("datafy"), x);
+                if (impl != null) res = impl.invoke(x);
             }
-            if (x instanceof Throwable t) {
-                return ((Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("Throwable->map")).deref()).invoke(t);
+            if (res == x) {
+                if (x instanceof Throwable t) {
+                    res = ((Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("Throwable->map")).deref()).invoke(t);
+                } else if (x instanceof Class<?> cls) {
+                    ensureLoaded("clojure.reflect");
+                    Namespace reflNs = Namespace.find("clojure.reflect");
+                    Object reflected = ((Fn) reflNs.findInternedVar(Symbol.intern("reflect")).deref()).invoke(cls);
+                    if (reflected instanceof IPersistentMap pm) {
+                        res = pm.assoc(Keyword.intern("name"), Symbol.intern(cls.getName()));
+                    } else {
+                        res = reflected;
+                    }
+                } else if (x instanceof Namespace n) {
+                    res = PersistentHashMap.create(
+                            Keyword.intern("name"), n.name,
+                            Keyword.intern("publics"), ((Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("ns-publics")).deref()).invoke(n),
+                            Keyword.intern("imports"), ((Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("ns-imports")).deref()).invoke(n),
+                            Keyword.intern("interns"), ((Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("ns-interns")).deref()).invoke(n));
+                } else if (x instanceof clojure.lang.IDeref d) {
+                    res = PersistentVector.createOwning(d.deref());
+                }
             }
-            if (x instanceof Namespace n) {
-                return PersistentHashMap.create(
-                        Keyword.intern("name"), n.name,
-                        Keyword.intern("publics"), n.getMappings().size());
+            if (res != x && res instanceof cljl.lang.IObj iobj) {
+                PersistentHashMap m = iobj.meta() != null ? iobj.meta() : PersistentHashMap.EMPTY;
+                res = iobj.withMeta(m.assoc(kDatafyObj, x).assoc(kDatafyClass, x.getClass()));
             }
-            if (x instanceof Var v) {
-                return PersistentHashMap.create(
-                        Keyword.intern("name"), v.sym,
-                        Keyword.intern("ns"), v.ns.name,
-                        Keyword.intern("val"), v.deref());
-            }
-            return x;
+            return res;
         }));
         ns.intern("nav", Fn.of3("nav", (coll, k, v) -> {
             if (coll instanceof IMeta im && im.meta() != null) {
                 Object fn = im.meta().valAt(navMeta);
+                if (fn == null) fn = im.meta().valAt(Keyword.intern("clojure.core.protocols", "nav"));
                 if (fn instanceof Fn f) return f.invoke(coll, k, v);
             }
+            Fn impl = navigableProto.resolveMethodOrNull(Keyword.intern("nav"), coll);
+            if (impl != null) return impl.invoke(coll, k, v);
             return v;
         }));
         LOADED.add("clojure.datafy");
@@ -682,6 +839,11 @@ public final class StdLibMore {
         if (LOADED.contains("clojure.pprint")) return;
         Namespace ns = Namespace.findOrCreate("clojure.pprint");
         Var rightMargin = ns.intern(Symbol.intern("*print-right-margin*")).bindRoot(72L).setDynamic();
+        Var miserWidth = ns.intern(Symbol.intern("*print-miser-width*")).bindRoot(40L).setDynamic();
+        Var suppressNs = ns.intern(Symbol.intern("*print-suppress-namespaces*")).bindRoot(Boolean.FALSE).setDynamic();
+        Var printPretty = ns.intern(Symbol.intern("*print-pretty*")).bindRoot(Boolean.TRUE).setDynamic();
+        Var printBase = ns.intern(Symbol.intern("*print-base*")).bindRoot(10L).setDynamic();
+        Var printRadix = ns.intern(Symbol.intern("*print-radix*")).bindRoot(Boolean.FALSE).setDynamic();
 
         ns.intern("pprint", Fn.of12("pprint",
                 obj -> pprintToWriter(obj, StdLib.outWriter(), StdLib.toInt(rightMargin.deref())),
@@ -714,9 +876,58 @@ public final class StdLibMore {
         ns.intern("code-dispatch", codeDispatch);
         Var dispatchVar = ns.intern(Symbol.intern("*print-pprint-dispatch*")).bindRoot(simpleDispatch).setDynamic();
 
+        ns.intern("set-pprint-dispatch", Fn.of1("set-pprint-dispatch", fn -> {
+            dispatchVar.bindRoot(fn);
+            return null;
+        }));
+
         ns.intern("write-out", Fn.of1("write-out", obj -> {
             Fn df = (Fn) dispatchVar.deref();
             return df.invoke(obj);
+        }));
+
+        ns.intern("get-pretty-writer", Fn.of1("get-pretty-writer", w -> toPrintWriter(w)));
+
+        ns.intern("pprint-newline", Fn.of1("pprint-newline", kind -> {
+            PrintWriter pw = StdLib.outWriter();
+            if (Keyword.intern("mandatory").equals(kind) || Keyword.intern("linear").equals(kind)) {
+                pw.println();
+            } else {
+                pw.print(' ');
+            }
+            return null;
+        }));
+
+        ns.intern("pprint-indent", Fn.of2("pprint-indent", (relTo, n) -> null));
+        ns.intern("pprint-tab", Fn.of3("pprint-tab", (kind, colnum, colinc) -> {
+            PrintWriter pw = StdLib.outWriter();
+            pw.print(' ');
+            return null;
+        }));
+
+        ns.internMacro("pprint-logical-block", Fn.ofVarargs("pprint-logical-block", args -> {
+            List<Object> opts = new ArrayList<>();
+            int bodyStart = 0;
+            if (args.length > 0 && args[0] instanceof PersistentVector optVec) {
+                for (int i = 0; i < optVec.count(); i++) opts.add(optVec.nth(i));
+                bodyStart = 1;
+            }
+            Object prefix = null, suffix = null;
+            for (int i = 0; i + 1 < opts.size(); i += 2) {
+                Object k = opts.get(i);
+                if (Keyword.intern("prefix").equals(k)) prefix = opts.get(i + 1);
+                else if (Keyword.intern("suffix").equals(k)) suffix = opts.get(i + 1);
+            }
+            List<Object> body = new ArrayList<>();
+            body.add(Symbol.intern("do"));
+            if (prefix != null) {
+                body.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "print"), prefix));
+            }
+            for (int i = bodyStart; i < args.length; i++) body.add(args[i]);
+            if (suffix != null) {
+                body.add(PersistentList.createFromArray(Symbol.intern("clojure.core", "print"), suffix));
+            }
+            return PersistentList.create(body);
         }));
 
         ns.internMacro("with-pprint-dispatch", Fn.ofVarargs("with-pprint-dispatch", args -> {
@@ -730,19 +941,62 @@ public final class StdLibMore {
         ns.intern("write", Fn.ofVarargs("write", args -> {
             Object obj = args[0];
             Object stream = Boolean.TRUE;
-            boolean pretty = true;
+            boolean pretty = RT.truthy(printPretty.deref());
+            int margin = StdLib.toInt(rightMargin.deref());
+            int base = StdLib.toInt(printBase.deref());
+            boolean radix = RT.truthy(printRadix.deref());
+            boolean readably = RT.truthy(RT.PRINT_READABLY.deref());
+            Object length = RT.PRINT_LENGTH.deref();
+            Object level = RT.PRINT_LEVEL.deref();
+            Object disp = null;
             for (int i = 1; i + 1 < args.length; i += 2) {
                 Object k = args[i];
-                if (Keyword.intern("stream").equals(k)) stream = args[i + 1];
-                else if (Keyword.intern("pretty").equals(k)) pretty = RT.truthy(args[i + 1]);
+                Object v = args[i + 1];
+                if (Keyword.intern("stream").equals(k)) stream = v;
+                else if (Keyword.intern("pretty").equals(k)) pretty = RT.truthy(v);
+                else if (Keyword.intern("right-margin").equals(k) && v != null) margin = StdLib.toInt(v);
+                else if (Keyword.intern("base").equals(k) && v != null) base = StdLib.toInt(v);
+                else if (Keyword.intern("radix").equals(k)) radix = RT.truthy(v);
+                else if (Keyword.intern("readably").equals(k)) readably = RT.truthy(v);
+                else if (Keyword.intern("length").equals(k)) length = v;
+                else if (Keyword.intern("level").equals(k)) level = v;
+                else if (Keyword.intern("dispatch").equals(k)) disp = v;
             }
             String out;
-            if (pretty) {
+            if ((obj instanceof Long || obj instanceof Integer || obj instanceof cljl.lang.BigInt) && base != 10 && base >= 2 && base <= 36) {
+                String numStr = obj instanceof cljl.lang.BigInt bi
+                        ? bi.toBigInteger().toString(base)
+                        : Long.toString(((Number) obj).longValue(), base);
+                if (radix) {
+                    String pfx = base == 2 ? "#b" : base == 8 ? "#o" : base == 16 ? "#x" : ("#" + base + "r");
+                    out = pfx + numStr;
+                } else {
+                    out = numStr;
+                }
+            } else if (disp instanceof Fn dispFn) {
+                StringWriter sw = new StringWriter();
+                Var.pushThreadBindings(Map.of(RT.OUT, sw, rightMargin, (long) margin));
+                try {
+                    dispFn.invoke(obj);
+                } finally {
+                    Var.popThreadBindings();
+                }
+                out = sw.toString();
+            } else if (pretty) {
                 StringBuilder sb = new StringBuilder();
-                pprintFormat(obj, sb, 0, StdLib.toInt(rightMargin.deref()), 0);
+                pprintFormat(obj, sb, 0, margin, 0);
                 out = sb.toString();
             } else {
-                out = RT.printString(obj, true);
+                Map<Var, Object> b = new HashMap<>();
+                b.put(RT.PRINT_READABLY, readably);
+                b.put(RT.PRINT_LENGTH, length);
+                b.put(RT.PRINT_LEVEL, level);
+                Var.pushThreadBindings(b);
+                try {
+                    out = RT.printString(obj, readably);
+                } finally {
+                    Var.popThreadBindings();
+                }
             }
             if (stream == null) return out;
             PrintWriter pw = Boolean.TRUE.equals(stream) ? StdLib.outWriter() : toPrintWriter(stream);
@@ -1837,7 +2091,42 @@ public final class StdLibMore {
             for (Object a : args) call.add(a instanceof Keyword ? a : PersistentList.createFromArray(Symbol.intern("quote"), a));
             return PersistentList.create(call);
         }));
-        ns.intern("merge", Fn.ofVarargs("merge", specs -> ((Fn) ns.findInternedVar(Symbol.intern("and-spec-impl")).deref()).applyTo(specs)));
+        ns.intern("specize", Fn.of1("specize", s -> resolveSpec.invoke(s)));
+        ns.intern("merge", Fn.ofVarargs("merge", specs -> {
+            List<SpecObj> sps = new ArrayList<>();
+            for (Object s : specs) sps.add((SpecObj) resolveSpec.invoke(s));
+            return new SpecObj() {
+                @Override public Object conform(Object x) {
+                    if (!(x instanceof Map<?, ?>)) return SPEC_INVALID;
+                    Object merged = x;
+                    for (SpecObj sp : sps) {
+                        Object c = sp.conform(x);
+                        if (c == SPEC_INVALID) return SPEC_INVALID;
+                        if (c instanceof IPersistentMap cm && merged instanceof IPersistentMap mm) {
+                            for (ISeq s = cm.seq(); s != null; s = s.next()) {
+                                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                                mm = mm.assoc(e.getKey(), e.getValue());
+                            }
+                            merged = mm;
+                        }
+                    }
+                    return merged;
+                }
+                @Override public Object unform(Object x) {
+                    Object cur = x;
+                    for (int i = sps.size() - 1; i >= 0; i--) {
+                        cur = sps.get(i).unform(cur);
+                    }
+                    return cur;
+                }
+                @Override public List<PersistentHashMap> explain(PersistentVector path, PersistentVector via, Object in, Object x) {
+                    List<PersistentHashMap> probs = new ArrayList<>();
+                    for (SpecObj sp : sps) probs.addAll(sp.explain(path, via, in, x));
+                    return probs;
+                }
+                @Override public Object describe() { return Symbol.intern("merge"); }
+            };
+        }));
 
         // Regex specs: cat, alt, *, +, ?, &
         ns.intern("cat-impl", Fn.ofVarargs("cat-impl", args -> {
@@ -1986,8 +2275,65 @@ public final class StdLibMore {
         ns.intern("exercise-fn", Fn.of12("exercise-fn",
                 sym -> PersistentList.EMPTY,
                 (sym, n) -> PersistentList.EMPTY));
-        ns.internMacro("fdef", Fn.ofVarargs("fdef", args -> PersistentList.createFromArray(Symbol.intern("quote"), args[0])));
-        ns.internMacro("fspec", Fn.ofVarargs("fspec", args -> PersistentList.createFromArray(Symbol.intern("clojure.spec.alpha", "spec"), Symbol.intern("fn?"))));
+        ns.intern("fspec-impl", Fn.ofVarargs("fspec-impl", args -> {
+            SpecObj argsSpec = null, retSpec = null, fnSpec = null;
+            for (int i = 0; i + 1 < args.length; i += 2) {
+                Object k = args[i];
+                Object v = args[i + 1];
+                if (v == null) continue;
+                if (Keyword.intern("args").equals(k)) argsSpec = (SpecObj) resolveSpec.invoke(v);
+                else if (Keyword.intern("ret").equals(k)) retSpec = (SpecObj) resolveSpec.invoke(v);
+                else if (Keyword.intern("fn").equals(k)) fnSpec = (SpecObj) resolveSpec.invoke(v);
+            }
+            final SpecObj fArgs = argsSpec, fRet = retSpec, fFn = fnSpec;
+            return new SpecObj() {
+                @Override public Object conform(Object f) {
+                    return (f instanceof clojure.lang.IFn) ? f : SPEC_INVALID;
+                }
+                @Override public Object unform(Object x) { return x; }
+                @Override public List<PersistentHashMap> explain(PersistentVector path, PersistentVector via, Object in, Object x) {
+                    if (x instanceof clojure.lang.IFn) return List.of();
+                    return List.of(PersistentHashMap.create(
+                            Keyword.intern("path"), path, Keyword.intern("pred"), Symbol.intern("ifn?"), Keyword.intern("val"), x));
+                }
+                @Override public Object describe() {
+                    List<Object> form = new ArrayList<>();
+                    form.add(Symbol.intern("fspec"));
+                    form.add(Keyword.intern("args")); form.add(fArgs != null ? fArgs.describe() : null);
+                    form.add(Keyword.intern("ret")); form.add(fRet != null ? fRet.describe() : null);
+                    form.add(Keyword.intern("fn")); form.add(fFn != null ? fFn.describe() : null);
+                    return PersistentList.create(form);
+                }
+            };
+        }));
+        ns.internMacro("fspec", Fn.ofVarargs("fspec", args -> {
+            List<Object> call = new ArrayList<>();
+            call.add(Symbol.intern("clojure.spec.alpha", "fspec-impl"));
+            for (int i = 0; i + 1 < args.length; i += 2) {
+                call.add(args[i]);
+                call.add(specFormOrExpr(args[i + 1]));
+            }
+            return PersistentList.create(call);
+        }));
+        ns.internMacro("fdef", Fn.ofVarargs("fdef", args -> {
+            Symbol rawSym = (Symbol) args[0];
+            Symbol resolved = rawSym;
+            if (rawSym.ns == null) {
+                Object mapped = RT.currentNS().getMapping(rawSym);
+                if (mapped instanceof Var v) {
+                    resolved = Symbol.intern(v.ns.name.name, v.sym.name);
+                } else {
+                    resolved = Symbol.intern(RT.currentNS().name.name, rawSym.name);
+                }
+            }
+            List<Object> fspecCall = new ArrayList<>();
+            fspecCall.add(Symbol.intern("clojure.spec.alpha", "fspec"));
+            for (int i = 1; i < args.length; i++) fspecCall.add(args[i]);
+            return PersistentList.createFromArray(
+                    Symbol.intern("clojure.spec.alpha", "def-impl"),
+                    PersistentList.createFromArray(Symbol.intern("quote"), resolved),
+                    PersistentList.create(fspecCall));
+        }));
 
         LOADED.add("clojure.spec.alpha");
     }
@@ -2477,6 +2823,20 @@ public final class StdLibMore {
         @Override public int count() { return q.size(); }
     }
 
+    private static final class PromiseBuffer implements ChannelBuffer {
+        boolean delivered = false;
+        Object val = null;
+        @Override public boolean isFull() { return false; }
+        @Override public void add(Object v) {
+            if (!delivered) {
+                delivered = true;
+                val = v;
+            }
+        }
+        @Override public Object remove() { return val; }
+        @Override public int count() { return delivered ? 1 : 0; }
+    }
+
     private static final class PutWaiter {
         final Object val;
         final CompletableFuture<Boolean> done = new CompletableFuture<>();
@@ -2595,6 +2955,12 @@ public final class StdLibMore {
                     pw.complete(true);
                     return true;
                 }
+            }
+            if (buf instanceof PromiseBuffer) {
+                buf.add(val);
+                drainBufToTakes();
+                pw.complete(true);
+                return true;
             }
             while (!takes.isEmpty()) {
                 TakeWaiter tw = takes.pollFirst();
@@ -2809,7 +3175,341 @@ public final class StdLibMore {
         ns.intern("alts!!", altsBlock);
         ns.intern("alts!", altsBlock);
 
+        ns.intern("promise-chan", new Fn.NamedFn("promise-chan") {
+            @Override public Object invoke() { return new Channel(new PromiseBuffer(), null, null); }
+            @Override public Object invoke(Object xf) { return new Channel(new PromiseBuffer(), (Fn) xf, null); }
+            @Override public Object invoke(Object xf, Object exh) { return new Channel(new PromiseBuffer(), (Fn) xf, (Fn) exh); }
+        });
+
         LOADED.add("clojure.core.async");
+        Var.pushThreadBindings(Map.of(RT.CURRENT_NS, ns));
+        try {
+            Compiler.load("""
+                (clojure.core/refer-clojure :exclude '[map into merge reduce])
+                (defmacro go-loop [bindings & body]
+                  `(go (clojure.core/loop ~bindings ~@body)))
+
+                (defmacro alt!! [& clauses]
+                  (let [pairs (partition 2 clauses)
+                        opt-map (clojure.core/into {} (clojure.core/map vec (filter (fn [[k _]] (keyword? k)) pairs)))
+                        port-clauses (vec (remove (fn [[k _]] (keyword? k)) pairs))
+                        res-sym (gensym "res__")
+                        val-sym (gensym "val__")
+                        ch-sym (gensym "ch__")
+                        flat-ports (vec (mapcat (fn [[p _]]
+                                                  (if (and (vector? p) (not= 2 (count p)))
+                                                    p
+                                                    (if (and (vector? p) (vector? (first p)))
+                                                      p
+                                                      [p])))
+                                                port-clauses))
+                        opt-args (mapcat identity opt-map)]
+                    `(let [~res-sym (alts!! ~flat-ports ~@opt-args)
+                           ~val-sym (first ~res-sym)
+                           ~ch-sym (second ~res-sym)]
+                       (cond
+                         ~@(mapcat (fn [[p expr]]
+                                     (let [match-expr
+                                           (cond
+                                             (= p :default) `(= ~ch-sym :default)
+                                             (vector? p) `(= ~ch-sym ~(first p))
+                                             :else `(= ~ch-sym ~p))
+                                           body-expr
+                                           (if (and (list? expr) (vector? (first expr)))
+                                             `(let [~(first expr) ~res-sym] ~@(rest expr))
+                                             expr)]
+                                       [match-expr body-expr]))
+                                   port-clauses)
+                         ~@(when (contains? opt-map :default)
+                             [`(= ~ch-sym :default) (:default opt-map)])
+                         :else nil))))
+
+                (defmacro alt! [& clauses]
+                  `(alt!! ~@clauses))
+
+                (defn to-chan!! [coll]
+                  (let [ch (chan (max 1 (if (counted? coll) (count coll) 32)))]
+                    (go
+                      (doseq [v coll]
+                        (>! ch v))
+                      (close! ch))
+                    ch))
+
+                (def to-chan! to-chan!!)
+                (def to-chan to-chan!!)
+
+                (defn onto-chan!!
+                  ([ch coll] (onto-chan!! ch coll true))
+                  ([ch coll close?]
+                   (go
+                     (doseq [v coll]
+                       (>! ch v))
+                     (when close? (close! ch)))))
+
+                (def onto-chan! onto-chan!!)
+                (def onto-chan onto-chan!!)
+
+                (defn pipe
+                  ([from to] (pipe from to true))
+                  ([from to close?]
+                   (go-loop []
+                     (let [v (<! from)]
+                       (if (nil? v)
+                         (when close? (close! to))
+                         (when (>! to v)
+                           (recur)))))
+                   to))
+
+                (defn merge
+                  ([chs] (merge chs nil))
+                  ([chs buf-or-n]
+                   (let [out (chan buf-or-n)]
+                     (go-loop [cs (vec chs)]
+                       (if (empty? cs)
+                         (close! out)
+                         (let [[v c] (alts! cs)]
+                           (if (nil? v)
+                             (recur (vec (remove #(= % c) cs)))
+                             (do (>! out v) (recur cs))))))
+                     out)))
+
+                (defn split
+                  ([p ch] (split p ch nil nil))
+                  ([p ch t-buf-or-n f-buf-or-n]
+                   (let [tc (chan t-buf-or-n)
+                         fc (chan f-buf-or-n)]
+                     (go-loop []
+                       (let [v (<! ch)]
+                         (if (nil? v)
+                           (do (close! tc) (close! fc))
+                           (do
+                             (>! (if (p v) tc fc) v)
+                             (recur)))))
+                     [tc fc])))
+
+                (defn reduce [f init ch]
+                  (go-loop [acc init]
+                    (let [v (<! ch)]
+                      (if (nil? v)
+                        acc
+                        (let [acc' (f acc v)]
+                          (if (reduced? acc')
+                            @acc'
+                            (recur acc')))))))
+
+                (defn into [coll ch]
+                  (reduce conj coll ch))
+
+                (defn transduce [xform f init ch]
+                  (let [rf (xform f)]
+                    (go
+                      (let [res (<! (reduce rf init ch))]
+                        (rf res)))))
+
+                (defn map
+                  ([f chs] (map f chs nil))
+                  ([f chs buf-or-n]
+                   (let [out (chan buf-or-n)
+                         cs (vec chs)]
+                     (go-loop []
+                       (let [vals (mapv <!! cs)]
+                         (if (some nil? vals)
+                           (close! out)
+                           (do (>! out (apply f vals)) (recur)))))
+                     out)))
+
+                (defn pipeline-blocking
+                  ([n to xf from] (pipeline-blocking n to xf from true nil))
+                  ([n to xf from close?] (pipeline-blocking n to xf from close? nil))
+                  ([n to xf from close? ex-handler]
+                   (let [jobs (chan n)
+                         results (chan n)
+                         process (fn [v p]
+                                   (let [res (chan 1 xf ex-handler)]
+                                     (>!! res v)
+                                     (close! res)
+                                     (let [items (loop [acc []]
+                                                   (if-let [x (<!! res)]
+                                                     (recur (conj acc x))
+                                                     acc))]
+                                       (>!! p items)
+                                       (close! p))))]
+                     (dotimes [_ (max 1 n)]
+                       (thread
+                         (loop []
+                           (when-let [[v p] (<!! jobs)]
+                             (process v p)
+                             (recur)))))
+                     (go-loop []
+                       (if-let [v (<! from)]
+                         (let [p (chan 1)]
+                           (>! jobs [v p])
+                           (>! results p)
+                           (recur))
+                         (do (close! jobs) (close! results))))
+                     (go-loop []
+                       (if-let [p (<! results)]
+                         (do
+                           (when-let [items (<! p)]
+                             (doseq [x items] (>! to x)))
+                           (recur))
+                         (when close? (close! to)))))
+                   nil))
+
+                (def pipeline pipeline-blocking)
+
+                (defn pipeline-async
+                  ([n to af from] (pipeline-async n to af from true))
+                  ([n to af from close?]
+                   (let [results (chan n)]
+                     (go-loop []
+                       (if-let [v (<! from)]
+                         (let [res (chan 1)]
+                           (af v res)
+                           (>! results res)
+                           (recur))
+                         (close! results)))
+                     (go-loop []
+                       (if-let [res (<! results)]
+                         (do
+                           (loop []
+                             (when-let [x (<! res)]
+                               (>! to x)
+                               (recur)))
+                           (recur))
+                         (when close? (close! to)))))
+                   nil))
+
+                (defprotocol Mult
+                  (tap* [m ch close?])
+                  (untap* [m ch])
+                  (untap-all* [m]))
+
+                (defn mult [ch]
+                  (let [taps (atom {})
+                        m (reify Mult
+                            (tap* [_ out close?] (swap! taps assoc out close?) out)
+                            (untap* [_ out] (swap! taps dissoc out) nil)
+                            (untap-all* [_] (reset! taps {}) nil))]
+                    (go-loop []
+                      (let [v (<! ch)]
+                        (if (nil? v)
+                          (doseq [[out close?] @taps]
+                            (when close? (close! out)))
+                          (do
+                            (doseq [[out _] @taps]
+                              (>! out v))
+                            (recur)))))
+                    m))
+
+                (defn tap
+                  ([m ch] (tap* m ch true))
+                  ([m ch close?] (tap* m ch close?)))
+                (defn untap [m ch] (untap* m ch))
+                (defn untap-all [m] (untap-all* m))
+
+                (defprotocol Pub
+                  (sub* [p v ch close?])
+                  (unsub* [p v ch])
+                  (unsub-all* [p] [p v]))
+
+                (defn pub
+                  ([ch topic-fn] (pub ch topic-fn (constantly nil)))
+                  ([ch topic-fn buf-fn]
+                   (let [mults (atom {})
+                         p (reify Pub
+                             (sub* [_ topic out close?]
+                               (let [[_ m] (or (get @mults topic)
+                                               (let [c (chan (buf-fn topic))
+                                                     m (mult c)]
+                                                 (swap! mults assoc topic [c m])
+                                                 [c m]))]
+                                 (tap m out close?))
+                               out)
+                             (unsub* [_ topic out]
+                               (when-let [[_ m] (get @mults topic)]
+                                 (untap m out))
+                               nil)
+                             (unsub-all* [_]
+                               (doseq [[_ [_ m]] @mults] (untap-all m))
+                               (reset! mults {})
+                               nil)
+                             (unsub-all* [_ topic]
+                               (when-let [[_ m] (get @mults topic)]
+                                 (untap-all m)
+                                 (swap! mults dissoc topic))
+                               nil))]
+                     (go-loop []
+                       (let [v (<! ch)]
+                         (if (nil? v)
+                           (doseq [[_ [c _]] @mults] (close! c))
+                           (let [topic (topic-fn v)]
+                             (when-let [[c _] (get @mults topic)]
+                               (>! c v))
+                             (recur)))))
+                     p)))
+
+                (defn sub
+                  ([p topic ch] (sub* p topic ch true))
+                  ([p topic ch close?] (sub* p topic ch close?)))
+                (defn unsub [p topic ch] (unsub* p topic ch))
+                (defn unsub-all
+                  ([p] (unsub-all* p))
+                  ([p topic] (unsub-all* p topic)))
+
+                (defprotocol Mix
+                  (admix* [m ch])
+                  (unmix* [m ch])
+                  (unmix-all* [m])
+                  (toggle* [m state-map])
+                  (solo-mode* [m mode]))
+
+                (defn mix [out]
+                  (let [inputs (atom {})
+                        mode (atom :mute)
+                        changed (chan (sliding-buffer 1))
+                        notify! (fn [] (offer! changed true))
+                        m (reify Mix
+                            (admix* [_ ch] (swap! inputs assoc ch {:mute false :pause false :solo false}) (notify!) nil)
+                            (unmix* [_ ch] (swap! inputs dissoc ch) (notify!) nil)
+                            (unmix-all* [_] (reset! inputs {}) (notify!) nil)
+                            (toggle* [_ sm]
+                              (swap! inputs (fn [cur]
+                                              (reduce-kv (fn [acc ch st]
+                                                           (assoc acc ch (clojure.core/merge (get acc ch {:mute false :pause false :solo false}) st)))
+                                                         cur sm)))
+                              (notify!)
+                              nil)
+                            (solo-mode* [_ md] (reset! mode md) (notify!) nil))]
+                    (go-loop []
+                      (let [ins @inputs
+                            has-solo? (some :solo (vals ins))
+                            active (vec (keep (fn [[ch st]]
+                                                (let [paused? (or (:pause st)
+                                                                  (and has-solo? (not (:solo st)) (= @mode :pause)))]
+                                                  (when-not paused? ch)))
+                                              ins))
+                            [v c] (alts! (conj active changed))]
+                        (cond
+                          (= c changed) (recur)
+                          (nil? v) (do (swap! inputs dissoc c) (recur))
+                          :else
+                          (let [st (get @inputs c)
+                                muted? (or (:mute st)
+                                           (and has-solo? (not (:solo st)) (= @mode :mute)))]
+                            (when-not muted? (>! out v))
+                            (recur)))))
+                    m))
+
+                (defn admix [m ch] (admix* m ch))
+                (defn unmix [m ch] (unmix* m ch))
+                (defn unmix-all [m] (unmix-all* m))
+                (defn toggle [m state-map] (toggle* m state-map))
+                (defn solo-mode [m mode] (solo-mode* m mode))
+                """, "clojure/core/async.clj");
+        } finally {
+            Var.popThreadBindings();
+        }
     }
 
     private static Object altsImpl(Object portsObj, Map<?, ?> opts) {
