@@ -3,7 +3,8 @@ package cljl;
 import cljl.lang.IObj;
 import cljl.lang.ISeq;
 import cljl.lang.PersistentHashMap;
-import java.util.Map;
+import cljl.lang.PersistentHashSet;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -16,7 +17,11 @@ public final class MultiFn extends Fn implements IObj {
     public final cljl.lang.IDeref hierarchy;
     private final ConcurrentHashMap<Object, Fn> methodTable = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Object, Object> preferTable = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Object, Fn> methodCache = new ConcurrentHashMap<>();
+    private volatile Object cachedHierarchy;
     private volatile PersistentHashMap cachedMethodTable = PersistentHashMap.EMPTY;
+    private static final Keyword KW_PARENTS = Keyword.intern("parents");
+    private static final Fn NO_METHOD = Fn.ofVarargs("multifn-no-method", args -> null);
 
     public MultiFn(String name, Fn dispatchFn, Object defaultDispatchVal) {
         this(name, dispatchFn, defaultDispatchVal, null);
@@ -27,6 +32,28 @@ public final class MultiFn extends Fn implements IObj {
         this.dispatchFn = dispatchFn;
         this.defaultDispatchVal = defaultDispatchVal;
         this.hierarchy = hierarchy;
+        this.cachedHierarchy = currentHierarchy();
+    }
+
+    private Object currentHierarchy() {
+        return hierarchy != null ? hierarchy.deref() : CoreExtras.getGlobalHierarchy().deref();
+    }
+
+    private void resetCache() {
+        methodCache.clear();
+        cachedHierarchy = currentHierarchy();
+    }
+
+    private void ensureCacheFresh() {
+        Object curH = currentHierarchy();
+        if (curH != cachedHierarchy) {
+            synchronized (this) {
+                if (curH != cachedHierarchy) {
+                    methodCache.clear();
+                    cachedHierarchy = curH;
+                }
+            }
+        }
     }
 
     private boolean isA(Object child, Object parent) {
@@ -39,28 +66,37 @@ public final class MultiFn extends Fn implements IObj {
     public synchronized MultiFn addMethod(Object dispatchVal, Fn method) {
         methodTable.put(dispatchVal == null ? NULL_KEY : dispatchVal, method);
         cachedMethodTable = cachedMethodTable.assoc(dispatchVal, method);
+        resetCache();
         return this;
     }
 
     public synchronized MultiFn removeMethod(Object dispatchVal) {
         methodTable.remove(dispatchVal == null ? NULL_KEY : dispatchVal);
         cachedMethodTable = cachedMethodTable.without(dispatchVal);
+        resetCache();
         return this;
     }
 
     public synchronized MultiFn removeAllMethods() {
         methodTable.clear();
         cachedMethodTable = PersistentHashMap.EMPTY;
+        resetCache();
         return this;
     }
 
     @SuppressWarnings("unchecked")
     public synchronized MultiFn preferMethod(Object dispatchValX, Object dispatchValY) {
+        if (RT.equiv(dispatchValX, dispatchValY) || isPreferred(dispatchValY, dispatchValX)) {
+            throw new IllegalStateException(
+                    "Preference conflict in multimethod '" + name + "': "
+                            + RT.printString(dispatchValY) + " is already preferred to " + RT.printString(dispatchValX));
+        }
         Object xKey = dispatchValX == null ? NULL_KEY : dispatchValX;
         Object yKey = dispatchValY == null ? NULL_KEY : dispatchValY;
-        cljl.lang.PersistentHashSet prefs = (cljl.lang.PersistentHashSet) preferTable.get(xKey);
-        if (prefs == null) prefs = cljl.lang.PersistentHashSet.EMPTY;
+        PersistentHashSet prefs = (PersistentHashSet) preferTable.get(xKey);
+        if (prefs == null) prefs = PersistentHashSet.EMPTY;
         preferTable.put(xKey, prefs.conj(yKey));
+        resetCache();
         return this;
     }
 
@@ -74,11 +110,45 @@ public final class MultiFn extends Fn implements IObj {
     }
 
     private boolean isPreferred(Object x, Object y) {
+        return isPreferred(x, y, new HashSet<>());
+    }
+
+    private boolean isPreferred(Object x, Object y, Set<Object> visited) {
         Object xKey = x == null ? NULL_KEY : x;
+        if (!visited.add(xKey)) return false;
         Object yKey = y == null ? NULL_KEY : y;
         Object prefs = preferTable.get(xKey);
-        if (prefs instanceof cljl.lang.PersistentHashSet s && s.contains(yKey)) return true;
+        if (prefs instanceof PersistentHashSet s) {
+            if (s.contains(yKey)) return true;
+            for (ISeq it = s.seq(); it != null; it = it.next()) {
+                Object zKey = it.first();
+                Object z = zKey == NULL_KEY ? null : zKey;
+                if (isPreferred(z, y, visited)) return true;
+            }
+        }
+        // Check parents of x in hierarchy (and Java supertypes if Class)
+        Object h = currentHierarchy();
+        if (h instanceof Map<?, ?> hm && x != null) {
+            Object pmap = hm.get(KW_PARENTS);
+            if (pmap != null) {
+                Object ps = RT.get(pmap, x);
+                for (ISeq it = RT.seq(ps); it != null; it = it.next()) {
+                    if (isPreferred(it.first(), y, visited)) return true;
+                }
+            }
+        }
+        if (x instanceof Class<?> cls) {
+            Class<?> sup = cls.getSuperclass();
+            if (sup != null && isPreferred(sup, y, visited)) return true;
+            for (Class<?> iface : cls.getInterfaces()) {
+                if (isPreferred(iface, y, visited)) return true;
+            }
+        }
         return false;
+    }
+
+    private boolean dominates(Object x, Object y) {
+        return isPreferred(x, y) || (!isPreferred(y, x) && isA(x, y));
     }
 
     public PersistentHashMap getMethodTable() {
@@ -86,25 +156,52 @@ public final class MultiFn extends Fn implements IObj {
     }
 
     public Fn getMethod(Object dispatchVal) {
+        ensureCacheFresh();
         Object key = dispatchVal == null ? NULL_KEY : dispatchVal;
+        Fn cached = methodCache.get(key);
+        if (cached != null) {
+            return cached == NO_METHOD ? null : cached;
+        }
+        Fn m = findBestMethod(dispatchVal, key);
+        methodCache.put(key, m != null ? m : NO_METHOD);
+        return m;
+    }
+
+    private Fn findBestMethod(Object dispatchVal, Object key) {
         Fn m = methodTable.get(key);
         if (m != null) return m;
-        // Collect all isa?-matching entries and pick most specific / preferred
-        Map.Entry<Object, Fn> best = null;
+        // Collect all isa?-matching entries and verify a single dominant match
+        List<Map.Entry<Object, Fn>> matches = new ArrayList<>();
         for (Map.Entry<Object, Fn> e : methodTable.entrySet()) {
             Object k = e.getKey() == NULL_KEY ? null : e.getKey();
             if (k != null && !RT.equiv(k, defaultDispatchVal) && isA(dispatchVal, k)) {
-                if (best == null) {
-                    best = e;
-                } else {
-                    Object bk = best.getKey() == NULL_KEY ? null : best.getKey();
-                    if (isPreferred(k, bk) || (!isPreferred(bk, k) && isA(k, bk))) {
-                        best = e;
-                    }
-                }
+                matches.add(e);
             }
         }
-        if (best != null) return best.getValue();
+        if (!matches.isEmpty()) {
+            Map.Entry<Object, Fn> best = matches.get(0);
+            Object bestKey = best.getKey() == NULL_KEY ? null : best.getKey();
+            for (int i = 1; i < matches.size(); i++) {
+                Map.Entry<Object, Fn> cand = matches.get(i);
+                Object candKey = cand.getKey() == NULL_KEY ? null : cand.getKey();
+                if (dominates(candKey, bestKey)) {
+                    best = cand;
+                    bestKey = candKey;
+                }
+            }
+            for (Map.Entry<Object, Fn> other : matches) {
+                if (other == best) continue;
+                Object otherKey = other.getKey() == NULL_KEY ? null : other.getKey();
+                if (!dominates(bestKey, otherKey)) {
+                    throw new IllegalArgumentException(
+                            "Multiple methods in multimethod '" + name + "' match dispatch value: "
+                                    + RT.printString(dispatchVal) + " -> "
+                                    + RT.printString(bestKey) + " and " + RT.printString(otherKey)
+                                    + ", and neither is preferred");
+                }
+            }
+            return best.getValue();
+        }
         return methodTable.get(defaultDispatchVal == null ? NULL_KEY : defaultDispatchVal);
     }
 

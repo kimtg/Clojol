@@ -842,12 +842,13 @@ public final class CoreExtras {
         return m.assoc(k, s.conj(v));
     }
 
-    public static PersistentHashMap deriveHierarchy(PersistentHashMap h, Object tag, Object parent) {
+    public static PersistentHashMap deriveHierarchy(Object hObj, Object tag, Object parent) {
+        PersistentHashMap h = PersistentHashMap.fromMap(hObj);
         if (RT.equiv(tag, parent)) throw new IllegalArgumentException("Cannot derive self");
         if (isa(h, parent, tag)) throw new IllegalArgumentException("Cyclic derivation: " + tag + " -> " + parent);
-        PersistentHashMap parents = (PersistentHashMap) h.valAt(KW_PARENTS, PersistentHashMap.EMPTY);
-        PersistentHashMap ancestors = (PersistentHashMap) h.valAt(KW_ANCESTORS, PersistentHashMap.EMPTY);
-        PersistentHashMap descendants = (PersistentHashMap) h.valAt(KW_DESCENDANTS, PersistentHashMap.EMPTY);
+        PersistentHashMap parents = PersistentHashMap.fromMap(h.valAt(KW_PARENTS, PersistentHashMap.EMPTY));
+        PersistentHashMap ancestors = PersistentHashMap.fromMap(h.valAt(KW_ANCESTORS, PersistentHashMap.EMPTY));
+        PersistentHashMap descendants = PersistentHashMap.fromMap(h.valAt(KW_DESCENDANTS, PersistentHashMap.EMPTY));
 
         parents = addToSetMap(parents, tag, parent);
         PersistentHashSet parentAncs = (PersistentHashSet) ancestors.valAt(parent, PersistentHashSet.EMPTY);
@@ -870,8 +871,9 @@ public final class CoreExtras {
         return PersistentHashMap.create(KW_PARENTS, parents, KW_ANCESTORS, ancestors, KW_DESCENDANTS, descendants);
     }
 
-    public static PersistentHashMap underiveHierarchy(PersistentHashMap h, Object tag, Object parent) {
-        PersistentHashMap parents = (PersistentHashMap) h.valAt(KW_PARENTS, PersistentHashMap.EMPTY);
+    public static PersistentHashMap underiveHierarchy(Object hObj, Object tag, Object parent) {
+        PersistentHashMap h = PersistentHashMap.fromMap(hObj);
+        PersistentHashMap parents = PersistentHashMap.fromMap(h.valAt(KW_PARENTS, PersistentHashMap.EMPTY));
         PersistentHashSet pset = (PersistentHashSet) parents.valAt(tag);
         if (pset == null || !pset.contains(parent)) return h;
         PersistentHashSet newP = pset.disjoin(parent);
@@ -1074,17 +1076,16 @@ public final class CoreExtras {
         int i = 1;
         while (i < args.length) {
             Object protoSym = args[i++];
-            Map<Keyword, List<Object>> methods = new LinkedHashMap<>();
+            Map<String, List<ISeq>> methods = new LinkedHashMap<>();
             while (i < args.length && args[i] instanceof ISeq ms) {
                 Symbol mname = (Symbol) ms.first();
-                methods.put(Keyword.intern(mname.name), List.of(ms.next()));
+                addMethodClause(methods, mname.name, ms.next());
                 i++;
             }
             List<Object> kvs = new ArrayList<>();
-            for (Map.Entry<Keyword, List<Object>> e : methods.entrySet()) {
-                kvs.add(e.getKey());
-                ISeq body = (ISeq) e.getValue().get(0);
-                kvs.add(RT.cons(Symbol.intern("clojure.core", "fn"), body));
+            for (Map.Entry<String, List<ISeq>> e : methods.entrySet()) {
+                kvs.add(Keyword.intern(e.getKey()));
+                kvs.add(buildMethodFnForm(e.getValue()));
             }
             forms.add(PersistentList.createFromArray(
                     Symbol.intern("clojure.core", "extend"),
@@ -1095,12 +1096,29 @@ public final class CoreExtras {
         return PersistentList.create(forms);
     }
 
+    private static String fieldTypeCode(PersistentHashMap fm, Keyword tagKw) {
+        if (fm == null) return "O";
+        Object tag = fm.valAt(tagKw);
+        if (tag == null) return "O";
+        return switch (tag.toString()) {
+            case "long" -> "J";
+            case "double" -> "D";
+            case "int" -> "I";
+            case "boolean" -> "Z";
+            case "byte" -> "B";
+            case "short" -> "S";
+            case "char" -> "C";
+            case "float" -> "F";
+            default -> "O";
+        };
+    }
+
     private static Object expandTypeOrRecord(Object[] args, boolean isRecord) {
         Symbol nameSym = (Symbol) args[0];
         PersistentVector fieldsVec = (PersistentVector) args[1];
         List<Object> fieldNames = new ArrayList<>();
         List<Object> fieldTypeTags = new ArrayList<>();
-        List<Object> mutFlags = new ArrayList<>();
+        List<Object> mutModes = new ArrayList<>();
         Set<String> mutableSet = new HashSet<>();
         Keyword volKw = Keyword.intern("volatile-mutable");
         Keyword unsyncKw = Keyword.intern("unsynchronized-mutable");
@@ -1109,20 +1127,14 @@ public final class CoreExtras {
             Symbol fs = (Symbol) fieldsVec.nth(i);
             fieldNames.add(fs.name);
             PersistentHashMap fm = fs.meta();
-            String ftype = "O";
-            if (isRecord && fm != null) {
-                Object tag = fm.valAt(tagKw);
-                if (tag != null) {
-                    String ts = tag.toString();
-                    if ("long".equals(ts)) ftype = "J";
-                    else if ("double".equals(ts)) ftype = "D";
-                }
+            fieldTypeTags.add(fieldTypeCode(fm, tagKw));
+            int mutMode = 0;
+            if (!isRecord && fm != null) {
+                if (RT.truthy(fm.valAt(volKw))) mutMode = 2;
+                else if (RT.truthy(fm.valAt(unsyncKw))) mutMode = 1;
             }
-            fieldTypeTags.add(ftype);
-            boolean isMut = !isRecord && fm != null
-                    && (RT.truthy(fm.valAt(volKw)) || RT.truthy(fm.valAt(unsyncKw)));
-            mutFlags.add(isMut);
-            if (isMut) mutableSet.add(fs.name);
+            mutModes.add((long) mutMode);
+            if (mutMode != 0) mutableSet.add(fs.name);
         }
 
         List<Object> specs = new ArrayList<>();
@@ -1132,12 +1144,17 @@ public final class CoreExtras {
 
         int i = 2;
         while (i < args.length) {
+            // Skip keyword options such as :load-ns true/false
+            if (args[i] instanceof Keyword) {
+                i += 2;
+                continue;
+            }
             Object spec = args[i++];
             specs.add(spec);
             Map<String, List<ISeq>> specGrouped = new LinkedHashMap<>();
             while (i < args.length && args[i] instanceof ISeq ms) {
                 Symbol mname = (Symbol) ms.first();
-                ISeq mbody = wrapMethodWithFields(fieldsVec, ms.next(), isRecord, mutableSet, isRecord ? nameSym : null);
+                ISeq mbody = wrapMethodWithFields(fieldsVec, ms.next(), isRecord, mutableSet, nameSym);
                 String mn = mname.name;
                 javaMethodNameSet.add(mn);
                 addMethodClause(allJavaGrouped, mn, mbody);
@@ -1180,7 +1197,8 @@ public final class CoreExtras {
                 PersistentVector.create(fieldNames),
                 PersistentVector.create(specs),
                 PersistentVector.create(javaMethodNames),
-                PersistentVector.create(mutFlags));
+                PersistentVector.create(mutModes),
+                PersistentVector.create(fieldTypeTags));
         Object attachTypeImplsForm = PersistentList.createFromArray(
                 Symbol.intern("clojure.core", "register-type-impls*"),
                 PersistentList.createFromArray(Symbol.intern("quote"), nameSym),
@@ -1218,7 +1236,7 @@ public final class CoreExtras {
             }
             return false;
         }
-        if (form instanceof PersistentHashMap pm) {
+        if (form instanceof IPersistentMap pm) {
             for (ISeq s = pm.seq(); s != null; s = s.next()) {
                 Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
                 if (formReferencesSym(e.getKey(), name) || formReferencesSym(e.getValue(), name)) return true;
@@ -1239,7 +1257,7 @@ public final class CoreExtras {
             boolean isRecord, Set<String> mutableSet, Symbol recordClassSym) {
         Object thisSym = params.nth(0);
         PersistentVector effectiveParams = params;
-        if (isRecord && recordClassSym != null && thisSym instanceof Symbol ts) {
+        if (recordClassSym != null && thisSym instanceof Symbol ts) {
             PersistentHashMap curMeta = ts.meta();
             if (curMeta == null || !curMeta.containsKey(Keyword.intern("tag"))) {
                 PersistentHashMap newMeta = (curMeta != null ? curMeta : PersistentHashMap.EMPTY)
@@ -1249,16 +1267,17 @@ public final class CoreExtras {
                 effectiveParams = (PersistentVector) params.assoc(0, hintedThis);
             }
         }
+        Set<String> shadowed = new HashSet<>();
+        collectBindingSyms(effectiveParams, shadowed);
         List<Object> lets = new ArrayList<>();
         for (int i = 0; i < fields.count(); i++) {
             Symbol f = (Symbol) fields.nth(i);
+            if (shadowed.contains(f.name)) continue;
             if (!isRecord && mutableSet.contains(f.name)) continue;
-            if (isRecord && !formReferencesSym(bodyForms, f.name)) continue;
+            if (!formReferencesSym(bodyForms, f.name)) continue;
             lets.add(f);
             lets.add(PersistentList.createFromArray(Symbol.intern("."), thisSym, Symbol.intern("-" + f.name)));
         }
-        Set<String> shadowed = new HashSet<>();
-        collectBindingSyms(effectiveParams, shadowed);
         List<Object> body = new ArrayList<>();
         body.add(Symbol.intern("do"));
         for (ISeq s = bodyForms; s != null; s = s.next()) {
@@ -1286,7 +1305,7 @@ public final class CoreExtras {
                     collectBindingSyms(elem, out);
                 }
             }
-        } else if (pat instanceof PersistentHashMap pm) {
+        } else if (pat instanceof IPersistentMap pm) {
             for (ISeq s = pm.seq(); s != null; s = s.next()) {
                 Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
                 Object k = e.getKey(), v = e.getValue();
@@ -1395,7 +1414,7 @@ public final class CoreExtras {
             }
             return PersistentVector.create(out);
         }
-        if (form instanceof PersistentHashMap pm) {
+        if (form instanceof IPersistentMap pm) {
             PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
             for (ISeq s = pm.seq(); s != null; s = s.next()) {
                 Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
@@ -1676,7 +1695,7 @@ public final class CoreExtras {
         switch (_id) {
             case 0: {
                 
-            PersistentHashMap m = (PersistentHashMap) RT.CLOJURE_VERSION.deref();
+            IPersistentMap m = (IPersistentMap) RT.CLOJURE_VERSION.deref();
             StringBuilder sb = new StringBuilder();
             sb.append(m.valAt(Keyword.intern("major"))).append('.')
               .append(m.valAt(Keyword.intern("minor"))).append('.')
@@ -1839,15 +1858,7 @@ public final class CoreExtras {
         
             }
             case 42: { Object x = _a; return ((Number) x); }
-            case 43: {
-                Object x = _a;
-            if (x instanceof BigInteger bi) return bi;
-            if (x instanceof BigDecimal bd) return bd.toBigInteger();
-            if (x instanceof Ratio r) return r.numerator.divide(r.denominator);
-            if (x instanceof String s) return new BigInteger(s);
-            return BigInteger.valueOf(Numbers.toLong(x));
-        
-            }
+            case 43: return Numbers.toBigInteger(_a);
             case 44: {
                 Object x = _a;
             if (x instanceof BigDecimal bd) {
@@ -2439,10 +2450,10 @@ public final class CoreExtras {
     private static Object call2_1(int _id, Object _a, Object _b) {
         switch (_id) {
             case 32: { Object tag = _a; Object parent = _b; return (getGlobalHierarchy().alterRoot(
-                        Fn.of1("derive-global", h -> deriveHierarchy((PersistentHashMap) h, tag, parent)),
+                        Fn.of1("derive-global", h -> deriveHierarchy(h, tag, parent)),
                         Fn.EMPTY_ARGS)); }
             case 33: { Object tag = _a; Object parent = _b; return (getGlobalHierarchy().alterRoot(
-                        Fn.of1("underive-global", h -> underiveHierarchy((PersistentHashMap) h, tag, parent)),
+                        Fn.of1("underive-global", h -> underiveHierarchy(h, tag, parent)),
                         Fn.EMPTY_ARGS)); }
             case 34: { Object h = _a; Object tag = _b; return (parentsOf(h, tag)); }
             case 35: { Object h = _a; Object tag = _b; return (ancestorsOf(h, tag)); }
@@ -2474,7 +2485,7 @@ public final class CoreExtras {
                     return target.intern((Symbol) sym);
                 
             }
-            case 41: { Object ref = _a; Object m = _b; return (((IReference) ref).resetMeta((PersistentHashMap) m)); }
+            case 41: { Object ref = _a; Object m = _b; return (((IReference) ref).resetMeta(PersistentHashMap.fromMap(m))); }
             case 42: {
                 Object bindingMap = _a; Object func = _b;
                 Map<Var, Object> saved = new LinkedHashMap<>();
@@ -2559,8 +2570,8 @@ public final class CoreExtras {
             return cls;
         
             }
-            case 53: { Object p = _a; Object m = _b; return (TypeFactory.initProxy(p, (PersistentHashMap) m)); }
-            case 54: { Object p = _a; Object m = _b; return (TypeFactory.updateProxy(p, (PersistentHashMap) m)); }
+            case 53: { Object p = _a; Object m = _b; return (TypeFactory.initProxy(p, PersistentHashMap.fromMap(m))); }
+            case 54: { Object p = _a; Object m = _b; return (TypeFactory.updateProxy(p, PersistentHashMap.fromMap(m))); }
             case 55: {
                 Object sup = _a; Object ifaces = _b;
             List<Class<?>> ifs = new ArrayList<>();
@@ -2672,8 +2683,8 @@ public final class CoreExtras {
                     return intoIterator(to, (Fn) xform, it);
                 
             }
-            case 11: { Object h = _a; Object tag = _b; Object parent = _c; return (deriveHierarchy((PersistentHashMap) h, tag, parent)); }
-            case 12: { Object h = _a; Object tag = _b; Object parent = _c; return (underiveHierarchy((PersistentHashMap) h, tag, parent)); }
+            case 11: { Object h = _a; Object tag = _b; Object parent = _c; return (deriveHierarchy(h, tag, parent)); }
+            case 12: { Object h = _a; Object tag = _b; Object parent = _c; return (underiveHierarchy(h, tag, parent)); }
             case 13: { Object mf = _a; Object x = _b; Object y = _c; return (((MultiFn) mf).preferMethod(x, y)); }
             case 14: {
                 Object nsArg = _a; Object sym = _b; Object val = _c;
@@ -2879,9 +2890,9 @@ public final class CoreExtras {
                         args.length > 1 ? PersistentList.createFromArraySlice(args, 1) : null)); }
             case 17: { Object[] args = _args; return (new ArrayChunk(args[1], (int) Numbers.toLong(args[2]), (int) Numbers.toLong(args[3]))); }
             case 18: { Object[] args = _args; return (new Vec(args[0], (int) Numbers.toLong(args[1]), (int) Numbers.toLong(args[2]),
-                        (Vec.VecNode) args[3], args[4], (PersistentHashMap) args[5])); }
+                        (Vec.VecNode) args[3], args[4], PersistentHashMap.fromMap(args[5]))); }
             case 19: { Object[] args = _args; return (new Vec.VecSeq(args[0], (Vec) args[1], (Vec.VecNode) args[2],
-                        (int) Numbers.toLong(args[3]), (int) Numbers.toLong(args[4]), (PersistentHashMap) args[5])); }
+                        (int) Numbers.toLong(args[3]), (int) Numbers.toLong(args[4]), PersistentHashMap.fromMap(args[5]))); }
             case 20: {
                 Object[] args = _args;
             List<Object> seqs = new ArrayList<>(args.length + 1);
@@ -2947,8 +2958,8 @@ public final class CoreExtras {
                     idx++;
                 }
                 PersistentHashMap attrMap = null;
-                if (idx < args.length && args[idx] instanceof PersistentHashMap pm) {
-                    attrMap = pm;
+                if (idx < args.length && args[idx] instanceof IPersistentMap pm) {
+                    attrMap = PersistentHashMap.fromMap(pm);
                     idx++;
                 }
                 PersistentVector params = (PersistentVector) args[idx++];
@@ -2957,33 +2968,67 @@ public final class CoreExtras {
                 Object inlineFnForm = RT.cons(Symbol.intern("clojure.core", "fn"),
                         RT.cons(params, PersistentList.create(bodyForms)));
 
-                // Strip & if variadic for non-inlined wrapper; collect clean param syms
                 boolean variadic = false;
+                int fixedCount = 0;
                 List<Object> paramSyms = new ArrayList<>();
                 for (int i = 0; i < params.count(); i++) {
                     Object p = params.nth(i);
                     if (p instanceof Symbol s && "&".equals(s.name)) { variadic = true; continue; }
+                    if (!variadic) fixedCount++;
                     paramSyms.add(p);
                 }
                 Symbol ifnSym = Symbol.intern("inline_fn__" + RT.nextID());
                 Object quotedParams = PersistentList.createFromArray(Symbol.intern("quote"), params);
-                Object quotedArgSyms = PersistentList.createFromArray(Symbol.intern("quote"), PersistentVector.create(paramSyms));
-                Object evalFnForm = PersistentList.createFromArray(
-                        Symbol.intern("clojure.core", "eval"),
-                        PersistentList.createFromArray(
-                                Symbol.intern("clojure.core", "list"),
-                                PersistentList.createFromArray(Symbol.intern("quote"), Symbol.intern("clojure.core", "fn")),
-                                quotedParams,
-                                PersistentList.createFromArray(Symbol.intern("clojure.core", "apply"), ifnSym, quotedArgSyms)));
+                Object evalFnForm;
+                if (!variadic) {
+                    Object quotedArgSyms = PersistentList.createFromArray(Symbol.intern("quote"), PersistentVector.create(paramSyms));
+                    evalFnForm = PersistentList.createFromArray(
+                            Symbol.intern("clojure.core", "eval"),
+                            PersistentList.createFromArray(
+                                    Symbol.intern("clojure.core", "list"),
+                                    PersistentList.createFromArray(Symbol.intern("quote"), Symbol.intern("clojure.core", "fn")),
+                                    quotedParams,
+                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "apply"), ifnSym, quotedArgSyms)));
+                } else {
+                    Symbol vaArgs = Symbol.intern("args__" + RT.nextID());
+                    Symbol qItem = Symbol.intern("x__" + RT.nextID());
+                    evalFnForm = PersistentList.createFromArray(
+                            Symbol.intern("clojure.core", "fn"),
+                            PersistentVector.createOwning(Symbol.intern("&"), vaArgs),
+                            PersistentList.createFromArray(
+                                    Symbol.intern("clojure.core", "eval"),
+                                    PersistentList.createFromArray(
+                                            Symbol.intern("clojure.core", "apply"),
+                                            ifnSym,
+                                            PersistentList.createFromArray(
+                                                    Symbol.intern("clojure.core", "map"),
+                                                    PersistentList.createFromArray(
+                                                            Symbol.intern("clojure.core", "fn"),
+                                                            PersistentVector.createOwning(qItem),
+                                                            PersistentList.createFromArray(
+                                                                    Symbol.intern("clojure.core", "list"),
+                                                                    PersistentList.createFromArray(Symbol.intern("quote"), Symbol.intern("quote")),
+                                                                    qItem)),
+                                                    vaArgs))));
+                }
                 List<Object> metaUpdates = new ArrayList<>();
                 metaUpdates.add(Symbol.intern("clojure.core", "alter-meta!"));
                 metaUpdates.add(PersistentList.createFromArray(Symbol.intern("var"), nameSym));
                 metaUpdates.add(Symbol.intern("clojure.core", "assoc"));
                 metaUpdates.add(Keyword.intern("inline"));
                 metaUpdates.add(ifnSym);
+                metaUpdates.add(Keyword.intern("arglists"));
+                metaUpdates.add(PersistentList.createFromArray(Symbol.intern("quote"), PersistentList.createFromArray(params)));
                 if (!variadic) {
                     metaUpdates.add(Keyword.intern("inline-arities"));
-                    metaUpdates.add(PersistentHashSet.create((long) paramSyms.size()));
+                    metaUpdates.add(PersistentHashSet.create((long) fixedCount));
+                } else {
+                    Symbol nSym = Symbol.intern("n__" + RT.nextID());
+                    metaUpdates.add(Keyword.intern("inline-arities"));
+                    metaUpdates.add(PersistentList.createFromArray(
+                            Symbol.intern("clojure.core", "fn"),
+                            PersistentVector.createOwning(nSym),
+                            PersistentList.createFromArray(Symbol.intern("clojure.core", ">="), nSym, (long) fixedCount)));
                 }
                 if (doc != null) {
                     metaUpdates.add(Keyword.intern("doc"));
@@ -2991,9 +3036,9 @@ public final class CoreExtras {
                 }
                 if (attrMap != null) {
                     for (ISeq s = attrMap.seq(); s != null; s = s.next()) {
-                        PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
-                        metaUpdates.add(me.key);
-                        metaUpdates.add(me.val);
+                        Map.Entry<?, ?> me = (Map.Entry<?, ?>) s.first();
+                        metaUpdates.add(me.getKey());
+                        metaUpdates.add(me.getValue());
                     }
                 }
                 return PersistentList.createFromArray(
@@ -3171,7 +3216,7 @@ public final class CoreExtras {
             for (int i = 1; i + 1 < args.length; i += 2) {
                 Object k = args[i];
                 Object v = args[i + 1];
-                if (Keyword.intern("meta").equals(k)) meta = (PersistentHashMap) v;
+                if (Keyword.intern("meta").equals(k)) meta = PersistentHashMap.fromMap(v);
                 else if (Keyword.intern("validator").equals(k)) validator = (Fn) v;
                 else if (Keyword.intern("error-handler").equals(k)) errHandler = (Fn) v;
                 else if (Keyword.intern("error-mode").equals(k)) errMode = (Keyword) v;
@@ -3239,7 +3284,7 @@ public final class CoreExtras {
             int minH = 0, maxH = 10;
             for (int i = 1; i + 1 < args.length; i += 2) {
                 Object k = args[i], v = args[i + 1];
-                if (Keyword.intern("meta").equals(k)) meta = (PersistentHashMap) v;
+                if (Keyword.intern("meta").equals(k)) meta = PersistentHashMap.fromMap(v);
                 else if (Keyword.intern("validator").equals(k)) validator = (Fn) v;
                 else if (Keyword.intern("min-history").equals(k)) minH = (int) Numbers.toLong(v);
                 else if (Keyword.intern("max-history").equals(k)) maxH = (int) Numbers.toLong(v);
@@ -3294,7 +3339,7 @@ public final class CoreExtras {
             Class<?> atype = (Class<?>) args[0];
             for (int i = 1; i + 1 < args.length; i += 2) {
                 Protocol p = (Protocol) args[i];
-                PersistentHashMap mmap = (PersistentHashMap) args[i + 1];
+                IPersistentMap mmap = (IPersistentMap) args[i + 1];
                 Map<Keyword, Fn> m = new HashMap<>();
                 for (ISeq s = mmap.seq(); s != null; s = s.next()) {
                     Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
@@ -3307,68 +3352,85 @@ public final class CoreExtras {
             }
             case 52: {
                 Object[] args = _args;
-            Symbol pname = (Symbol) args[0];
-            int idx = 1;
-            String doc = (idx < args.length && args[idx] instanceof String s) ? (String) args[idx++] : null;
-            List<Object> sigSpecs = new ArrayList<>();
-            List<Object> methodDefForms = new ArrayList<>();
-            while (idx < args.length) {
-                if (args[idx] instanceof ISeq sigSeq) {
-                    Symbol mname = (Symbol) sigSeq.first();
-                    List<PersistentVector> arglists = new ArrayList<>();
-                    List<Object> fixedArities = new ArrayList<>();
-                    String mdoc = null;
-                    for (ISeq s = sigSeq.next(); s != null; s = s.next()) {
-                        if (s.first() instanceof PersistentVector v) {
-                            arglists.add(v);
-                            boolean variadic = false;
-                            for (int ai = 0; ai < v.count(); ai++) {
-                                if (v.nth(ai) instanceof Symbol as && as.ns == null && "&".equals(as.name)) {
-                                    variadic = true;
-                                    break;
-                                }
-                            }
-                            if (!variadic && v.count() >= 1 && v.count() <= 4) {
-                                fixedArities.add(Long.valueOf(v.count()));
-                            }
-                        } else if (s.first() instanceof String ms) {
-                            mdoc = ms;
+                Symbol pname = (Symbol) args[0];
+                int idx = 1;
+                String doc = (idx < args.length && args[idx] instanceof String) ? (String) args[idx++] : null;
+                boolean extendViaMetadata = false;
+                List<Object> sigSpecs = new ArrayList<>();
+                PersistentHashMap sigsMap = PersistentHashMap.EMPTY;
+                List<Object> methodDefForms = new ArrayList<>();
+                Keyword kwExtendViaMeta = Keyword.intern("extend-via-metadata");
+                while (idx < args.length) {
+                    if (args[idx] instanceof Keyword kw) {
+                        Object optVal = (idx + 1 < args.length) ? args[idx + 1] : null;
+                        if (kwExtendViaMeta.equals(kw)) {
+                            extendViaMetadata = RT.truthy(optVal);
                         }
+                        idx += 2;
+                        continue;
                     }
-                    if (!fixedArities.isEmpty()) {
-                        sigSpecs.add(PersistentVector.createOwning(mname.name, PersistentVector.create(fixedArities)));
+                    if (args[idx] instanceof ISeq sigSeq) {
+                        Symbol mname = (Symbol) sigSeq.first();
+                        List<PersistentVector> arglists = new ArrayList<>();
+                        List<Object> fixedArities = new ArrayList<>();
+                        String mdoc = null;
+                        for (ISeq s = sigSeq.next(); s != null; s = s.next()) {
+                            if (s.first() instanceof PersistentVector v) {
+                                arglists.add(v);
+                                boolean variadic = false;
+                                for (int ai = 0; ai < v.count(); ai++) {
+                                    if (v.nth(ai) instanceof Symbol as && as.ns == null && "&".equals(as.name)) {
+                                        variadic = true;
+                                        break;
+                                    }
+                                }
+                                if (!variadic && v.count() >= 1 && v.count() <= 20) {
+                                    fixedArities.add(Long.valueOf(v.count()));
+                                }
+                            } else if (s.first() instanceof String ms) {
+                                mdoc = ms;
+                            }
+                        }
+                        if (!fixedArities.isEmpty()) {
+                            sigSpecs.add(PersistentVector.createOwning(mname.name, PersistentVector.create(fixedArities)));
+                        }
+                        Keyword mk = Keyword.intern(mname.name);
+                        PersistentHashMap sigEntry = PersistentHashMap.EMPTY
+                                .assoc(Keyword.intern("name"), mname.withMeta(null))
+                                .assoc(Keyword.intern("arglists"), PersistentList.create(arglists))
+                                .assoc(Keyword.intern("doc"), mdoc);
+                        sigsMap = sigsMap.assoc(mk, sigEntry);
+                        PersistentHashMap meta = PersistentHashMap.EMPTY
+                                .assoc(Keyword.intern("arglists"), PersistentList.createFromArray(
+                                        Symbol.intern("quote"), PersistentList.create(arglists)));
+                        if (mdoc != null) meta = meta.assoc(Keyword.intern("doc"), mdoc);
+                        Symbol mnameWithMeta = mname.withMeta(meta);
+                        methodDefForms.add(PersistentList.createFromArray(
+                                Symbol.intern("def"),
+                                mnameWithMeta,
+                                PersistentList.createFromArray(
+                                        Symbol.intern("clojure.core", "make-protocol-fn*"),
+                                        PersistentList.createFromArray(Symbol.intern("var"), pname),
+                                        mk,
+                                        mname.name)));
                     }
-                    Keyword mk = Keyword.intern(mname.name);
-                    PersistentHashMap meta = PersistentHashMap.EMPTY
-                            .assoc(Keyword.intern("arglists"), PersistentList.createFromArray(
-                                    Symbol.intern("quote"), PersistentList.create(arglists)));
-                    if (mdoc != null) meta = meta.assoc(Keyword.intern("doc"), mdoc);
-                    Symbol mnameWithMeta = mname.withMeta(meta);
-                    methodDefForms.add(PersistentList.createFromArray(
-                            Symbol.intern("def"),
-                            mnameWithMeta,
-                            PersistentList.createFromArray(
-                                    Symbol.intern("clojure.core", "make-protocol-fn*"),
-                                    PersistentList.createFromArray(Symbol.intern("var"), pname),
-                                    mk,
-                                    mname.name)));
+                    idx++;
                 }
-                idx++;
-            }
-            List<Object> forms = new ArrayList<>();
-            forms.add(Symbol.intern("do"));
-            forms.add(PersistentList.createFromArray(
-                    Symbol.intern("def"),
-                    pname,
-                    PersistentList.createFromArray(
-                            Symbol.intern("clojure.core", "register-protocol*"),
-                            PersistentList.createFromArray(Symbol.intern("quote"), pname),
-                            doc,
-                            PersistentVector.create(sigSpecs))));
-            forms.addAll(methodDefForms);
-            forms.add(pname);
-            return PersistentList.create(forms);
-        
+                List<Object> forms = new ArrayList<>();
+                forms.add(Symbol.intern("do"));
+                forms.add(PersistentList.createFromArray(
+                        Symbol.intern("def"),
+                        pname,
+                        PersistentList.createFromArray(
+                                Symbol.intern("clojure.core", "register-protocol*"),
+                                PersistentList.createFromArray(Symbol.intern("quote"), pname),
+                                doc,
+                                PersistentVector.create(sigSpecs),
+                                Boolean.valueOf(extendViaMetadata),
+                                PersistentList.createFromArray(Symbol.intern("quote"), sigsMap))));
+                forms.addAll(methodDefForms);
+                forms.add(pname);
+                return PersistentList.create(forms);
             }
             case 53: { Object[] args = _args; return (expandExtendType(args)); }
             case 54: {
@@ -3516,52 +3578,40 @@ public final class CoreExtras {
             case 65: { Object[] args = _args; return (TypeFactory.constructProxy((Class<?>) args[0], Arrays.copyOfRange(args, 1, args.length))); }
             case 66: {
                 Object[] args = _args;
-            PersistentVector classAndIfaces = (PersistentVector) args[0];
-            PersistentVector superArgs = (PersistentVector) args[1];
-            List<Object> getClassCall = new ArrayList<>();
-            getClassCall.add(Symbol.intern("clojure.core", "get-proxy-class"));
-            for (int i = 0; i < classAndIfaces.count(); i++) getClassCall.add(classAndIfaces.nth(i));
+                PersistentVector classAndIfaces = (PersistentVector) args[0];
+                PersistentVector superArgs = (PersistentVector) args[1];
+                List<Object> getClassCall = new ArrayList<>();
+                getClassCall.add(Symbol.intern("clojure.core", "get-proxy-class"));
+                for (int i = 0; i < classAndIfaces.count(); i++) getClassCall.add(classAndIfaces.nth(i));
 
-            List<Object> constructCall = new ArrayList<>();
-            constructCall.add(Symbol.intern("clojure.core", "construct-proxy"));
-            constructCall.add(PersistentList.create(getClassCall));
-            for (int i = 0; i < superArgs.count(); i++) constructCall.add(superArgs.nth(i));
+                List<Object> constructCall = new ArrayList<>();
+                constructCall.add(Symbol.intern("clojure.core", "construct-proxy"));
+                constructCall.add(PersistentList.create(getClassCall));
+                for (int i = 0; i < superArgs.count(); i++) constructCall.add(superArgs.nth(i));
 
-            Map<String, List<Object>> grouped = new LinkedHashMap<>();
-            for (int i = 2; i < args.length; i++) {
-                ISeq ms = (ISeq) args[i];
-                String mname = ms.first().toString();
-                ISeq rest = ms.next();
-                grouped.computeIfAbsent(mname, k -> new ArrayList<>()).add(rest);
-            }
-            List<Object> mapKVs = new ArrayList<>();
-            for (Map.Entry<String, List<Object>> e : grouped.entrySet()) {
-                mapKVs.add(e.getKey());
-                List<Object> fnClauses = new ArrayList<>();
-                fnClauses.add(Symbol.intern("clojure.core", "fn"));
-                for (Object clause : e.getValue()) {
-                    ISeq cs = (ISeq) clause;
-                    if (cs.first() instanceof PersistentVector pv) {
-                        PersistentVector withThis = insertThisFirst(pv);
-                        fnClauses.add(withThis);
-                        for (ISeq b = cs.next(); b != null; b = b.next()) fnClauses.add(b.first());
-                        break;
+                Map<String, List<ISeq>> grouped = new LinkedHashMap<>();
+                for (int i = 2; i < args.length; i++) {
+                    ISeq ms = (ISeq) args[i];
+                    String mname = ms.first().toString();
+                    ISeq rest = ms.next();
+                    if (rest.first() instanceof PersistentVector pv) {
+                        addMethodClause(grouped, mname, RT.cons(insertThisFirst(pv), rest.next()));
                     } else {
-                        for (ISeq cs2 = cs; cs2 != null; cs2 = cs2.next()) {
+                        for (ISeq cs2 = rest; cs2 != null; cs2 = cs2.next()) {
                             ISeq arity = (ISeq) cs2.first();
-                            PersistentVector withThis = insertThisFirst((PersistentVector) arity.first());
-                            fnClauses.add(RT.cons(withThis, arity.next()));
+                            addMethodClause(grouped, mname, RT.cons(insertThisFirst((PersistentVector) arity.first()), arity.next()));
                         }
-                        break;
                     }
                 }
-                mapKVs.add(PersistentList.create(fnClauses));
-            }
-            return PersistentList.createFromArray(
-                    Symbol.intern("clojure.core", "init-proxy"),
-                    PersistentList.create(constructCall),
-                    RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(mapKVs)));
-        
+                List<Object> mapKVs = new ArrayList<>();
+                for (Map.Entry<String, List<ISeq>> e : grouped.entrySet()) {
+                    mapKVs.add(e.getKey());
+                    mapKVs.add(buildMethodFnForm(e.getValue()));
+                }
+                return PersistentList.createFromArray(
+                        Symbol.intern("clojure.core", "init-proxy"),
+                        PersistentList.create(constructCall),
+                        RT.cons(Symbol.intern("clojure.core", "hash-map"), PersistentList.create(mapKVs)));
             }
             case 67: {
                 Object[] args = _args;
@@ -3658,12 +3708,12 @@ public final class CoreExtras {
                 Object[] args = _args;
                 Symbol nameSym = (Symbol) args[0];
                 String doc = args.length > 1 ? (String) args[1] : null;
-                Var existing = RT.currentNS().findInternedVar(nameSym);
-                if (existing != null && existing.getRawRoot() instanceof Protocol oldP) {
+                Namespace cur = RT.currentNS();
+                Var protoVar = cur.intern(nameSym);
+                if (protoVar.hasRoot() && protoVar.getRawRoot() instanceof Protocol oldP) {
                     oldP.markRedefined();
                 }
                 Map<String, int[]> aritiesMap = null;
-                Class<?> onIface = null;
                 if (args.length > 2 && args[2] != null) {
                     aritiesMap = new LinkedHashMap<>();
                     for (ISeq s = RT.seq(args[2]); s != null; s = s.next()) {
@@ -3675,9 +3725,12 @@ public final class CoreExtras {
                         aritiesMap.put(mn, arr);
                     }
                 }
-                String ifaceBinaryName = RT.currentNS().name.name.replace('-', '_') + "." + nameSym.name;
-                onIface = TypeFactory.defineProtocolInterface(ifaceBinaryName, aritiesMap);
-                return new Protocol(nameSym, doc, onIface, aritiesMap);
+                boolean extendViaMetadata = args.length > 3 && RT.truthy(args[3]);
+                PersistentHashMap sigsMap = (args.length > 4 && args[4] != null)
+                        ? PersistentHashMap.fromMap(args[4]) : PersistentHashMap.EMPTY;
+                String ifaceBinaryName = cur.name.name.replace('-', '_') + "." + nameSym.name;
+                Class<?> onIface = TypeFactory.defineProtocolInterface(ifaceBinaryName, aritiesMap);
+                return new Protocol(nameSym, doc, onIface, aritiesMap, extendViaMetadata, sigsMap, protoVar);
             }
             case 71: {
                 // register-type-class*: defines deftype JVM class & ->Name ctor BEFORE method bodies compile
@@ -3685,20 +3738,51 @@ public final class CoreExtras {
                 Symbol nameSym = (Symbol) args[0];
                 String[] fields = toStringArray(args[1]);
                 Class<?>[] ifaces = resolveInterfaces(args[2]);
+                Set<String> implMethodNames = new HashSet<>();
                 Map<String, Fn> placeholderMethods = new LinkedHashMap<>();
                 for (String mn : toStringArray(args[3])) {
                     placeholderMethods.put(mn, null);
+                    implMethodNames.add(mn);
                 }
-                boolean[] mutables = new boolean[fields.length];
+                List<Protocol> directProtos = new ArrayList<>();
+                Set<Class<?>> directProtoIfaces = new HashSet<>();
+                for (ISeq s = RT.seq(args[2]); s != null; s = s.next()) {
+                    Object item = s.first();
+                    Protocol p = item instanceof Protocol pr ? pr : (item instanceof Class<?> c ? Protocol.findByInterface(c) : null);
+                    if (p != null && p.onInterface != null && p.interfaceMethodArities != null && !p.interfaceMethodArities.isEmpty()) {
+                        if (implMethodNames.containsAll(p.interfaceMethodArities.keySet())) {
+                            directProtos.add(p);
+                            directProtoIfaces.add(p.onInterface);
+                        }
+                    }
+                }
+                if (!directProtoIfaces.isEmpty() && ifaces.length > 0) {
+                    List<Class<?>> filtered = new ArrayList<>(ifaces.length);
+                    for (Class<?> ic : ifaces) {
+                        if (!directProtoIfaces.contains(ic)) filtered.add(ic);
+                    }
+                    ifaces = filtered.toArray(new Class<?>[0]);
+                }
+                int[] mutModes = new int[fields.length];
                 if (args.length > 4 && args[4] != null) {
                     int k = 0;
                     for (ISeq s = RT.seq(args[4]); s != null && k < fields.length; s = s.next(), k++) {
-                        mutables[k] = RT.truthy(s.first());
+                        Object mv = s.first();
+                        if (mv instanceof Number num) mutModes[k] = num.intValue();
+                        else mutModes[k] = RT.truthy(mv) ? 2 : 0;
+                    }
+                }
+                char[] fieldTypes = new char[fields.length];
+                Arrays.fill(fieldTypes, 'O');
+                if (args.length > 5 && args[5] != null) {
+                    String[] fts = toStringArray(args[5]);
+                    for (int fi = 0; fi < Math.min(fields.length, fts.length); fi++) {
+                        fieldTypes[fi] = fts[fi].isEmpty() ? 'O' : fts[fi].charAt(0);
                     }
                 }
                 Namespace cur = RT.currentNS();
                 String binaryName = cur.name.name.replace('-', '_') + "." + nameSym.name;
-                Class<?> typeCls = TypeFactory.defineType(binaryName, fields, mutables, ifaces, placeholderMethods);
+                Class<?> typeCls = TypeFactory.defineType(binaryName, fields, fieldTypes, mutModes, ifaces, placeholderMethods, directProtos);
                 cur.importClass(nameSym, typeCls);
                 cur.intern("->" + nameSym.name, Fn.ofVarargs("->" + nameSym.name,
                         ctorArgs -> Interop.invokeConstructor(typeCls, ctorArgs)));
@@ -3714,9 +3798,7 @@ public final class CoreExtras {
                 String binaryName = cur.name.name.replace('-', '_') + "." + nameSym.name;
                 Class<?> typeCls = Interop.resolveClass(cur, nameSym.name);
                 TypeFactory.setClassMethods(binaryName, javaMethods);
-                for (Map.Entry<Protocol, Map<Keyword, Fn>> e : protoImpls.entrySet()) {
-                    e.getKey().addImpl(typeCls, e.getValue());
-                }
+                TypeFactory.bindRecordProtocolMethods(typeCls, protoImpls);
                 return typeCls;
             }
             default: throw new IllegalStateException("Invalid dispatcher id: " + _id);

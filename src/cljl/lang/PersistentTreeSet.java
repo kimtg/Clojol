@@ -2,14 +2,16 @@ package cljl.lang;
 
 import cljl.Fn;
 import cljl.RT;
+import java.io.Serializable;
 import java.util.*;
 
 /**
  * Persistent sorted set backed by PersistentTreeMap.
  */
 public final class PersistentTreeSet extends Fn
-        implements IPersistentSet, IObj, Sorted, Reversible, Set<Object>, Iterable<Object> {
+        implements IPersistentSet, IObj, Sorted, Reversible, IHashEq, Set<Object>, Iterable<Object>, Serializable {
 
+    private static final long serialVersionUID = 1L;
     public static final PersistentTreeSet EMPTY = new PersistentTreeSet(null, PersistentTreeMap.EMPTY);
 
     public final PersistentTreeMap impl;
@@ -29,6 +31,7 @@ public final class PersistentTreeSet extends Fn
         return new PersistentTreeSet(null, m);
     }
 
+    @Override
     public PersistentTreeSet cons(Object o) {
         return conj(o);
     }
@@ -38,11 +41,13 @@ public final class PersistentTreeSet extends Fn
         return nm == impl ? this : new PersistentTreeSet(meta, nm);
     }
 
+    @Override
     public PersistentTreeSet disjoin(Object key) {
         PersistentTreeMap nm = impl.without(key);
         return nm == impl ? this : new PersistentTreeSet(meta, nm);
     }
 
+    @Override
     public Object get(Object key) {
         return get(key, null);
     }
@@ -112,6 +117,7 @@ public final class PersistentTreeSet extends Fn
         return RT.keys(impl.seqFrom(key, ascending));
     }
 
+    @Override
     public PersistentTreeSet empty() {
         return new PersistentTreeSet(meta, impl.empty());
     }
@@ -154,6 +160,11 @@ public final class PersistentTreeSet extends Fn
             return false;
         }
         return true;
+    }
+
+    @Override
+    public int hasheq() {
+        return Murmur3.hashUnordered(this);
     }
 
     @Override

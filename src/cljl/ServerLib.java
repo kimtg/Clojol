@@ -37,7 +37,7 @@ public final class ServerLib {
                 String serverName = name.substring("clojure.server.".length());
                 String val = props.getProperty(name);
                 Object optsObj = Reader.readEdnString(null, val);
-                if (optsObj instanceof PersistentHashMap pm) {
+                if (optsObj instanceof IPersistentMap pm) {
                     if (!pm.containsKey(Keyword.intern("name"))) {
                         pm = pm.assoc(Keyword.intern("name"), serverName);
                     }
@@ -87,7 +87,7 @@ public final class ServerLib {
             final Fn serializer = valf;
             PrintWriter out = RT.outWriter();
             Fn outFn = Fn.of1("io-prepl-out", m -> {
-                if (m instanceof PersistentHashMap pm) {
+                if (m instanceof IPersistentMap pm) {
                     if (Keyword.intern("ret").equals(pm.valAt(Keyword.intern("tag")))
                             && !RT.truthy(pm.valAt(Keyword.intern("exception")))) {
                         pm = pm.assoc(Keyword.intern("val"), serializer.invoke(pm.valAt(Keyword.intern("val"))));
@@ -101,7 +101,7 @@ public final class ServerLib {
         }));
 
         ns.intern("start-server", Fn.of1("start-server", optsObj -> {
-            PersistentHashMap opts = (PersistentHashMap) optsObj;
+            IPersistentMap opts = (IPersistentMap) optsObj;
             String name = String.valueOf(opts.valAt(kName, "server-" + RT.nextID()));
             int port = (int) Numbers.toLong(opts.valAt(kPort, 0L));
             String address = opts.valAt(kAddress) != null ? String.valueOf(opts.valAt(kAddress)) : "127.0.0.1";

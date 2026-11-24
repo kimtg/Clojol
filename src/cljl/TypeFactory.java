@@ -16,15 +16,81 @@ public final class TypeFactory {
 
     private static final DynamicClassLoader LOADER = new DynamicClassLoader();
     private static final AtomicInteger PROXY_ID = new AtomicInteger(0);
+    private static final AtomicInteger REIFY_ID = new AtomicInteger(0);
     private static final AtomicInteger PROTO_FN_ID = new AtomicInteger(0);
     private static final AtomicInteger PROTO_IFACE_ID = new AtomicInteger(0);
     private static final AtomicInteger PROTO_HOLDER_ID = new AtomicInteger(0);
     private static final ConcurrentHashMap<Class<?>, String> RECORD_PM_HOLDER = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, Fn> PENDING_PM_FNS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Class<?>> RELOADED_CLASSES = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, PersistentVector> TYPE_BASIS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, String[]> RECORD_FIELDS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Class<?>> RECORD_CLASSES = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<List<Object>, Class<?>> REIFY_CLASS_CACHE = new ConcurrentHashMap<>();
+    private static final ThreadLocal<IdentityHashMap<Object, Set<String>>> SUPER_SUPPRESSED = new ThreadLocal<>();
 
     public static Fn takePendingProtoFn(String key) {
         return PENDING_PM_FNS.remove(key);
     }
+
+    public static PersistentVector getTypeBasis(String binaryName) {
+        PersistentVector v = TYPE_BASIS.get(binaryName);
+        return v != null ? v : PersistentVector.EMPTY;
+    }
+
+    public static Object createRecordFromMap(String binaryName, Map<?, ?> m) {
+        Class<?> recCls = RECORD_CLASSES.get(binaryName);
+        String[] fields = RECORD_FIELDS.get(binaryName);
+        if (recCls == null || fields == null) {
+            throw new IllegalStateException("Unknown record class: " + binaryName);
+        }
+        Object[] ctorArgs = new Object[fields.length + 2];
+        PersistentHashMap ext = PersistentHashMap.EMPTY;
+        Set<Object> baseSet = new HashSet<>();
+        for (int i = 0; i < fields.length; i++) {
+            Keyword fk = Keyword.intern(fields[i]);
+            baseSet.add(fk);
+            ctorArgs[i] = m != null ? m.get(fk) : null;
+        }
+        if (m != null) {
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                if (!baseSet.contains(e.getKey())) ext = ext.assoc(e.getKey(), e.getValue());
+            }
+        }
+        ctorArgs[fields.length] = null;
+        ctorArgs[fields.length + 1] = ext;
+        return Interop.invokeConstructor(recCls, ctorArgs);
+    }
+
+    public static Fn reifyProtocolFn(Map<Protocol, Map<Keyword, Fn>> protoImpls, Protocol p, Keyword mk) {
+        if (protoImpls == null) return null;
+        Map<Keyword, Fn> pm = protoImpls.get(p);
+        return pm != null ? pm.get(mk) : null;
+    }
+
+    public static boolean reifySatisfies(Map<Protocol, Map<Keyword, Fn>> protoImpls, Protocol p) {
+        return protoImpls != null && protoImpls.containsKey(p);
+    }
+
+    public static Map<Keyword, Fn> reifyProtocolImpls(Map<Protocol, Map<Keyword, Fn>> protoImpls, Protocol p) {
+        return protoImpls != null ? protoImpls.get(p) : null;
+    }
+
+    public static Object dispatchReifyMethod(Map<String, Fn> javaMethods, String methodKey, Object target, Object[] args) {
+        Fn impl = javaMethods != null ? javaMethods.get(methodKey) : null;
+        if (impl == null && javaMethods != null) {
+            String orig = PROTO_MANGLED_TO_NAME.get(methodKey);
+            if (orig != null) impl = javaMethods.get(orig);
+        }
+        if (impl != null) {
+            Object[] callArgs = new Object[1 + (args != null ? args.length : 0)];
+            callArgs[0] = target;
+            if (args != null && args.length > 0) System.arraycopy(args, 0, callArgs, 1, args.length);
+            return impl.applyTo(callArgs);
+        }
+        throw new UnsupportedOperationException("No implementation of " + methodKey + " in reify");
+    }
+
     private static final ConcurrentHashMap<String, ConcurrentHashMap<String, Fn>> CLASS_METHODS =
             new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<List<Class<?>>, Class<?>> PROXY_CLASS_CACHE =
@@ -33,6 +99,8 @@ public final class TypeFactory {
     private TypeFactory() {}
 
     static Class<?> findDynamicClass(String binaryName) {
+        Class<?> reloaded = RELOADED_CLASSES.get(binaryName);
+        if (reloaded != null) return reloaded;
         return LOADER.findAlreadyLoaded(binaryName);
     }
 
@@ -42,6 +110,19 @@ public final class TypeFactory {
         Class<?> defined = LOADER.define(binaryName, bytes);
         Interop.invalidateClassCache(binaryName);
         return defined;
+    }
+
+    private static synchronized Class<?> defineReloadableClass(String binaryName, byte[] bytes) {
+        Class<?> cls;
+        if (LOADER.findAlreadyLoaded(binaryName) == null) {
+            cls = LOADER.define(binaryName, bytes);
+        } else {
+            DynamicClassLoader child = new DynamicClassLoader(LOADER);
+            cls = child.define(binaryName, bytes);
+            RELOADED_CLASSES.put(binaryName, cls);
+        }
+        Interop.registerClass(binaryName, cls);
+        return cls;
     }
 
     public static final class DynamicClassLoader extends java.net.URLClassLoader {
@@ -111,6 +192,11 @@ public final class TypeFactory {
     }
 
     public static Fn lookupProxyFn(ProxyObject proxy, String name) {
+        IdentityHashMap<Object, Set<String>> sup = SUPER_SUPPRESSED.get();
+        if (sup != null) {
+            Set<String> names = sup.get(proxy);
+            if (names != null && names.contains(name)) return null;
+        }
         PersistentHashMap m = proxy.__getMappings();
         if (m == null) return null;
         Object fn = m.valAt(name);
@@ -201,7 +287,7 @@ public final class TypeFactory {
                     PROTO_MANGLED_TO_NAME.put(stdName, origName);
                 }
                 for (int arity : e.getValue()) {
-                    if (arity < 1 || arity > 4) continue;
+                    if (arity < 1 || arity > 20) continue;
                     StringBuilder desc = new StringBuilder("(");
                     for (int i = 1; i < arity; i++) desc.append("Ljava/lang/Object;");
                     desc.append(")Ljava/lang/Object;");
@@ -261,7 +347,8 @@ public final class TypeFactory {
         String internalName = binaryName.replace('.', '/');
         String superInternal = "cljl/Protocol$MethodFn";
 
-        Protocol proto = (!picOnly && protoVar != null && protoVar.getRawRoot() instanceof Protocol p && !p.hasInterfaceOverrides) ? p : null;
+        Protocol proto = (!picOnly && protoVar != null && protoVar.getRawRoot() instanceof Protocol p
+                && !p.hasInterfaceOverrides && !p.extendViaMetadata) ? p : null;
         String ifaceInternal = (proto != null && proto.onInterface != null)
                 ? proto.onInterface.getName().replace('.', '/') : null;
         int[] ifArities = (proto != null && proto.interfaceMethodArities != null)
@@ -300,9 +387,7 @@ public final class TypeFactory {
         }
         byte[] bytes = cw.toByteArray();
         GenClass.writeClassFileIfCompiling(binaryName, bytes);
-        Class<?> cls = LOADER.define(binaryName, bytes);
-        Interop.registerClass(binaryName, cls);
-        return cls;
+        return defineReloadableClass(binaryName, bytes);
     }
 
     public static synchronized Class<?> defineRecord(
@@ -324,6 +409,11 @@ public final class TypeFactory {
         for (int i = 0; i < fieldNames.length; i++) {
             ftypes[i] = (fieldTypes != null && i < fieldTypes.length) ? fieldTypes[i] : 'O';
         }
+        Object[] basisArr = new Object[fieldNames.length];
+        for (int i = 0; i < fieldNames.length; i++) basisArr[i] = Symbol.intern(fieldNames[i]);
+        TYPE_BASIS.put(binaryName, PersistentVector.createOwning(basisArr));
+        RECORD_FIELDS.put(binaryName, fieldNames.clone());
+
         String internalName = binaryName.replace('.', '/');
         String superInternal = "cljl/lang/PersistentRecord";
         List<String> ifaceList = new ArrayList<>(interfaces.length + directProtos.size());
@@ -358,7 +448,7 @@ public final class TypeFactory {
 
         ClassWriter cw = new ClassWriter(internalName, superInternal, ifaceInternals, 0x0011); // PUBLIC | FINAL
 
-        // Fields: public final long/double/Object <field>;
+        // Fields: public final <type> <field>;
         for (int i = 0; i < fieldNames.length; i++) {
             cw.addField(0x0011, fieldNames[i], ClassWriter.fieldDescFor(ftypes[i]));
         }
@@ -370,6 +460,9 @@ public final class TypeFactory {
         cw.emitRecordShortCtor(fieldNames);
         // Full ctor: (Object f0, ..., PersistentHashMap meta, PersistentHashMap ext)
         cw.emitRecordFullCtor(fieldNames, ftypes);
+        // Static Clojure record helpers: getBasis() and create(IPersistentMap / Map)
+        cw.emitGetBasisMethod(binaryName);
+        cw.emitRecordCreateMethods(binaryName);
         // __baseKeys() -> __KEYS
         cw.emitBaseKeysMethod();
         // __fieldIndex(Object key)
@@ -385,49 +478,52 @@ public final class TypeFactory {
 
         // Implement direct protocol interface methods backed by static final Fn fields in a companion holder class
         // so HotSpot C2 constant-folds the Fn instance and inlines the JIT body directly into callers.
-        String pmHolderBinary = null;
-        if (!activeDirectProtos.isEmpty()) {
-            pmHolderBinary = binaryName + "$__pm$" + PROTO_HOLDER_ID.incrementAndGet();
-            String pmHolderInternal = pmHolderBinary.replace('.', '/');
-            Set<String> emittedRecProtos = new HashSet<>();
-            for (Protocol p : activeDirectProtos) {
-                for (Map.Entry<String, int[]> e : p.interfaceMethodArities.entrySet()) {
-                    String origName = e.getKey();
-                    String jm = mangleProtoMethod(origName);
-                    String stdName = standardProtoMethodName(origName);
-                    String fnField = "__pm_" + jm;
-                    for (int arity : e.getValue()) {
-                        if (arity < 1 || arity > 4) continue;
-                        if (emittedRecProtos.add(jm + "/" + arity)) {
-                            cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm, arity, false, false);
-                        }
-                        if (stdName != null && !stdName.equals(jm) && emittedRecProtos.add(stdName + "/" + arity)) {
-                            cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, stdName, arity, false, false);
-                        }
-                        if (arity == 2) {
-                            if (emittedRecProtos.add(jm + "_J/2")) {
-                                cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm + "_J", 2, true, true);
-                            }
-                            if (emittedRecProtos.add(jm + "_JO/2")) {
-                                cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm + "_JO", 2, true, false);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        String pmHolderBinary = emitDirectProtoBridges(cw, binaryName, activeDirectProtos);
 
         // Implement Java interface methods delegating to TypeFactory.dispatchMethod
         emitInterfaceBridges(cw, binaryName, interfaces, methodImpls);
 
         byte[] bytes = cw.toByteArray();
         GenClass.writeClassFileIfCompiling(binaryName, bytes);
-        Class<?> cls = LOADER.define(binaryName, bytes);
+        Class<?> cls = defineReloadableClass(binaryName, bytes);
+        RECORD_CLASSES.put(binaryName, cls);
         if (pmHolderBinary != null) {
             RECORD_PM_HOLDER.put(cls, pmHolderBinary);
         }
-        Interop.registerClass(binaryName, cls);
         return cls;
+    }
+
+    private static String emitDirectProtoBridges(ClassWriter cw, String binaryName, List<Protocol> activeDirectProtos) {
+        if (activeDirectProtos.isEmpty()) return null;
+        String pmHolderBinary = binaryName + "$__pm$" + PROTO_HOLDER_ID.incrementAndGet();
+        String pmHolderInternal = pmHolderBinary.replace('.', '/');
+        Set<String> emittedRecProtos = new HashSet<>();
+        for (Protocol p : activeDirectProtos) {
+            for (Map.Entry<String, int[]> e : p.interfaceMethodArities.entrySet()) {
+                String origName = e.getKey();
+                String jm = mangleProtoMethod(origName);
+                String stdName = standardProtoMethodName(origName);
+                String fnField = "__pm_" + jm;
+                for (int arity : e.getValue()) {
+                    if (arity < 1 || arity > 20) continue;
+                    if (emittedRecProtos.add(jm + "/" + arity)) {
+                        cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm, arity, false, false);
+                    }
+                    if (stdName != null && !stdName.equals(jm) && emittedRecProtos.add(stdName + "/" + arity)) {
+                        cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, stdName, arity, false, false);
+                    }
+                    if (arity == 2) {
+                        if (emittedRecProtos.add(jm + "_J/2")) {
+                            cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm + "_J", 2, true, true);
+                        }
+                        if (emittedRecProtos.add(jm + "_JO/2")) {
+                            cw.emitRecordDirectProtoBridge(pmHolderInternal, fnField, jm + "_JO", 2, true, false);
+                        }
+                    }
+                }
+            }
+        }
+        return pmHolderBinary;
     }
 
     public static void bindRecordProtocolMethods(Class<?> recCls, Map<Protocol, Map<Keyword, Fn>> protoImpls) {
@@ -461,10 +557,11 @@ public final class TypeFactory {
             }
             clinit.vreturn();
             hcw.addCodeMethod(0x0008, "<clinit>", "()V", 2, 0, clinit.toBytes());
-            Class<?> holderCls = LOADER.define(pmHolderBinary, hcw.toByteArray());
+            DynamicClassLoader targetLoader = (recCls.getClassLoader() instanceof DynamicClassLoader dcl) ? dcl : LOADER;
+            Class<?> holderCls = targetLoader.define(pmHolderBinary, hcw.toByteArray());
             // Force <clinit> eagerly so PENDING_PM_FNS entries are consumed and static final fields are published
             try {
-                Class.forName(pmHolderBinary, true, LOADER);
+                Class.forName(pmHolderBinary, true, targetLoader);
             } catch (ClassNotFoundException e) {
                 throw RT.sneakyThrow(e);
             }
@@ -486,14 +583,55 @@ public final class TypeFactory {
             boolean[] mutable,
             Class<?>[] interfaces,
             Map<String, Fn> methodImpls) {
-        String internalName = binaryName.replace('.', '/');
-        boolean hasIType = false;
-        for (Class<?> iface : interfaces) {
-            if (iface == IType.class) { hasIType = true; break; }
+        int[] mutModes = new int[fieldNames.length];
+        for (int i = 0; i < fieldNames.length; i++) {
+            mutModes[i] = (mutable != null && i < mutable.length && mutable[i]) ? 2 : 0;
         }
-        String[] ifaceInternals = new String[interfaces.length + (hasIType ? 0 : 1)];
-        for (int i = 0; i < interfaces.length; i++) ifaceInternals[i] = interfaces[i].getName().replace('.', '/');
-        if (!hasIType) ifaceInternals[interfaces.length] = "cljl/lang/IType";
+        return defineType(binaryName, fieldNames, null, mutModes, interfaces, methodImpls, Collections.emptyList());
+    }
+
+    public static synchronized Class<?> defineType(
+            String binaryName,
+            String[] fieldNames,
+            char[] fieldTypes,
+            int[] mutability,
+            Class<?>[] interfaces,
+            Map<String, Fn> methodImpls,
+            List<Protocol> directProtos) {
+        char[] ftypes = new char[fieldNames.length];
+        for (int i = 0; i < fieldNames.length; i++) {
+            ftypes[i] = (fieldTypes != null && i < fieldTypes.length) ? fieldTypes[i] : 'O';
+        }
+        Object[] basisArr = new Object[fieldNames.length];
+        for (int i = 0; i < fieldNames.length; i++) basisArr[i] = Symbol.intern(fieldNames[i]);
+        TYPE_BASIS.put(binaryName, PersistentVector.createOwning(basisArr));
+
+        String internalName = binaryName.replace('.', '/');
+        List<String> ifaceList = new ArrayList<>(interfaces.length + directProtos.size() + 1);
+        Set<String> ifaceSeen = new HashSet<>();
+        for (Class<?> iface : interfaces) {
+            String iname = iface.getName().replace('.', '/');
+            if (ifaceSeen.add(iname)) ifaceList.add(iname);
+        }
+        if (ifaceSeen.add("cljl/lang/IType")) ifaceList.add("cljl/lang/IType");
+
+        List<Protocol> activeDirectProtos = new ArrayList<>();
+        Set<String> protoMethodNames = new HashSet<>();
+        for (Protocol p : directProtos) {
+            if (p.onInterface == null || p.interfaceMethodArities == null) continue;
+            boolean conflict = false;
+            for (String mn : p.interfaceMethodArities.keySet()) {
+                if (protoMethodNames.contains(mn)) { conflict = true; break; }
+            }
+            if (conflict) continue;
+            String iname = p.onInterface.getName().replace('.', '/');
+            if (ifaceSeen.add(iname)) {
+                ifaceList.add(iname);
+                activeDirectProtos.add(p);
+                protoMethodNames.addAll(p.interfaceMethodArities.keySet());
+            }
+        }
+        String[] ifaceInternals = ifaceList.toArray(new String[0]);
 
         ConcurrentHashMap<String, Fn> cm = new ConcurrentHashMap<>();
         for (Map.Entry<String, Fn> e : methodImpls.entrySet()) {
@@ -503,16 +641,25 @@ public final class TypeFactory {
 
         ClassWriter cw = new ClassWriter(internalName, "java/lang/Object", ifaceInternals, 0x0011);
         for (int i = 0; i < fieldNames.length; i++) {
-            int flags = mutable[i] ? 0x0041 : 0x0011; // PUBLIC | VOLATILE vs PUBLIC | FINAL
-            cw.addField(flags, fieldNames[i], "Ljava/lang/Object;");
+            int mode = (mutability != null && i < mutability.length) ? mutability[i] : 0;
+            int flags = switch (mode) {
+                case 1 -> 0x0001; // PUBLIC (:unsynchronized-mutable)
+                case 2 -> 0x0041; // PUBLIC | VOLATILE (:volatile-mutable)
+                default -> 0x0011; // PUBLIC | FINAL (immutable)
+            };
+            cw.addField(flags, fieldNames[i], ClassWriter.fieldDescFor(ftypes[i]));
         }
-        cw.emitSimpleCtor(fieldNames);
+        cw.emitTypedSimpleCtor(fieldNames, ftypes);
+        cw.emitGetBasisMethod(binaryName);
+        String pmHolderBinary = emitDirectProtoBridges(cw, binaryName, activeDirectProtos);
         emitInterfaceBridges(cw, binaryName, interfaces, methodImpls);
 
         byte[] bytes = cw.toByteArray();
         GenClass.writeClassFileIfCompiling(binaryName, bytes);
-        Class<?> cls = LOADER.define(binaryName, bytes);
-        Interop.registerClass(binaryName, cls);
+        Class<?> cls = defineReloadableClass(binaryName, bytes);
+        if (pmHolderBinary != null) {
+            RECORD_PM_HOLDER.put(cls, pmHolderBinary);
+        }
         return cls;
     }
 
@@ -551,62 +698,83 @@ public final class TypeFactory {
             Map<String, Fn> javaMethodImpls,
             Map<Protocol, Map<Keyword, Fn>> protocolImpls,
             PersistentHashMap meta) {
-        List<Class<?>> allIfaces = new ArrayList<>();
-        allIfaces.add(IObj.class);
-        allIfaces.add(Protocol.Dispatchable.class);
+        List<Class<?>> uniqueIfaces = new ArrayList<>();
+        Set<Class<?>> seenIface = new LinkedHashSet<>();
         for (Class<?> c : interfaces) {
-            if (c != IObj.class && c != IMeta.class && c != Protocol.Dispatchable.class) {
-                allIfaces.add(c);
+            if (c != null && c.isInterface() && c != IObj.class && c != IMeta.class
+                    && c != Protocol.Dispatchable.class && seenIface.add(c)) {
+                uniqueIfaces.add(c);
             }
         }
-        InvocationHandler handler = new InvocationHandler() {
-            private final PersistentHashMap myMeta = meta;
+        Set<String> implKeys = new TreeSet<>();
+        if (javaMethodImpls != null) {
+            for (String k : javaMethodImpls.keySet()) implKeys.add(k);
+        }
+        List<Object> cacheKey = new ArrayList<>(uniqueIfaces.size() + implKeys.size() + 2);
+        cacheKey.addAll(uniqueIfaces);
+        cacheKey.add("|");
+        cacheKey.addAll(implKeys);
+        Class<?> reifyCls = REIFY_CLASS_CACHE.computeIfAbsent(cacheKey, k -> generateReifyClass(uniqueIfaces, implKeys));
+        try {
+            Constructor<?> ctor = reifyCls.getConstructor(PersistentHashMap.class, Map.class, Map.class);
+            return ctor.newInstance(meta, javaMethodImpls, protocolImpls);
+        } catch (ReflectiveOperationException e) {
+            throw RT.sneakyThrow(e);
+        }
+    }
 
-            @Override
-            public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-                String mname = method.getName();
-                if ("meta".equals(mname) && method.getParameterCount() == 0) {
-                    return myMeta;
+    private static synchronized Class<?> generateReifyClass(List<Class<?>> interfaces, Set<String> implKeys) {
+        int id = REIFY_ID.incrementAndGet();
+        String binaryName = "cljl.reify.Reify$" + id;
+        String internalName = binaryName.replace('.', '/');
+
+        List<String> ifaceInternals = new ArrayList<>(interfaces.size() + 2);
+        ifaceInternals.add("cljl/lang/IObj");
+        ifaceInternals.add("cljl/Protocol$Dispatchable");
+        for (Class<?> c : interfaces) {
+            ifaceInternals.add(c.getName().replace('.', '/'));
+        }
+
+        ClassWriter cw = new ClassWriter(internalName, "java/lang/Object", ifaceInternals.toArray(new String[0]), 0x0011);
+        cw.addField(0x0012, "__meta", "Lcljl/lang/PersistentHashMap;");
+        cw.addField(0x0012, "__javaMethods", "Ljava/util/Map;");
+        cw.addField(0x0012, "__protoImpls", "Ljava/util/Map;");
+        cw.emitReifyBoilerplate();
+
+        Set<String> emitted = new HashSet<>();
+        emitted.add("meta()Lcljl/lang/PersistentHashMap;");
+        emitted.add("withMeta(Lcljl/lang/PersistentHashMap;)Ljava/lang/Object;");
+        emitted.add("__protocolFn(Lcljl/Protocol;Lcljl/Keyword;)Lcljl/Fn;");
+        emitted.add("__satisfies(Lcljl/Protocol;)Z");
+        emitted.add("__protocolImpls(Lcljl/Protocol;)Ljava/util/Map;");
+
+        for (Class<?> iface : interfaces) {
+            boolean isProtoIface = Protocol.findByInterface(iface) != null;
+            for (Method m : iface.getMethods()) {
+                if (Modifier.isStatic(m.getModifiers())) continue;
+                String mname = m.getName();
+                String dispatchKey = isProtoIface ? PROTO_MANGLED_TO_NAME.getOrDefault(mname, mname) : mname;
+                // Keep default interface methods inherited from the interface unless explicitly overridden
+                if (m.isDefault() && !implKeys.contains(mname) && !implKeys.contains(dispatchKey)) {
+                    continue;
                 }
-                if ("withMeta".equals(mname) && method.getParameterCount() == 1) {
-                    return createReify(interfaces, javaMethodImpls, protocolImpls, (PersistentHashMap) args[0]);
-                }
-                if ("__protocolFn".equals(mname) && method.getParameterCount() == 2) {
-                    Protocol p = (Protocol) args[0];
-                    Keyword mk = (Keyword) args[1];
-                    Map<Keyword, Fn> pmap = protocolImpls.get(p);
-                    return pmap != null ? pmap.get(mk) : null;
-                }
-                if ("__satisfies".equals(mname) && method.getParameterCount() == 1) {
-                    return protocolImpls.containsKey((Protocol) args[0]);
-                }
-                Fn impl = javaMethodImpls.get(mname);
-                if (impl == null) {
-                    String orig = PROTO_MANGLED_TO_NAME.get(mname);
-                    if (orig != null) impl = javaMethodImpls.get(orig);
-                }
-                if (impl != null) {
-                    Object[] callArgs = new Object[1 + (args != null ? args.length : 0)];
-                    callArgs[0] = proxy;
-                    if (args != null && args.length > 0) System.arraycopy(args, 0, callArgs, 1, args.length);
-                    return coerceReturn(method.getReturnType(), impl.applyTo(callArgs));
-                }
-                if ("toString".equals(mname) && method.getParameterCount() == 0) {
-                    return "#<reify@" + Integer.toHexString(System.identityHashCode(proxy)) + ">";
-                }
-                if ("hashCode".equals(mname) && method.getParameterCount() == 0) {
-                    return System.identityHashCode(proxy);
-                }
-                if ("equals".equals(mname) && method.getParameterCount() == 1) {
-                    return proxy == args[0];
-                }
-                if (method.isDefault()) {
-                    return InvocationHandler.invokeDefault(proxy, method, args);
-                }
-                throw new UnsupportedOperationException("No implementation of " + mname + " in reify");
+                String desc = methodDesc(m.getReturnType(), m.getParameterTypes());
+                if (!emitted.add(mname + desc)) continue;
+                cw.emitReifyMethodBridge(mname, dispatchKey, m.getReturnType(), m.getParameterTypes());
             }
-        };
-        return Proxy.newProxyInstance(LOADER, allIfaces.toArray(new Class<?>[0]), handler);
+        }
+        if (implKeys.contains("toString") && emitted.add("toString()Ljava/lang/String;")) {
+            cw.emitReifyMethodBridge("toString", "toString", String.class, new Class<?>[0]);
+        }
+        if (implKeys.contains("hashCode") && emitted.add("hashCode()I")) {
+            cw.emitReifyMethodBridge("hashCode", "hashCode", int.class, new Class<?>[0]);
+        }
+        if (implKeys.contains("equals") && emitted.add("equals(Ljava/lang/Object;)Z")) {
+            cw.emitReifyMethodBridge("equals", "equals", boolean.class, new Class<?>[]{Object.class});
+        }
+
+        byte[] bytes = cw.toByteArray();
+        return LOADER.define(binaryName, bytes);
     }
 
     public static Class<?> getProxyClass(Class<?> superClass, Class<?>[] interfaces) {
@@ -634,9 +802,10 @@ public final class TypeFactory {
         cw.emitProxyMappingsAccessors();
         cw.emitProxySerializationGuards();
 
-        // Forward constructors from superclass
+        // Forward accessible (public/protected) constructors from superclass (skip private & package-private)
         for (Constructor<?> ctor : superClass.getDeclaredConstructors()) {
-            if (Modifier.isPrivate(ctor.getModifiers())) continue;
+            int cmod = ctor.getModifiers();
+            if (!Modifier.isPublic(cmod) && !Modifier.isProtected(cmod)) continue;
             cw.emitProxyCtor(superInternal, ctor.getParameterTypes());
         }
 
@@ -663,7 +832,8 @@ public final class TypeFactory {
         for (Class<?> cur = superClass; cur != null; cur = cur.getSuperclass()) {
             for (Method m : cur.getDeclaredMethods()) {
                 int mod = m.getModifiers();
-                if (Modifier.isStatic(mod) || Modifier.isFinal(mod) || Modifier.isPrivate(mod)) continue;
+                if (Modifier.isStatic(mod) || Modifier.isFinal(mod)) continue;
+                if (!Modifier.isPublic(mod) && !Modifier.isProtected(mod)) continue;
                 if (m.getDeclaringClass() == Object.class
                         && !("toString".equals(m.getName()) || "equals".equals(m.getName()) || "hashCode".equals(m.getName()))) {
                     continue;
@@ -699,8 +869,8 @@ public final class TypeFactory {
         PersistentHashMap cur = p.__getMappings();
         if (cur == null) cur = PersistentHashMap.EMPTY;
         for (ISeq s = mappings.seq(); s != null; s = s.next()) {
-            PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
-            cur = cur.assoc(me.key, me.val);
+            Map.Entry<?, ?> me = (Map.Entry<?, ?>) s.first();
+            cur = cur.assoc(me.getKey(), me.getValue());
         }
         p.__setMappings(cur);
         return proxy;
@@ -728,14 +898,27 @@ public final class TypeFactory {
     }
 
     public static Object proxyCallWithSuper(Fn call, Object proxy, String methName) {
-        ProxyObject p = (ProxyObject) proxy;
-        PersistentHashMap orig = p.__getMappings();
-        PersistentHashMap temp = orig != null ? orig.without(methName).without(Keyword.intern(methName)) : PersistentHashMap.EMPTY;
-        p.__setMappings(temp);
+        IdentityHashMap<Object, Set<String>> sup = SUPER_SUPPRESSED.get();
+        boolean createdMap = false;
+        if (sup == null) {
+            sup = new IdentityHashMap<>();
+            SUPER_SUPPRESSED.set(sup);
+            createdMap = true;
+        }
+        Set<String> names = sup.get(proxy);
+        boolean createdSet = false;
+        if (names == null) {
+            names = new HashSet<>();
+            sup.put(proxy, names);
+            createdSet = true;
+        }
+        boolean added = names.add(methName);
         try {
             return call.invoke();
         } finally {
-            p.__setMappings(orig);
+            if (added) names.remove(methName);
+            if (createdSet && names.isEmpty()) sup.remove(proxy);
+            if (createdMap && sup.isEmpty()) SUPER_SUPPRESSED.remove();
         }
     }
 
@@ -748,6 +931,7 @@ public final class TypeFactory {
 
     public static Object coerceReturn(Class<?> retType, Object val) {
         if (retType == void.class) return null;
+        if (retType == PersistentHashMap.class) return PersistentHashMap.fromMap(val);
         if (!retType.isPrimitive()) return val;
         if (retType == boolean.class) return Boolean.valueOf(RT.truthy(val));
         if (retType == char.class) return (val instanceof Character c) ? c : Character.valueOf((char) ((Number) val).intValue());
@@ -973,22 +1157,93 @@ public final class TypeFactory {
         }
 
         private static String fieldDescFor(char ft) {
-            if (ft == 'J') return "J";
-            if (ft == 'D') return "D";
-            return "Ljava/lang/Object;";
+            return switch (ft) {
+                case 'J' -> "J";
+                case 'D' -> "D";
+                case 'I' -> "I";
+                case 'Z' -> "Z";
+                case 'B' -> "B";
+                case 'S' -> "S";
+                case 'C' -> "C";
+                case 'F' -> "F";
+                default -> "Ljava/lang/Object;";
+            };
         }
 
         private void emitLoadBoxedField(MethodAssembler ma, String fname, char ft) {
             ma.aload(0);
-            if (ft == 'J') {
-                ma.getfield(className, fname, "J");
-                ma.invokestatic("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;");
-            } else if (ft == 'D') {
-                ma.getfield(className, fname, "D");
-                ma.invokestatic("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;");
-            } else {
-                ma.getfield(className, fname, "Ljava/lang/Object;");
+            String desc = fieldDescFor(ft);
+            ma.getfield(className, fname, desc);
+            switch (ft) {
+                case 'J' -> ma.invokestatic("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;");
+                case 'D' -> ma.invokestatic("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;");
+                case 'I' -> ma.invokestatic("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;");
+                case 'Z' -> ma.invokestatic("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;");
+                case 'B' -> ma.invokestatic("java/lang/Byte", "valueOf", "(B)Ljava/lang/Byte;");
+                case 'S' -> ma.invokestatic("java/lang/Short", "valueOf", "(S)Ljava/lang/Short;");
+                case 'C' -> ma.invokestatic("java/lang/Character", "valueOf", "(C)Ljava/lang/Character;");
+                case 'F' -> ma.invokestatic("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;");
+                default -> {}
             }
+        }
+
+        private static void emitUnboxForField(MethodAssembler ma, char ft) {
+            switch (ft) {
+                case 'J' -> ma.invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J");
+                case 'D' -> ma.invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D");
+                case 'I' -> {
+                    ma.invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J");
+                    ma.code.write(0x88); // l2i
+                }
+                case 'S' -> {
+                    ma.invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J");
+                    ma.code.write(0x88); // l2i
+                    ma.code.write(0x93); // i2s
+                }
+                case 'B' -> {
+                    ma.invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J");
+                    ma.code.write(0x88); // l2i
+                    ma.code.write(0x91); // i2b
+                }
+                case 'F' -> {
+                    ma.invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D");
+                    ma.code.write(0x90); // d2f
+                }
+                case 'Z' -> ma.invokestatic("cljl/RT", "truthy", "(Ljava/lang/Object;)Z");
+                case 'C' -> {
+                    ma.checkcast("java/lang/Character");
+                    ma.invokevirtual("java/lang/Character", "charValue", "()C");
+                }
+                default -> {}
+            }
+        }
+
+        void emitGetBasisMethod(String binaryName) {
+            MethodAssembler ma = new MethodAssembler(this);
+            ma.ldcString(binaryName);
+            ma.invokestatic("cljl/TypeFactory", "getTypeBasis", "(Ljava/lang/String;)Lcljl/lang/PersistentVector;");
+            ma.areturn();
+            addCodeMethod(0x0009, "getBasis", "()Lcljl/lang/PersistentVector;", 2, 0, ma.toBytes());
+        }
+
+        void emitRecordCreateMethods(String binaryName) {
+            // public static <This> create(IPersistentMap m)
+            MethodAssembler ma1 = new MethodAssembler(this);
+            ma1.ldcString(binaryName);
+            ma1.aload(0);
+            ma1.invokestatic("cljl/TypeFactory", "createRecordFromMap", "(Ljava/lang/String;Ljava/util/Map;)Ljava/lang/Object;");
+            ma1.checkcast(className);
+            ma1.areturn();
+            addCodeMethod(0x0009, "create", "(Lcljl/lang/IPersistentMap;)L" + className + ";", 3, 1, ma1.toBytes());
+
+            // public static <This> create(Map m)
+            MethodAssembler ma2 = new MethodAssembler(this);
+            ma2.ldcString(binaryName);
+            ma2.aload(0);
+            ma2.invokestatic("cljl/TypeFactory", "createRecordFromMap", "(Ljava/lang/String;Ljava/util/Map;)Ljava/lang/Object;");
+            ma2.checkcast(className);
+            ma2.areturn();
+            addCodeMethod(0x0009, "create", "(Ljava/util/Map;)L" + className + ";", 3, 1, ma2.toBytes());
         }
 
         void emitRecordFullCtor(String[] fieldNames, char[] ftypes) {
@@ -1004,15 +1259,8 @@ public final class TypeFactory {
             for (int i = 0; i < fieldNames.length; i++) {
                 ma.aload(0);
                 ma.aload(1 + i);
-                if (ftypes[i] == 'J') {
-                    ma.invokestatic("cljl/Numbers", "longCast", "(Ljava/lang/Object;)J");
-                    ma.putfield(className, fieldNames[i], "J");
-                } else if (ftypes[i] == 'D') {
-                    ma.invokestatic("cljl/Numbers", "toDouble", "(Ljava/lang/Object;)D");
-                    ma.putfield(className, fieldNames[i], "D");
-                } else {
-                    ma.putfield(className, fieldNames[i], "Ljava/lang/Object;");
-                }
+                emitUnboxForField(ma, ftypes[i]);
+                ma.putfield(className, fieldNames[i], fieldDescFor(ftypes[i]));
             }
             ma.vreturn();
             addCodeMethod(0x0001, "<init>", desc.toString(), 4, fieldNames.length + 3, ma.toBytes());
@@ -1184,37 +1432,49 @@ public final class TypeFactory {
 
         void emitRecordDirectProtoBridge(String holderInternal, String fnField, String ifaceMethodName, int arity, boolean secondIsLong, boolean returnsLong) {
             String ifaceDesc;
-            String fnName;
-            String fnDesc;
             int maxLocals;
+            MethodAssembler ma = new MethodAssembler(this);
             if (secondIsLong) {
                 ifaceDesc = returnsLong ? "(J)J" : "(J)Ljava/lang/Object;";
-                fnName = returnsLong ? "invokePrim_OJ_J" : "invokePrim_OJ_O";
-                fnDesc = returnsLong ? "(Ljava/lang/Object;J)J" : "(Ljava/lang/Object;J)Ljava/lang/Object;";
+                String fnName = returnsLong ? "invokePrim_OJ_J" : "invokePrim_OJ_O";
+                String fnDesc = returnsLong ? "(Ljava/lang/Object;J)J" : "(Ljava/lang/Object;J)Ljava/lang/Object;";
                 maxLocals = 3;
+                ma.getstatic(holderInternal, fnField, "Lcljl/Fn;");
+                ma.aload(0);
+                ma.lload(1);
+                ma.invokevirtual("cljl/Fn", fnName, fnDesc);
+            } else if (arity <= 4) {
+                StringBuilder id = new StringBuilder("(");
+                for (int i = 1; i < arity; i++) id.append("Ljava/lang/Object;");
+                id.append(")Ljava/lang/Object;");
+                ifaceDesc = id.toString();
+                StringBuilder fd = new StringBuilder("(");
+                for (int i = 0; i < arity; i++) fd.append("Ljava/lang/Object;");
+                fd.append(")Ljava/lang/Object;");
+                maxLocals = arity;
+                ma.getstatic(holderInternal, fnField, "Lcljl/Fn;");
+                ma.aload(0);
+                for (int i = 1; i < arity; i++) ma.aload(i);
+                ma.invokevirtual("cljl/Fn", "invoke", fd.toString());
             } else {
                 StringBuilder id = new StringBuilder("(");
                 for (int i = 1; i < arity; i++) id.append("Ljava/lang/Object;");
                 id.append(")Ljava/lang/Object;");
                 ifaceDesc = id.toString();
-                fnName = "invoke";
-                StringBuilder fd = new StringBuilder("(");
-                for (int i = 0; i < arity; i++) fd.append("Ljava/lang/Object;");
-                fd.append(")Ljava/lang/Object;");
-                fnDesc = fd.toString();
                 maxLocals = arity;
+                ma.getstatic(holderInternal, fnField, "Lcljl/Fn;");
+                ma.iconst(arity);
+                ma.anewarray("java/lang/Object");
+                for (int i = 0; i < arity; i++) {
+                    ma.dup();
+                    ma.iconst(i);
+                    ma.aload(i);
+                    ma.aastore();
+                }
+                ma.invokevirtual("cljl/Fn", "applyTo", "([Ljava/lang/Object;)Ljava/lang/Object;");
             }
-            MethodAssembler ma = new MethodAssembler(this);
-            ma.getstatic(holderInternal, fnField, "Lcljl/Fn;");
-            ma.aload(0);
-            if (secondIsLong) {
-                ma.lload(1);
-            } else {
-                for (int i = 1; i < arity; i++) ma.aload(i);
-            }
-            ma.invokevirtual("cljl/Fn", fnName, fnDesc);
             if (returnsLong) ma.lreturn(); else ma.areturn();
-            addCodeMethod(0x0001, ifaceMethodName, ifaceDesc, Math.max(4, arity + 2), maxLocals, ma.toBytes());
+            addCodeMethod(0x0001, ifaceMethodName, ifaceDesc, Math.max(6, arity + 3), maxLocals, ma.toBytes());
         }
 
         void emitProtocolMethodDispatch(
@@ -1332,7 +1592,7 @@ public final class TypeFactory {
             }
         }
 
-        void emitSimpleCtor(String[] fieldNames) {
+        void emitTypedSimpleCtor(String[] fieldNames, char[] ftypes) {
             StringBuilder desc = new StringBuilder("(");
             for (String ignored : fieldNames) desc.append("Ljava/lang/Object;");
             desc.append(")V");
@@ -1342,10 +1602,97 @@ public final class TypeFactory {
             for (int i = 0; i < fieldNames.length; i++) {
                 ma.aload(0);
                 ma.aload(1 + i);
-                ma.putfield(className, fieldNames[i], "Ljava/lang/Object;");
+                emitUnboxForField(ma, ftypes[i]);
+                ma.putfield(className, fieldNames[i], fieldDescFor(ftypes[i]));
             }
             ma.vreturn();
             addCodeMethod(0x0001, "<init>", desc.toString(), 4, fieldNames.length + 1, ma.toBytes());
+        }
+
+        void emitReifyBoilerplate() {
+            // <init>(PersistentHashMap meta, Map javaMethods, Map protoImpls)
+            MethodAssembler ctor = new MethodAssembler(this);
+            ctor.aload(0);
+            ctor.invokespecial("java/lang/Object", "<init>", "()V");
+            ctor.aload(0);
+            ctor.aload(1);
+            ctor.putfield(className, "__meta", "Lcljl/lang/PersistentHashMap;");
+            ctor.aload(0);
+            ctor.aload(2);
+            ctor.putfield(className, "__javaMethods", "Ljava/util/Map;");
+            ctor.aload(0);
+            ctor.aload(3);
+            ctor.putfield(className, "__protoImpls", "Ljava/util/Map;");
+            ctor.vreturn();
+            addCodeMethod(0x0001, "<init>", "(Lcljl/lang/PersistentHashMap;Ljava/util/Map;Ljava/util/Map;)V", 4, 4, ctor.toBytes());
+
+            // meta()
+            MethodAssembler gm = new MethodAssembler(this);
+            gm.aload(0);
+            gm.getfield(className, "__meta", "Lcljl/lang/PersistentHashMap;");
+            gm.areturn();
+            addCodeMethod(0x0001, "meta", "()Lcljl/lang/PersistentHashMap;", 2, 1, gm.toBytes());
+
+            // withMeta(PersistentHashMap)
+            MethodAssembler wm = new MethodAssembler(this);
+            wm.newObj(className);
+            wm.dup();
+            wm.aload(1);
+            wm.aload(0);
+            wm.getfield(className, "__javaMethods", "Ljava/util/Map;");
+            wm.aload(0);
+            wm.getfield(className, "__protoImpls", "Ljava/util/Map;");
+            wm.invokespecial(className, "<init>", "(Lcljl/lang/PersistentHashMap;Ljava/util/Map;Ljava/util/Map;)V");
+            wm.areturn();
+            addCodeMethod(0x0001, "withMeta", "(Lcljl/lang/PersistentHashMap;)Ljava/lang/Object;", 6, 2, wm.toBytes());
+
+            // __protocolFn(Protocol, Keyword)
+            MethodAssembler pf = new MethodAssembler(this);
+            pf.aload(0);
+            pf.getfield(className, "__protoImpls", "Ljava/util/Map;");
+            pf.aload(1);
+            pf.aload(2);
+            pf.invokestatic("cljl/TypeFactory", "reifyProtocolFn", "(Ljava/util/Map;Lcljl/Protocol;Lcljl/Keyword;)Lcljl/Fn;");
+            pf.areturn();
+            addCodeMethod(0x0001, "__protocolFn", "(Lcljl/Protocol;Lcljl/Keyword;)Lcljl/Fn;", 4, 3, pf.toBytes());
+
+            // __satisfies(Protocol)
+            MethodAssembler ps = new MethodAssembler(this);
+            ps.aload(0);
+            ps.getfield(className, "__protoImpls", "Ljava/util/Map;");
+            ps.aload(1);
+            ps.invokestatic("cljl/TypeFactory", "reifySatisfies", "(Ljava/util/Map;Lcljl/Protocol;)Z");
+            ps.ireturn();
+            addCodeMethod(0x0001, "__satisfies", "(Lcljl/Protocol;)Z", 3, 2, ps.toBytes());
+
+            // __protocolImpls(Protocol)
+            MethodAssembler pi = new MethodAssembler(this);
+            pi.aload(0);
+            pi.getfield(className, "__protoImpls", "Ljava/util/Map;");
+            pi.aload(1);
+            pi.invokestatic("cljl/TypeFactory", "reifyProtocolImpls", "(Ljava/util/Map;Lcljl/Protocol;)Ljava/util/Map;");
+            pi.areturn();
+            addCodeMethod(0x0001, "__protocolImpls", "(Lcljl/Protocol;)Ljava/util/Map;", 3, 2, pi.toBytes());
+        }
+
+        void emitReifyMethodBridge(String mname, String dispatchKey, Class<?> retType, Class<?>[] paramTypes) {
+            String desc = methodDesc(retType, paramTypes);
+            MethodAssembler ma = new MethodAssembler(this);
+            int nextSlot = 1;
+            int[] paramSlots = new int[paramTypes.length];
+            for (int i = 0; i < paramTypes.length; i++) {
+                paramSlots[i] = nextSlot;
+                nextSlot += (paramTypes[i] == long.class || paramTypes[i] == double.class) ? 2 : 1;
+            }
+            ma.aload(0);
+            ma.getfield(className, "__javaMethods", "Ljava/util/Map;");
+            ma.ldcString(dispatchKey);
+            ma.aload(0);
+            ma.emitBoxedArray(paramTypes, paramSlots);
+            ma.invokestatic("cljl/TypeFactory", "dispatchReifyMethod",
+                    "(Ljava/util/Map;Ljava/lang/String;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
+            ma.emitReturnUnboxed(retType);
+            addCodeMethod(0x0001, mname, desc, Math.max(8, paramTypes.length + 6), nextSlot, ma.toBytes());
         }
 
         void emitDispatchBridge(String binaryName, String mname, Class<?> retType, Class<?>[] paramTypes) {
@@ -1644,6 +1991,11 @@ public final class TypeFactory {
 
         void emitReturnUnboxed(Class<?> retType) {
             if (retType == void.class) { pop(); vreturn(); return; }
+            if (retType == PersistentHashMap.class) {
+                invokestatic("cljl/lang/PersistentHashMap", "fromMap", "(Ljava/lang/Object;)Lcljl/lang/PersistentHashMap;");
+                areturn();
+                return;
+            }
             if (!retType.isPrimitive()) {
                 if (retType != Object.class) checkcast(retType.getName().replace('.', '/'));
                 areturn();

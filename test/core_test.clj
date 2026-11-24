@@ -940,7 +940,8 @@
           divide-d (fn [^double x ^double y] (/ x y))]
       (dotimes [_ 200]
         (is (= 0.5 (divide 1.0 2.0)))
-        (is (thrown? ArithmeticException (divide 1.0 0.0)))
+        (is (= ##Inf (divide 1.0 0.0)))
+        (is (thrown? ArithmeticException (divide 1 0)))
         (is (= ##Inf (divide-d 1.0 0.0))))
       (is (= ##Inf (/ 1.0 0.0)))
       (is (= ##Inf (let [x 1.0 y 0.0] (/ x y))))))
@@ -2705,7 +2706,8 @@
                      (let [flushed (release-pending-sends)]
                        (deliver p flushed))
                      (inc s)))
-      (await-for 2000 driver target)
+      (await-for 2000 driver)
+      (await-for 2000 target)
       (is (= 1 @p))
       (is (= 10 @target)))
     ;; Barrier await does not starve under continuous sends
@@ -2799,6 +2801,289 @@
     (is (thrown? SecurityException
                  (binding [*compile-files* true *compile-path* "/tmp/cljl-sec-test"]
                    (cljl.GenClass/writeClassFileIfCompiling "../../evil" (byte-array 0)))))))
+
+(deftest milestone-2-parity-test
+  (testing "2.1 Data structures: PersistentArrayMap, Murmur3 IHashEq, SubVec, Range/Repeat/Iterate/Cycle, Serializable"
+    ;; PersistentArrayMap for <= 8 entries, promotes to PersistentHashMap on 9th
+    (let [m1 {:a 1 :b 2}
+          m8 {:a 1 :b 2 :c 3 :d 4 :e 5 :f 6 :g 7 :h 8}
+          m9 (assoc m8 :i 9)]
+      (is (instance? clojure.lang.PersistentArrayMap m1))
+      (is (instance? clojure.lang.PersistentArrayMap m8))
+      (is (instance? clojure.lang.PersistentHashMap m9))
+      (is (= (hash m1) (hash (hash-map :a 1 :b 2))))
+      (is (= (hash m1) (hash (sorted-map :a 1 :b 2))))
+      (is (= m1 (hash-map :a 1 :b 2)))
+      (is (= m1 (sorted-map :a 1 :b 2)))
+      (is (= 3 (reduce-kv (fn [acc _ v] (+ acc v)) 0 m1))))
+    ;; SubVec equality, compareTo, reduce, reduce-kv
+    (let [sv (subvec [10 20 30 40] 1 3)]
+      (is (= sv [20 30]))
+      (is (= (hash sv) (hash [20 30])))
+      (is (not= sv {:a 1}))
+      (is (not= sv #{20 30}))
+      (is (= 50 (reduce + sv)))
+      (is (= 150 (reduce + 100 sv)))
+      (is (= [0 20 1 30] (reduce-kv (fn [acc k v] (conj acc k v)) [] sv)))
+      (is (neg? (compare sv [20 31])))
+      (is (zero? (compare sv [20 30]))))
+    ;; Range, Repeat, Iterate, Cycle with IReduce & IDrop
+    (is (= 499500 (reduce + (range 1000))))
+    (is (= 1000000 (first (drop 1000000 (range)))))
+    (is (= 50 (reduce + (repeat 5 10))))
+    (is (= [7 7 7] (take 3 (drop 100000 (repeat 7)))))
+    (is (= 100 (first (drop 100 (iterate inc 0)))))
+    (is (= [:b :c :a] (take 3 (drop 10 (cycle [:a :b :c])))))
+    ;; Serializable round-trip
+    (let [roundtrip (fn [x]
+                      (let [baos (java.io.ByteArrayOutputStream.)
+                            oos (java.io.ObjectOutputStream. baos)]
+                        (.writeObject oos x)
+                        (.close oos)
+                        (.readObject (java.io.ObjectInputStream.
+                                      (java.io.ByteArrayInputStream. (.toByteArray baos))))))]
+      (is (= {:a 1 :b [2 3]} (roundtrip {:a 1 :b [2 3]})))
+      (is (= :foo/bar (roundtrip :foo/bar)))
+      (is (identical? :foo/bar (roundtrip :foo/bar)))
+      (is (= 'sym/x (roundtrip 'sym/x)))
+      (is (= 123456789012345678901234567890N (roundtrip 123456789012345678901234567890N)))))
+
+  (testing "2.2 Numerics & predicates: BigInt, Ratio vs BigDecimal, IEEE 754 div, strict BigDecimal div, int/float/fn?"
+    (is (instance? clojure.lang.BigInt 42N))
+    (is (instance? clojure.lang.BigInt (bigint 42)))
+    (is (instance? java.math.BigInteger (biginteger 42N)))
+    (is (= 42 42N))
+    (is (= (hash 42) (hash 42N)))
+    (is (integer? 42N))
+    (is (integer? (biginteger 42)))
+    (is (not (int? 42N)))
+    (is (not (int? (biginteger 42))))
+    (is (not (pos-int? 42N)))
+    (is (not (nat-int? 0N)))
+    (is (not (neg-int? -1N)))
+    (is (int? 42))
+    (is (pos-int? 42))
+    (is (nat-int? 0))
+    (is (neg-int? -1))
+    ;; Ratio exact comparison with BigDecimal and BigInt
+    (is (zero? (compare 1/2 0.5M)))
+    (is (neg? (compare 1/3 0.34M)))
+    (is (pos? (compare 1/3 0.33M)))
+    (is (neg? (compare 1/2 1N)))
+    ;; IEEE 754 float division
+    (is (= ##Inf (/ 1.0 0.0)))
+    (is (= ##-Inf (/ -1.0 0.0)))
+    (is (Double/isNaN (/ 0.0 0.0)))
+    (is (thrown? ArithmeticException (/ 1 0)))
+    ;; Strict BigDecimal division
+    (is (thrown? ArithmeticException (/ 1M 3M)))
+    (is (= 0.3333M (binding [*math-context* (java.math.MathContext. 4 java.math.RoundingMode/HALF_UP)]
+                     (/ 1M 3M))))
+    ;; int, float, fn?
+    (is (instance? Integer (int 42)))
+    (is (instance? Float (float 1.5)))
+    (is (not (fn? {:a 1})))
+    (is (not (fn? [1 2])))
+    (is (not (fn? #{1 2})))
+    (is (ifn? {:a 1}))
+    (is (ifn? [1 2]))
+    (is (ifn? #{1 2})))
+
+  (testing "2.3 Reader, Compiler, 1.12 Interop, Special Forms, Namespaces"
+    ;; List position metadata (:line :column :end-line :end-column)
+    (let [form (read-string "  (a\n   b)")
+          m (meta form)]
+      (is (= 1 (:line m)))
+      (is (= 3 (:column m)))
+      (is (= 2 (:end-line m)))
+      (is (= 6 (:end-column m))))
+    ;; Syntax-quote preserves metadata on collections & symbols
+    (let [v `^:tagged [1 ~(+ 1 1)]
+          s `^{:my-k 7} foo]
+      (is (= [1 2] v))
+      (is (= {:tagged true} (meta v)))
+      (is (= 7 (:my-k (meta s)))))
+    ;; *reader-resolver*
+    (let [res (reify clojure.lang.LispReader$Resolver
+                (currentNS [_] 'custom.ns)
+                (resolveClass [_ sym] (when (= sym 'MyCls) 'my.pkg.MyCls))
+                (resolveAlias [_ sym] (when (= sym 'al) 'resolved.alias.ns))
+                (resolveVar [_ sym] (when (= sym 'v) 'resolved.var/v)))]
+      (binding [*reader-resolver* res]
+        (is (= :custom.ns/foo (read-string "::foo")))
+        (is (= :resolved.alias.ns/bar (read-string "::al/bar")))
+        (is (= {:resolved.alias.ns/k 1} (read-string "#::al{:k 1}")))
+        (is (= 'resolved.var/v (eval (read-string "`v"))))))
+    ;; Reader error cases: unknown alias, duplicate set key, EDN :: & ##Inf, %0
+    (is (thrown? Exception (read-string "::no-such-alias-xyz/k")))
+    (is (thrown? IllegalArgumentException (read-string "#{1 1}")))
+    (is (thrown? Exception (clojure.edn/read-string "::foo")))
+    (is (thrown? Exception (clojure.edn/read-string "##Inf")))
+    (is (thrown? Exception (read-string "#(+ %0 1)")))
+    ;; Clojure 1.12 interop: ambiguity, dot param-tags, varargs, Class/1, unresolved Class/missing
+    (is (thrown? Exception (eval 'Math/abs)))
+    (is (= 5 ((eval '^[long] Math/abs) -5)))
+    (is (= "llo" (eval '(. "hello" ^[int] substring 2))))
+    (is (= "x=7" (eval '(^[String Object/1] String/format "%s=%d" "x" 7))))
+    (is (thrown? Exception (eval 'String/noSuchStaticMemberXYZ)))
+    ;; Native letfn* mutual recursion & no args__ capture
+    (is (= [true false true true]
+           (let [args__ :outer]
+             (letfn [(even-p [n] (if (zero? n) true (odd-p (dec n))))
+                     (odd-p [n] (if (zero? n) false (even-p (dec n))))]
+               [(even-p 10) (even-p 11) (odd-p 11) (= :outer args__)]))))
+    ;; Official 7/8-arity case*
+    (is (= :two (eval '(let [x 2] (case* x 0 0 :def {1 [1 :one] 2 [2 :two]} :compact :int)))))
+    (let [h (hash :a)]
+      (is (= :collided (eval `(let [x# :a] (case* x# 0 0 :def {~h [:a :collided]} :sparse :hash-equiv #{~h}))))))
+    ;; 3-arity defonce checking .hasRoot even when dynamically bound
+    (eval '(do
+             (def ^:dynamic __m2-do-var)
+             (binding [__m2-do-var :thread-only]
+               (defonce __m2-do-var "doc for defonce" :root-val))
+             (is (= :root-val __m2-do-var))
+             (is (= "doc for defonce" (:doc (meta #'__m2-do-var))))
+             (defonce __m2-do-var :should-not-overwrite)
+             (is (= :root-val __m2-do-var))))
+    ;; Sequential destructuring + shadowing in loop
+    (is (= [5 2]
+           (loop [[a b] [1 2]
+                  a (+ a b)]
+             (if (< a 5)
+               (recur [a b] (+ a 1))
+               [a b]))))
+    ;; definline variadic & :arglists
+    (eval '(do
+             (definline __m2-inl-sum [a & more] `(+ ~a ~@more))
+             (is (= '([a & more]) (:arglists (meta #'__m2-inl-sum))))
+             (is (= 6 (__m2-inl-sum 1 2 3)))
+             (is (= 10 (apply __m2-inl-sum [1 2 3 4])))))
+    ;; fn arity limit validation
+    (is (thrown? IllegalArgumentException (eval '(fn [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 a21] a1))))
+    (is (thrown? IllegalArgumentException (eval '(fn ([x] x) ([x] x)))))
+    (is (thrown? IllegalArgumentException (eval '(fn ([& a] a) ([x & b] b)))))
+    (is (thrown? IllegalArgumentException (eval '(fn ([x & a] a) ([x y] y)))))
+    ;; *warn-on-reflection*, *unchecked-math* :warn-on-boxed, *compiler-options* :elide-meta
+    (let [sw (java.io.StringWriter.)]
+      (binding [*err* sw *warn-on-reflection* true]
+        (eval '(fn [x] (.length x))))
+      (is (.contains (.toString sw) "Reflection warning")))
+    (let [sw (java.io.StringWriter.)]
+      (binding [*err* sw *unchecked-math* :warn-on-boxed]
+        (eval '(fn [x] (+ x 1))))
+      (is (.contains (.toString sw) "Boxed math warning")))
+    (binding [*compiler-options* {:elide-meta [:doc]}]
+      (eval '(def __m2-elided "secret doc" 123))
+      (is (nil? (:doc (meta (resolve '__m2-elided))))))
+    ;; :as-alias does not pollute find-ns/all-ns, expanded DEFAULT_IMPORTS, alias conflict check
+    (eval '(require '[never.loaded.m2.ns :as-alias nlm2]))
+    (is (nil? (find-ns 'never.loaded.m2.ns)))
+    (is (not (some #(= 'never.loaded.m2.ns (ns-name %)) (all-ns))))
+    (is (= :never.loaded.m2.ns/x (read-string "::nlm2/x")))
+    (is (= CharSequence java.lang.CharSequence))
+    (is (= Appendable java.lang.Appendable))
+    (is (thrown? IllegalStateException
+                 (eval '(do (alias '__m2-al 'clojure.string)
+                            (alias '__m2-al 'clojure.set))))))
+
+  (testing "2.4 Protocols, defrecord/deftype, reify/proxy, MultiFn"
+    ;; :extend-via-metadata, Protocol as IPersistentMap, multi-arity extend-type, >4 arity, find-protocol-impl
+    (eval '(do
+             (defprotocol __M2Proto
+               "proto doc"
+               :extend-via-metadata true
+               (__m2-op [this] [this a] [this a b c d]))
+             (is (map? __M2Proto))
+             (is (= "proto doc" (:doc __M2Proto)))
+             (is (class? (:on-interface __M2Proto)))
+             (is (= #'__M2Proto (:var __M2Proto)))
+             (is (contains? (:sigs __M2Proto) :__m2-op))
+             (is (true? (:extend-via-metadata __M2Proto)))
+             (let [obj (with-meta {:v 10}
+                         {`__m2-op (fn
+                                     ([this] (:v this))
+                                     ([this a] (+ (:v this) a))
+                                     ([this a b c d] (+ (:v this) a b c d)))})]
+               (is (satisfies? __M2Proto obj))
+               (is (= 10 (__m2-op obj)))
+               (is (= 15 (__m2-op obj 5)))
+               (is (= 20 (__m2-op obj 1 2 3 4)))
+               (is (fn? (:__m2-op (find-protocol-impl __M2Proto obj)))))
+             ;; Multi-arity extend-type preserves all arities
+             (extend-type String
+               __M2Proto
+               (__m2-op [this] (count this))
+               (__m2-op [this a] (+ (count this) a)))
+             (is (= 3 (__m2-op "abc")))
+             (is (= 13 (__m2-op "abc" 10)))
+             ;; defrecord: getBasis, create, #pkg.Rec{} / #pkg.Rec[], parameter shadowing, :load-ns, redefinition
+             (defrecord __M2Rec [^long x y]
+               :load-ns false
+               __M2Proto
+               (__m2-op [this] [x y])
+               (__m2-op [this x] x)
+               (__m2-op [this a b c d] (+ x a b c d)))
+             (is (= '[x y] (__M2Rec/getBasis)))
+             (let [r (__M2Rec/create {:x 7 :y :hi})]
+               (is (= [7 :hi] (__m2-op r)))
+               (is (= :shadowed (__m2-op r :shadowed)))
+               (is (= 17 (__m2-op r 1 2 3 4)))
+               (is (= r (read-string (str "#" (.getName __M2Rec) "{:x 7 :y :hi}"))))
+               (is (= r (read-string (str "#" (.getName __M2Rec) "[7 :hi]")))))
+             ;; Redefining record/type/interface in same ns does not throw LinkageError
+             (defrecord __M2Rec [x y z])
+             (is (= '[x y z] (__M2Rec/getBasis)))
+             ;; deftype: primitive fields, :unsynchronized-mutable vs :volatile-mutable, direct protocol dispatch
+             (deftype __M2Type [^int a ^:unsynchronized-mutable ^long u ^:volatile-mutable ^double v]
+               __M2Proto
+               (__m2-op [this] [a u v])
+               (__m2-op [this delta] (set! u (+ u delta)) (set! v (+ v delta)) [u v]))
+             (let [t (->__M2Type 3 10 1.5)]
+               (is (= Integer/TYPE (.getType (.getField __M2Type "a"))))
+               (is (= Long/TYPE (.getType (.getField __M2Type "u"))))
+               (is (not (java.lang.reflect.Modifier/isVolatile (.getModifiers (.getField __M2Type "u")))))
+               (is (not (java.lang.reflect.Modifier/isFinal (.getModifiers (.getField __M2Type "u")))))
+               (is (java.lang.reflect.Modifier/isVolatile (.getModifiers (.getField __M2Type "v"))))
+               (is (= [3 10 1.5] (__m2-op t)))
+               (is (= [15 6.5] (__m2-op t 5))))
+             ;; reify generates real bytecode class (not java.lang.reflect.Proxy) & find-protocol-impl returns map
+             (let [r (reify __M2Proto
+                       (__m2-op [_] :reified))]
+               (is (not (java.lang.reflect.Proxy/isProxyClass (class r))))
+               (is (= :reified (__m2-op r)))
+               (is (fn? (:__m2-op (find-protocol-impl __M2Proto r))))
+               (is (= {:m 1} (meta (with-meta r {:m 1})))))
+             ;; proxy multi-clause & thread-safe proxy-call-with-super
+             (let [p (proxy [java.util.ArrayList] []
+                       (toString [] (str "wrap:" (proxy-super toString)))
+                       (add ([x] (proxy-super add x))
+                            ([i x] (proxy-super add i x))))]
+               (.add p :a)
+               (.add p 0 :b)
+               (is (= "wrap:[:b, :a]" (.toString p))))
+             ;; MultiFn: ambiguity error, transitive prefer-method, cycle rejection, hierarchy cache invalidation, defmulti reload
+             (let [h (atom (make-hierarchy))]
+               (swap! h derive ::child ::p1)
+               (swap! h derive ::child ::p2)
+               (defmulti __m2-mm identity :hierarchy h)
+               (defmethod __m2-mm ::p1 [_] :from-p1)
+               (defmethod __m2-mm ::p2 [_] :from-p2)
+               ;; Ambiguous before prefer-method
+               (is (thrown? IllegalArgumentException (__m2-mm ::child)))
+               ;; Transitive prefer-method: p1 > mid > p2
+               (prefer-method __m2-mm ::p1 ::mid)
+               (prefer-method __m2-mm ::mid ::p2)
+               (is (= :from-p1 (__m2-mm ::child)))
+               ;; Cycle rejected
+               (is (thrown? IllegalStateException (prefer-method __m2-mm ::p2 ::p1)))
+               ;; Hierarchy change invalidates cache
+               (defmethod __m2-mm ::dyn-parent [_] :from-dyn)
+               (is (thrown? IllegalArgumentException (__m2-mm ::dyn-child)))
+               (swap! h derive ::dyn-child ::dyn-parent)
+               (is (= :from-dyn (__m2-mm ::dyn-child)))
+               ;; Reloading defmulti preserves existing defmethods
+               (defmulti __m2-mm identity :hierarchy h)
+               (is (= :from-p1 (__m2-mm ::child))))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

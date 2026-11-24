@@ -142,7 +142,7 @@ public final class Deps {
                     if (m == null) {
                         try {
                             Object parsed = readEdn(Files.readString(basisFile, StandardCharsets.UTF_8));
-                            m = (parsed instanceof PersistentHashMap pm) ? pm : PersistentHashMap.EMPTY;
+                            m = (parsed instanceof IPersistentMap pm) ? PersistentHashMap.fromMap(pm) : PersistentHashMap.EMPTY;
                         } catch (Exception e) {
                             m = PersistentHashMap.EMPTY;
                         }
@@ -739,7 +739,7 @@ public final class Deps {
 
         // Build exec args map
         Object execArgsObj = basis.argmap.valAt(Keyword.intern("exec-args"));
-        Object argsMap = (execArgsObj instanceof PersistentHashMap) ? execArgsObj : PersistentHashMap.EMPTY;
+        Object argsMap = (execArgsObj instanceof IPersistentMap) ? PersistentHashMap.fromMap(execArgsObj) : PersistentHashMap.EMPTY;
 
         while (idx < rawArgs.size()) {
             if (idx + 1 < rawArgs.size()) {
@@ -750,8 +750,8 @@ public final class Deps {
             } else {
                 // Optional trailing kv-map?
                 Object tail = parseEdnArg(rawArgs.get(idx));
-                if (tail instanceof PersistentHashMap tm) {
-                    argsMap = mergeMaps((PersistentHashMap) argsMap, tm);
+                if (tail instanceof IPersistentMap tm) {
+                    argsMap = mergeMaps(PersistentHashMap.fromMap(argsMap), PersistentHashMap.fromMap(tm));
                     idx++;
                 } else {
                     throw new IllegalArgumentException("Expected key/value pairs or trailing map, got orphan arg: " + rawArgs.get(idx));
@@ -779,7 +779,7 @@ public final class Deps {
     private static Symbol resolveExecFnSymbol(Symbol fnSym, PersistentHashMap argmap) {
         if (fnSym.getNamespace() != null) {
             Object nsAliasesObj = argmap.valAt(Keyword.intern("ns-aliases"));
-            if (nsAliasesObj instanceof PersistentHashMap am) {
+            if (nsAliasesObj instanceof IPersistentMap am) {
                 Symbol aliasKey = Symbol.intern(fnSym.getNamespace());
                 Object targetNs = am.valAt(aliasKey);
                 if (targetNs instanceof Symbol tsym) {
@@ -878,7 +878,7 @@ public final class Deps {
     public static synchronized void initReplDepsNamespace() {
         Namespace ns = Namespace.findOrCreate("clojure.repl.deps");
         ns.intern("add-libs", Fn.of1("add-libs", libCoordsObj -> {
-            if (!(libCoordsObj instanceof PersistentHashMap libCoords) || libCoords.count() == 0) {
+            if (!(libCoordsObj instanceof IPersistentMap libCoords) || libCoords.count() == 0) {
                 return PersistentList.EMPTY;
             }
             PersistentHashMap sdepsMap = PersistentHashMap.create(Keyword.intern("deps"), libCoords);
@@ -893,8 +893,8 @@ public final class Deps {
                 }
             }
             for (ISeq s = libCoords.seq(); s != null; s = s.next()) {
-                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
-                if (me.key instanceof Symbol sym) added.add(sym);
+                Map.Entry<?, ?> me = (Map.Entry<?, ?>) s.first();
+                if (me.getKey() instanceof Symbol sym) added.add(sym);
             }
             return PersistentList.create(added);
         }));
@@ -904,7 +904,7 @@ public final class Deps {
                     opts.sforce = true;
                     BasisResult basis = resolveBasis(opts);
                     Object depsObj = basis.mergedDeps.valAt(Keyword.intern("deps"));
-                    Object coord = depsObj instanceof PersistentHashMap dm ? dm.valAt(lib) : null;
+                    Object coord = depsObj instanceof IPersistentMap dm ? dm.valAt(lib) : null;
                     if (coord == null) {
                         throw new IllegalArgumentException("No coordinate found in deps.edn for lib: " + lib);
                     }
@@ -943,17 +943,18 @@ public final class Deps {
     }
 
     private static PersistentHashMap asMap(Object o) {
-        return (o instanceof PersistentHashMap m) ? m : PersistentHashMap.EMPTY;
+        return (o instanceof IPersistentMap m) ? PersistentHashMap.fromMap(m) : PersistentHashMap.EMPTY;
     }
 
     private static Object apiAliases(BasisResult basis, PersistentHashMap args) {
         Object aliasesObj = basis.mergedDeps.valAt(Keyword.intern("aliases"));
-        if (!(aliasesObj instanceof PersistentHashMap am) || am.count() == 0) {
+        if (!(aliasesObj instanceof IPersistentMap am) || am.count() == 0) {
             System.out.println("No aliases defined.");
             return null;
         }
         List<Keyword> keys = new ArrayList<>();
-        for (Map.Entry<?, ?> me : am.entrySet()) {
+        for (ISeq s = am.seq(); s != null; s = s.next()) {
+            Map.Entry<?, ?> me = (Map.Entry<?, ?>) s.first();
             if (me.getKey() instanceof Keyword kw) keys.add(kw);
         }
         keys.sort(Comparator.comparing(Keyword::toString));
@@ -961,7 +962,7 @@ public final class Deps {
             String src = basis.aliasSources.getOrDefault(k, "unknown");
             Object val = am.valAt(k);
             System.out.println(k + " (" + src + ")");
-            if (val instanceof PersistentHashMap vm) {
+            if (val instanceof IPersistentMap vm) {
                 Object doc = vm.valAt(Keyword.intern("doc"));
                 if (doc != null) {
                     System.out.println("  " + doc);
@@ -1898,7 +1899,7 @@ public final class Deps {
         String trimmed = sdeps.trim();
         if (trimmed.startsWith("{")) {
             Object v = readEdn(trimmed);
-            if (!(v instanceof PersistentHashMap)) {
+            if (!(v instanceof IPersistentMap)) {
                 throw new IllegalArgumentException("-Sdeps EDN must be a map");
             }
             return toJavaMap(v);
@@ -1915,7 +1916,7 @@ public final class Deps {
             String src = Files.readString(p, StandardCharsets.UTF_8);
             Object v = readEdn(src);
             if (v == null) return new LinkedHashMap<>();
-            if (!(v instanceof PersistentHashMap)) {
+            if (!(v instanceof IPersistentMap)) {
                 throw new IllegalArgumentException("Expected map in " + p);
             }
             return toJavaMap(v);

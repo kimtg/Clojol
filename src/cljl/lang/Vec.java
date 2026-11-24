@@ -11,10 +11,12 @@ import java.util.concurrent.atomic.AtomicReference;
  * Primitive-array-backed persistent vector (Vec, VecNode, VecSeq) for ->Vec / ->VecNode / ->VecSeq.
  */
 public final class Vec extends Fn
-        implements IPersistentVector, IObj, List<Object>, RandomAccess, Comparable<Object> {
+        implements IPersistentVector, IObj, IHashEq, List<Object>, RandomAccess, Comparable<Object>, java.io.Serializable {
+    private static final long serialVersionUID = 1L;
 
-    public static final class VecNode {
-        public final AtomicReference<Thread> edit;
+    public static final class VecNode implements java.io.Serializable {
+        private static final long serialVersionUID = 1L;
+        public final transient AtomicReference<Thread> edit;
         public final Object arr;
 
         public VecNode(AtomicReference<Thread> edit, Object arr) {
@@ -239,15 +241,22 @@ public final class Vec extends Fn
     @Override public void add(int index, Object element) { throw new UnsupportedOperationException(); }
     @Override public Object remove(int index) { throw new UnsupportedOperationException(); }
 
+    @Override public IPersistentCollection cons(Object o) { return toPersistentVector().conj(o); }
+    @Override public IPersistentCollection empty() { return PersistentVector.EMPTY; }
+    @Override public Object peek() { return cnt > 0 ? nth(cnt - 1) : null; }
+    @Override public IPersistentStack pop() { return toPersistentVector().pop(); }
+
     @Override
     public int compareTo(Object o) {
-        Vec other = (Vec) o;
-        int n = Math.min(cnt, other.cnt);
-        for (int i = 0; i < n; i++) {
+        IPersistentVector other = (IPersistentVector) o;
+        int n = other.count();
+        if (cnt < n) return -1;
+        if (cnt > n) return 1;
+        for (int i = 0; i < cnt; i++) {
             int c = RT.compare(nth(i), other.nth(i));
             if (c != 0) return c;
         }
-        return Integer.compare(cnt, other.cnt);
+        return 0;
     }
 
     @Override
@@ -259,6 +268,13 @@ public final class Vec extends Fn
             return true;
         }
         return toPersistentVector().equals(obj);
+    }
+
+    @Override
+    public int hasheq() {
+        int h = 1;
+        for (int i = 0; i < cnt; i++) h = 31 * h + RT.hash(nth(i));
+        return Murmur3.mixCollHash(h, cnt);
     }
 
     @Override

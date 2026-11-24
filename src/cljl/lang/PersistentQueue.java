@@ -2,6 +2,7 @@ package cljl.lang;
 
 import cljl.Fn;
 import cljl.RT;
+import java.io.Serializable;
 import java.util.*;
 
 /**
@@ -10,8 +11,9 @@ import java.util.*;
  * and pop on empty returning EMPTY.
  */
 public final class PersistentQueue extends AbstractList<Object>
-        implements PersistentColl, Seqable, Counted, IObj, IReduceInit, Sequential {
+        implements IPersistentStack, PersistentColl, Seqable, Counted, IObj, IReduceInit, Sequential, IHashEq, Serializable {
 
+    private static final long serialVersionUID = 1L;
     public static final PersistentQueue EMPTY = new PersistentQueue(null, 0, null, null);
 
     private final PersistentHashMap meta;
@@ -19,7 +21,9 @@ public final class PersistentQueue extends AbstractList<Object>
     private final ISeq f;
     private final PersistentVector r;
     private int cachedHash;
-    private boolean hasHash;
+    private volatile boolean hasHash;
+    private int cachedHasheq;
+    private volatile boolean hasHasheq;
 
     private PersistentQueue(PersistentHashMap meta, int cnt, ISeq f, PersistentVector r) {
         this.meta = meta;
@@ -122,6 +126,17 @@ public final class PersistentQueue extends AbstractList<Object>
             return r.reduce(fn, acc);
         }
         return acc;
+    }
+
+    @Override
+    public int hasheq() {
+        if (!hasHasheq) {
+            int h = Murmur3.hashOrdered(this);
+            cachedHasheq = h;
+            hasHasheq = true;
+            return h;
+        }
+        return cachedHasheq;
     }
 
     @Override

@@ -1,21 +1,29 @@
 package cljl;
 
+import cljl.lang.IHashEq;
 import cljl.lang.ILookup;
 import cljl.lang.PersistentHashMap;
-import java.util.Map;
+import java.io.Serializable;
 import java.util.concurrent.ConcurrentHashMap;
 
-public final class Keyword extends Fn implements cljl.lang.Named, Comparable<Keyword> {
+public final class Keyword extends Fn implements cljl.lang.Named, IHashEq, Comparable<Keyword>, Serializable {
+    private static final long serialVersionUID = 1L;
     private static final ConcurrentHashMap<String, Keyword> TABLE = new ConcurrentHashMap<>(512);
 
     public final Symbol sym;
     public final int hash;
+    public final int hasheq;
     private final String str;
 
     private Keyword(Symbol sym) {
         this.sym = sym;
         this.str = ":" + sym.toString();
         this.hash = sym.hashCode() + 0x9e3779b9;
+        this.hasheq = sym.hasheq() + 0x9e3779b9;
+    }
+
+    private Object readResolve() {
+        return intern(sym);
     }
 
     public static Keyword intern(Symbol sym) {
@@ -92,6 +100,11 @@ public final class Keyword extends Fn implements cljl.lang.Named, Comparable<Key
     @Override
     public boolean equals(Object o) {
         return this == o;
+    }
+
+    @Override
+    public int hasheq() {
+        return hasheq;
     }
 
     @Override

@@ -9,10 +9,12 @@ import java.util.*;
  * Persistent sorted map implemented as an immutable AVL tree with structural sharing.
  */
 public final class PersistentTreeMap extends Fn
-        implements IPersistentMap, IObj, Sorted, Reversible, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
+        implements IPersistentMap, IObj, Sorted, Reversible, IHashEq, IKVReduce,
+        Map<Object, Object>, Iterable<Map.Entry<Object, Object>>, java.io.Serializable {
+    private static final long serialVersionUID = 1L;
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    public static final Comparator<Object> DEFAULT_COMPARATOR = (k1, k2) -> {
+    public static final Comparator<Object> DEFAULT_COMPARATOR = (Comparator<Object> & java.io.Serializable) (k1, k2) -> {
         if (k1 == k2) return 0;
         if (k1 == null) return -1;
         if (k2 == null) return 1;
@@ -29,7 +31,8 @@ public final class PersistentTreeMap extends Fn
     public final int count;
     private final PersistentHashMap meta;
 
-    private static final class Node {
+    private static final class Node implements java.io.Serializable {
+        private static final long serialVersionUID = 1L;
         final Object key;
         final Object val;
         final Node left;
@@ -95,7 +98,8 @@ public final class PersistentTreeMap extends Fn
         return null;
     }
 
-    public Map.Entry<Object, Object> entryAt(Object key) {
+    @Override
+    public IMapEntry entryAt(Object key) {
         Node n = nodeAt(key);
         return n == null ? null : new PersistentHashMap.MapEntry(n.key, n.val);
     }
@@ -421,8 +425,30 @@ public final class PersistentTreeMap extends Fn
     }
 
     @Override
+    public Object kvreduce(Fn f, Object init) {
+        Object acc = init;
+        for (ISeq s = seq(); s != null; s = s.next()) {
+            Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+            acc = f.invoke(acc, e.getKey(), e.getValue());
+            if (acc instanceof Reduced r) return r.deref();
+        }
+        return acc;
+    }
+
+    @Override
+    public int hasheq() {
+        int sum = 0;
+        for (ISeq s = seq(); s != null; s = s.next()) {
+            Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+            sum += Murmur3.mixCollHash(31 * (31 + RT.hash(e.getKey())) + RT.hash(e.getValue()), 2);
+        }
+        return Murmur3.mixCollHash(sum, count);
+    }
+
+    @Override
     public boolean equals(Object o) {
         if (this == o) return true;
+        if (o instanceof IRecord) return false;
         if (!(o instanceof Map<?, ?> m)) return false;
         if (m.size() != count) return false;
         try {

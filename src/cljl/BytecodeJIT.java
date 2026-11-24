@@ -204,7 +204,7 @@ public final class BytecodeJIT {
         if (n instanceof CaseNode cn) {
             if (!canCompileNode(cn.expr, stackEmpty)) return false;
             if (cn.hasDefault && !canCompileNode(cn.defaultNode, stackEmpty)) return false;
-            for (Node b : cn.table.values()) {
+            for (Node b : (cn.hashMode ? cn.bucketThens.values() : cn.table.values())) {
                 if (!canCompileNode(b, stackEmpty)) return false;
             }
             return true;
@@ -436,6 +436,18 @@ public final class BytecodeJIT {
         return idx != null ? idx : -1;
     }
 
+    public static int caseHashLookup(CaseNode cn, Object v, Map<Integer, Integer> bucketToIdx) {
+        int b = cn.computeBucket(v);
+        Integer idx = bucketToIdx.get(b);
+        if (idx == null) return -1;
+        if (cn.skipCheck.contains(b)) return idx;
+        Object expected = cn.bucketTests.get(b);
+        boolean ok = Keyword.intern("hash-identity").equals(cn.testType)
+                ? (v == expected)
+                : RT.equiv(v, expected);
+        return ok ? idx : -1;
+    }
+
     public static int caseIdentityLookupOrThrow(Object val, IdentityHashMap<Object, Integer> table) {
         Integer idx = table.get(val);
         if (idx != null) return idx;
@@ -474,11 +486,11 @@ public final class BytecodeJIT {
     }
 
     public static boolean isMap(Object x) {
-        return x instanceof PersistentHashMap || x instanceof IPersistentMap || x instanceof Map<?, ?>;
+        return x instanceof IPersistentMap;
     }
 
     public static boolean isSet(Object x) {
-        return x instanceof PersistentHashSet || x instanceof IPersistentSet || x instanceof Set<?>;
+        return x instanceof IPersistentSet;
     }
 
     // ========================================================================
@@ -766,7 +778,7 @@ public final class BytecodeJIT {
         if (n instanceof ConstNode cn) {
             Object v = cn.val;
             return v == null || v instanceof Long || v instanceof Double || v instanceof Boolean
-                    || v instanceof String || v instanceof java.math.BigInteger;
+                    || v instanceof String || v instanceof cljl.lang.BigInt || v instanceof java.math.BigInteger;
         }
         if (n instanceof LocalNode ln) return ln.slot != selfSlot;
         if (n instanceof IfNode iff) {
@@ -2537,12 +2549,29 @@ public final class BytecodeJIT {
             return false;
         }
 
+        private boolean emitLetBindings(LetNode ln) {
+            if (ln.isLetfn) {
+                for (int i = 0; i < ln.slots.length; i++) {
+                    aconstNull();
+                    storeLogicalSlot(ln.slots[i]);
+                }
+            }
+            for (int i = 0; i < ln.slots.length; i++) {
+                if (emitLetSlotBinding(ln.slots[i], ln.inits[i])) return true;
+            }
+            if (ln.isLetfn) {
+                loadConstObj(ln.slots);
+                checkcast("[I");
+                emitCapturedSlots(ln.slots);
+                invokestatic("cljl/Compiler", "backpatchLetfn", "([I[Ljava/lang/Object;)V", 2, 0);
+            }
+            return false;
+        }
+
         boolean emitDiscard(Node n) {
             ValType t = typeOf(n);
             if (n instanceof LetNode ln) {
-                for (int i = 0; i < ln.slots.length; i++) {
-                    if (emitLetSlotBinding(ln.slots[i], ln.inits[i])) return true;
-                }
+                if (emitLetBindings(ln)) return true;
                 return emitDiscard(ln.body);
             }
             if (n instanceof VresetNode vr) {
@@ -3855,7 +3884,7 @@ public final class BytecodeJIT {
                     case SET -> invokestatic("cljl/BytecodeJIT", "isSet", "(Ljava/lang/Object;)Z", 1, 1);
                     case SEQ -> emitInstanceof("cljl/lang/ISeq");
                     case NUMBER -> emitInstanceof("java/lang/Number");
-                    case INT -> invokestatic("cljl/Numbers", "isInteger", "(Ljava/lang/Object;)Z", 1, 1);
+                    case INT -> invokestatic("cljl/Numbers", "isInt", "(Ljava/lang/Object;)Z", 1, 1);
                     case KEYWORD -> emitInstanceof("cljl/Keyword");
                     case SYMBOL -> emitInstanceof("cljl/Symbol");
                 }
@@ -4113,9 +4142,7 @@ public final class BytecodeJIT {
         }
 
         private boolean emitLetTyped(LetNode ln, ValType targetT) {
-            for (int i = 0; i < ln.slots.length; i++) {
-                if (emitLetSlotBinding(ln.slots[i], ln.inits[i])) return true;
-            }
+            if (emitLetBindings(ln)) return true;
             return emitTyped(ln.body, targetT);
         }
 
@@ -4308,6 +4335,58 @@ public final class BytecodeJIT {
 
         private boolean emitCaseTyped(CaseNode cn, ValType targetT) {
             int valWords = (targetT == ValType.LONG || targetT == ValType.DOUBLE) ? 2 : 1;
+            if (cn.hashMode) {
+                List<Node> branches = new ArrayList<>();
+                IdentityHashMap<Node, Integer> nodeToIdx = new IdentityHashMap<>();
+                Map<Integer, Integer> bucketToIdx = new HashMap<>(cn.bucketThens.size() * 2 + 1);
+                for (Map.Entry<Integer, Node> e : cn.bucketThens.entrySet()) {
+                    Integer idx = nodeToIdx.get(e.getValue());
+                    if (idx == null) {
+                        idx = branches.size();
+                        nodeToIdx.put(e.getValue(), idx);
+                        branches.add(e.getValue());
+                    }
+                    bucketToIdx.put(e.getKey(), idx);
+                }
+                if (branches.isEmpty()) {
+                    emitBoxed(cn.expr);
+                    pop();
+                    return emitTyped(cn.defaultNode, targetT);
+                }
+                int stackAtEntry = curStack;
+                int n = branches.size();
+                Label[] branchLabels = new Label[n];
+                for (int i = 0; i < n; i++) branchLabels[i] = new Label();
+                Label defaultLabel = new Label();
+                Label endLabel = new Label();
+                loadConstObj(cn);
+                checkcast("cljl/Compiler$CaseNode");
+                emitBoxed(cn.expr);
+                loadConstObj(bucketToIdx);
+                checkcast("java/util/Map");
+                invokestatic("cljl/BytecodeJIT", "caseHashLookup",
+                        "(Lcljl/Compiler$CaseNode;Ljava/lang/Object;Ljava/util/Map;)I", 3, 1);
+                tableswitch(0, n - 1, defaultLabel, branchLabels);
+                boolean allTerm = true;
+                for (int i = 0; i < n; i++) {
+                    markLabel(branchLabels[i]);
+                    curStack = stackAtEntry;
+                    boolean term = emitTyped(branches.get(i), targetT);
+                    if (!term) {
+                        allTerm = false;
+                        gotoLabel(endLabel);
+                    }
+                }
+                markLabel(defaultLabel);
+                curStack = stackAtEntry;
+                boolean defTerm = emitTyped(cn.defaultNode, targetT);
+                if (!defTerm) allTerm = false;
+                if (!allTerm) {
+                    markLabel(endLabel);
+                    curStack = stackAtEntry + valWords;
+                }
+                return allTerm;
+            }
             List<Node> branches = new ArrayList<>();
             IdentityHashMap<Node, Integer> nodeToIdx = new IdentityHashMap<>();
             Map<RT.EquivKey, Integer> keyToIdx = new HashMap<>(cn.table.size() * 2 + 1);
@@ -5014,7 +5093,8 @@ public final class BytecodeJIT {
                 if (dn.metaNode != null) {
                     dup();
                     emitBoxed(dn.metaNode);
-                    checkcast("cljl/lang/PersistentHashMap");
+                    invokestatic("cljl/lang/PersistentHashMap", "fromMap",
+                            "(Ljava/lang/Object;)Lcljl/lang/PersistentHashMap;", 1, 1);
                     invokevirtual("cljl/Var", "mergeMeta", "(Lcljl/lang/PersistentHashMap;)V", 2, 0);
                 }
                 return false;
@@ -5048,8 +5128,8 @@ public final class BytecodeJIT {
             }
             if (node instanceof MapNode mn) {
                 emitObjectArray(mn.kvs);
-                invokestatic("cljl/lang/PersistentHashMap", "create",
-                        "([Ljava/lang/Object;)Lcljl/lang/PersistentHashMap;", 1, 1);
+                invokestatic("cljl/RT", "mapUniqueKeys",
+                        "([Ljava/lang/Object;)Lcljl/lang/IPersistentMap;", 1, 1);
                 return false;
             }
             if (node instanceof SetNode sn) {
@@ -5972,6 +6052,13 @@ public final class BytecodeJIT {
                     emitBoxed(im.target);
                     emitObjectArrayOrEmpty(im.args);
                     invokestatic("cljl/Interop", "invokeQualifiedInstanceMethod", "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", 5, 1);
+                } else if (im.paramTags != null) {
+                    emitBoxed(im.target);
+                    ldcString(im.methodName);
+                    loadConstObj(im.paramTags);
+                    checkcast("[Ljava/lang/Class;");
+                    emitObjectArrayOrEmpty(im.args);
+                    invokestatic("cljl/Interop", "invokeInstanceMethodWithTags", "(Ljava/lang/Object;Ljava/lang/String;[Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;", 4, 1);
                 } else {
                     emitBoxed(im.target);
                     ldcString(im.methodName);

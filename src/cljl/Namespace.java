@@ -19,39 +19,115 @@ public final class Namespace implements IMeta, IReference {
     private static final Keyword PRIVATE_KW = Keyword.intern("private");
 
     private static final Object[] DEFAULT_IMPORTS = {
-            Symbol.intern("Object"), Object.class,
-            Symbol.intern("String"), String.class,
-            Symbol.intern("StringBuilder"), StringBuilder.class,
+            Symbol.intern("AbstractMethodError"), AbstractMethodError.class,
+            Symbol.intern("Appendable"), Appendable.class,
+            Symbol.intern("ArithmeticException"), ArithmeticException.class,
+            Symbol.intern("ArrayIndexOutOfBoundsException"), ArrayIndexOutOfBoundsException.class,
+            Symbol.intern("ArrayStoreException"), ArrayStoreException.class,
+            Symbol.intern("AssertionError"), AssertionError.class,
+            Symbol.intern("AutoCloseable"), AutoCloseable.class,
+            Symbol.intern("BigDecimal"), java.math.BigDecimal.class,
+            Symbol.intern("BigInteger"), java.math.BigInteger.class,
             Symbol.intern("Boolean"), Boolean.class,
+            Symbol.intern("BootstrapMethodError"), BootstrapMethodError.class,
             Symbol.intern("Byte"), Byte.class,
-            Symbol.intern("Short"), Short.class,
-            Symbol.intern("Integer"), Integer.class,
-            Symbol.intern("Long"), Long.class,
-            Symbol.intern("Float"), Float.class,
-            Symbol.intern("Double"), Double.class,
+            Symbol.intern("Callable"), java.util.concurrent.Callable.class,
+            Symbol.intern("CharSequence"), CharSequence.class,
             Symbol.intern("Character"), Character.class,
-            Symbol.intern("Number"), Number.class,
+            Symbol.intern("Character$Subset"), Character.Subset.class,
+            Symbol.intern("Character$UnicodeBlock"), Character.UnicodeBlock.class,
+            Symbol.intern("Character$UnicodeScript"), Character.UnicodeScript.class,
+            Symbol.intern("Class"), Class.class,
+            Symbol.intern("ClassCastException"), ClassCastException.class,
+            Symbol.intern("ClassCircularityError"), ClassCircularityError.class,
+            Symbol.intern("ClassFormatError"), ClassFormatError.class,
+            Symbol.intern("ClassLoader"), ClassLoader.class,
+            Symbol.intern("ClassNotFoundException"), ClassNotFoundException.class,
+            Symbol.intern("ClassValue"), ClassValue.class,
+            Symbol.intern("CloneNotSupportedException"), CloneNotSupportedException.class,
+            Symbol.intern("Cloneable"), Cloneable.class,
+            Symbol.intern("Comparable"), Comparable.class,
+            Symbol.intern("Compiler"), Compiler.class,
+            Symbol.intern("Deprecated"), Deprecated.class,
+            Symbol.intern("Double"), Double.class,
+            Symbol.intern("Enum"), Enum.class,
+            Symbol.intern("EnumConstantNotPresentException"), EnumConstantNotPresentException.class,
+            Symbol.intern("Error"), Error.class,
+            Symbol.intern("Exception"), Exception.class,
+            Symbol.intern("ExceptionInInitializerError"), ExceptionInInitializerError.class,
+            Symbol.intern("Float"), Float.class,
+            Symbol.intern("FunctionalInterface"), FunctionalInterface.class,
+            Symbol.intern("IllegalAccessError"), IllegalAccessError.class,
+            Symbol.intern("IllegalAccessException"), IllegalAccessException.class,
+            Symbol.intern("IllegalArgumentException"), IllegalArgumentException.class,
+            Symbol.intern("IllegalCallerException"), IllegalCallerException.class,
+            Symbol.intern("IllegalMonitorStateException"), IllegalMonitorStateException.class,
+            Symbol.intern("IllegalStateException"), IllegalStateException.class,
+            Symbol.intern("IllegalThreadStateException"), IllegalThreadStateException.class,
+            Symbol.intern("IncompatibleClassChangeError"), IncompatibleClassChangeError.class,
+            Symbol.intern("IndexOutOfBoundsException"), IndexOutOfBoundsException.class,
+            Symbol.intern("InheritableThreadLocal"), InheritableThreadLocal.class,
+            Symbol.intern("InstantiationError"), InstantiationError.class,
+            Symbol.intern("InstantiationException"), InstantiationException.class,
+            Symbol.intern("Integer"), Integer.class,
+            Symbol.intern("InternalError"), InternalError.class,
+            Symbol.intern("InterruptedException"), InterruptedException.class,
+            Symbol.intern("Iterable"), Iterable.class,
+            Symbol.intern("LayerInstantiationException"), LayerInstantiationException.class,
+            Symbol.intern("LinkageError"), LinkageError.class,
+            Symbol.intern("Long"), Long.class,
             Symbol.intern("Math"), Math.class,
+            Symbol.intern("Module"), Module.class,
+            Symbol.intern("ModuleLayer"), ModuleLayer.class,
+            Symbol.intern("NegativeArraySizeException"), NegativeArraySizeException.class,
+            Symbol.intern("NoClassDefFoundError"), NoClassDefFoundError.class,
+            Symbol.intern("NoSuchFieldError"), NoSuchFieldError.class,
+            Symbol.intern("NoSuchFieldException"), NoSuchFieldException.class,
+            Symbol.intern("NoSuchMethodError"), NoSuchMethodError.class,
+            Symbol.intern("NoSuchMethodException"), NoSuchMethodException.class,
+            Symbol.intern("NullPointerException"), NullPointerException.class,
+            Symbol.intern("Number"), Number.class,
+            Symbol.intern("NumberFormatException"), NumberFormatException.class,
+            Symbol.intern("Object"), Object.class,
+            Symbol.intern("OutOfMemoryError"), OutOfMemoryError.class,
+            Symbol.intern("Override"), Override.class,
+            Symbol.intern("Package"), Package.class,
+            Symbol.intern("Process"), Process.class,
+            Symbol.intern("ProcessBuilder"), ProcessBuilder.class,
+            Symbol.intern("ProcessHandle"), ProcessHandle.class,
+            Symbol.intern("Readable"), Readable.class,
+            Symbol.intern("ReflectiveOperationException"), ReflectiveOperationException.class,
+            Symbol.intern("Runnable"), Runnable.class,
+            Symbol.intern("Runtime"), Runtime.class,
+            Symbol.intern("RuntimeException"), RuntimeException.class,
+            Symbol.intern("RuntimePermission"), RuntimePermission.class,
+            Symbol.intern("SafeVarargs"), SafeVarargs.class,
+            Symbol.intern("SecurityException"), SecurityException.class,
+            Symbol.intern("Short"), Short.class,
+            Symbol.intern("StackOverflowError"), StackOverflowError.class,
+            Symbol.intern("StackTraceElement"), StackTraceElement.class,
+            Symbol.intern("StackWalker"), StackWalker.class,
+            Symbol.intern("StrictMath"), StrictMath.class,
+            Symbol.intern("String"), String.class,
+            Symbol.intern("StringBuffer"), StringBuffer.class,
+            Symbol.intern("StringBuilder"), StringBuilder.class,
+            Symbol.intern("StringIndexOutOfBoundsException"), StringIndexOutOfBoundsException.class,
+            Symbol.intern("SuppressWarnings"), SuppressWarnings.class,
             Symbol.intern("System"), System.class,
             Symbol.intern("Thread"), Thread.class,
-            Symbol.intern("Runnable"), Runnable.class,
-            Symbol.intern("Class"), Class.class,
-            Symbol.intern("Exception"), Exception.class,
-            Symbol.intern("RuntimeException"), RuntimeException.class,
+            Symbol.intern("Thread$State"), Thread.State.class,
+            Symbol.intern("Thread$UncaughtExceptionHandler"), Thread.UncaughtExceptionHandler.class,
+            Symbol.intern("ThreadGroup"), ThreadGroup.class,
+            Symbol.intern("ThreadLocal"), ThreadLocal.class,
             Symbol.intern("Throwable"), Throwable.class,
-            Symbol.intern("Error"), Error.class,
-            Symbol.intern("IllegalArgumentException"), IllegalArgumentException.class,
-            Symbol.intern("IllegalStateException"), IllegalStateException.class,
-            Symbol.intern("IndexOutOfBoundsException"), IndexOutOfBoundsException.class,
-            Symbol.intern("NullPointerException"), NullPointerException.class,
+            Symbol.intern("TypeNotPresentException"), TypeNotPresentException.class,
+            Symbol.intern("UnknownError"), UnknownError.class,
+            Symbol.intern("UnsatisfiedLinkError"), UnsatisfiedLinkError.class,
+            Symbol.intern("UnsupportedClassVersionError"), UnsupportedClassVersionError.class,
             Symbol.intern("UnsupportedOperationException"), UnsupportedOperationException.class,
-            Symbol.intern("ArithmeticException"), ArithmeticException.class,
-            Symbol.intern("Comparable"), Comparable.class,
-            Symbol.intern("Iterable"), Iterable.class,
-            Symbol.intern("BigInteger"), java.math.BigInteger.class,
-            Symbol.intern("BigDecimal"), java.math.BigDecimal.class,
-            Symbol.intern("Callable"), java.util.concurrent.Callable.class,
-            Symbol.intern("Compiler"), Compiler.class
+            Symbol.intern("VerifyError"), VerifyError.class,
+            Symbol.intern("VirtualMachineError"), VirtualMachineError.class,
+            Symbol.intern("Void"), Void.class
     };
 
     private static final class MacroAdapterFn extends Fn.NamedFn {
@@ -129,6 +205,14 @@ public final class Namespace implements IMeta, IReference {
         return findOrCreate(Symbol.intern(name));
     }
 
+    /** Create a Namespace placeholder for :as-alias without registering in NAMESPACES. */
+    public static Namespace createAliasNamespace(Symbol name) {
+        Symbol key = name.withMeta(null);
+        Namespace existing = NAMESPACES.get(key);
+        if (existing != null) return existing;
+        return new Namespace(key);
+    }
+
     public static Namespace find(Symbol name) {
         return NAMESPACES.get(name.withMeta(null));
     }
@@ -203,6 +287,13 @@ public final class Namespace implements IMeta, IReference {
 
     public Var refer(Symbol sym, Var var) {
         Symbol key = sym.withMeta(null);
+        Object existing = mappings.get(key);
+        if (existing instanceof Var ev && ev != var && ev.ns != RT.CLOJURE_NS) {
+            throw new IllegalStateException(key + " already refers to: " + existing + " in namespace: " + this.name);
+        }
+        if (existing instanceof Class<?>) {
+            throw new IllegalStateException(key + " already refers to: " + existing + " in namespace: " + this.name);
+        }
         Set<Symbol> excl = this.virtualExcluded;
         if (excl != null) excl.remove(key);
         mappings.put(key, var);
@@ -222,7 +313,7 @@ public final class Namespace implements IMeta, IReference {
             if (e.getValue() instanceof Var v && v.ns == other) {
                 boolean isPrivate = RT.truthy(v.meta().valAt(PRIVATE_KW));
                 if (!isPrivate) {
-                    mappings.putIfAbsent(e.getKey(), v);
+                    refer(e.getKey(), v);
                 }
             }
         }
@@ -244,7 +335,15 @@ public final class Namespace implements IMeta, IReference {
     }
 
     public void addAlias(Symbol alias, Namespace ns) {
-        aliases.put(alias.withMeta(null), ns);
+        if (alias == null || ns == null) {
+            throw new NullPointerException("Expecting Symbol + Namespace");
+        }
+        Symbol key = alias.withMeta(null);
+        Namespace existing = aliases.get(key);
+        if (existing != null && !existing.name.equals(ns.name)) {
+            throw new IllegalStateException("Alias " + key + " already exists in namespace " + this.name + ", aliasing " + existing.name);
+        }
+        aliases.put(key, ns);
     }
 
     public void removeAlias(Symbol alias) {
@@ -371,7 +470,7 @@ public final class Namespace implements IMeta, IReference {
         callArgs[0] = this.meta;
         int i = 1;
         for (ISeq s = args; s != null; s = s.next()) callArgs[i++] = s.first();
-        this.meta = (PersistentHashMap) alter.applyTo(callArgs);
+        this.meta = PersistentHashMap.fromMap(alter.applyTo(callArgs));
         return this.meta;
     }
 

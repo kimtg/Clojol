@@ -2,17 +2,21 @@ package cljl.lang;
 
 import cljl.Fn;
 import cljl.RT;
+import java.io.Serializable;
 import java.util.*;
 
 public final class PersistentHashSet extends Fn
-        implements IPersistentSet, IObj, IEditableCollection, Set<Object> {
+        implements IPersistentSet, IObj, IEditableCollection, IHashEq, Set<Object>, Serializable {
 
+    private static final long serialVersionUID = 1L;
     public static final PersistentHashSet EMPTY = new PersistentHashSet(null, PersistentHashMap.EMPTY);
 
     public final PersistentHashMap impl;
     private final PersistentHashMap meta;
     private int hash;
     private volatile boolean hasHash;
+    private int hasheq;
+    private volatile boolean hasHasheq;
 
     public PersistentHashSet(PersistentHashMap meta, PersistentHashMap impl) {
         this.meta = meta;
@@ -60,10 +64,12 @@ public final class PersistentHashSet extends Fn
         return t.persistent();
     }
 
+    @Override
     public PersistentHashSet cons(Object key) {
         return conj(key);
     }
 
+    @Override
     public PersistentHashSet empty() {
         return EMPTY;
     }
@@ -73,6 +79,7 @@ public final class PersistentHashSet extends Fn
         return new PersistentHashSet(meta, impl.assoc(key, key));
     }
 
+    @Override
     public PersistentHashSet disjoin(Object key) {
         if (!contains(key)) return this;
         return new PersistentHashSet(meta, impl.without(key));
@@ -83,6 +90,7 @@ public final class PersistentHashSet extends Fn
         return impl.containsKey(key);
     }
 
+    @Override
     public Object get(Object key) {
         return impl.valAt(key, null);
     }
@@ -122,6 +130,7 @@ public final class PersistentHashSet extends Fn
         return RT.keys(impl);
     }
 
+    @Override
     public TransientHashSet asTransient() {
         return new TransientHashSet(impl.asTransient());
     }
@@ -139,6 +148,23 @@ public final class PersistentHashSet extends Fn
             return false;
         }
         return true;
+    }
+
+    @Override
+    public int hasheq() {
+        if (!hasHasheq) {
+            int sum = 0;
+            int n = 0;
+            for (ISeq s = seq(); s != null; s = s.next()) {
+                sum += RT.hash(s.first());
+                n++;
+            }
+            int h = Murmur3.mixCollHash(sum, n);
+            this.hasheq = h;
+            this.hasHasheq = true;
+            return h;
+        }
+        return this.hasheq;
     }
 
     @Override

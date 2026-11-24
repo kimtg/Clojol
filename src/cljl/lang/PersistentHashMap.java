@@ -10,7 +10,9 @@ import java.util.concurrent.atomic.AtomicReference;
  * 32-way Hash Array Mapped Trie (HAMT) persistent map with MapEntry and TransientHashMap.
  */
 public final class PersistentHashMap extends Fn
-        implements IPersistentMap, IObj, IEditableCollection, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
+        implements IPersistentMap, IObj, IEditableCollection, IHashEq, IKVReduce,
+        Map<Object, Object>, Iterable<Map.Entry<Object, Object>>, java.io.Serializable {
+    private static final long serialVersionUID = 1L;
 
     private static final Object NOT_FOUND = new Object();
     public static final PersistentHashMap EMPTY = new PersistentHashMap(null, 0, null, false, null);
@@ -22,6 +24,8 @@ public final class PersistentHashMap extends Fn
     private final PersistentHashMap meta;
     private int hash;
     private volatile boolean hasHash;
+    private int hasheq;
+    private volatile boolean hasHasheq;
 
     public PersistentHashMap(PersistentHashMap meta, int count, INode root, boolean hasNull, Object nullValue) {
         this.meta = meta;
@@ -82,6 +86,14 @@ public final class PersistentHashMap extends Fn
         return t.persistent();
     }
 
+    public static PersistentHashMap fromMap(Object m) {
+        if (m == null) return null;
+        if (m instanceof PersistentHashMap phm) return phm;
+        if (m instanceof PersistentArrayMap pam) return pam.toHashMap();
+        if (m instanceof Map<?, ?> map) return createFromMap(map);
+        throw new IllegalArgumentException("Expected map, got: " + m.getClass().getName());
+    }
+
     @Override
     public int count() {
         return count;
@@ -129,7 +141,7 @@ public final class PersistentHashMap extends Fn
     public Object valAtKeyword(Keyword key, Object notFound) {
         INode r = root;
         if (r == null) return notFound;
-        int hash = key.hash;
+        int hash = key.hasheq;
         if (r instanceof BitmapIndexedNode node) {
             int shift = 0;
             while (true) {
@@ -206,6 +218,11 @@ public final class PersistentHashMap extends Fn
         return new TransientHashMap(this);
     }
 
+    @Override
+    public Object kvreduce(Fn f, Object init) {
+        return reduceKV(f, init);
+    }
+
     public Object reduceKV(Fn f, Object init) {
         Object acc = init;
         if (hasNull) {
@@ -220,8 +237,25 @@ public final class PersistentHashMap extends Fn
     }
 
     @Override
+    public int hasheq() {
+        if (!hasHasheq) {
+            int sum = 0;
+            for (ISeq s = seq(); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                sum += Murmur3.mixCollHash(31 * (31 + RT.hash(e.getKey())) + RT.hash(e.getValue()), 2);
+            }
+            int h = Murmur3.mixCollHash(sum, count);
+            this.hasheq = h;
+            this.hasHasheq = true;
+            return h;
+        }
+        return this.hasheq;
+    }
+
+    @Override
     public boolean equals(Object obj) {
         if (this == obj) return true;
+        if (obj instanceof IRecord) return false;
         if (!(obj instanceof Map<?, ?> m)) return false;
         if (count != m.size()) return false;
         try {
@@ -317,7 +351,7 @@ public final class PersistentHashMap extends Fn
         public Box(Object val) { this.val = val; }
     }
 
-    public interface INode {
+    public interface INode extends java.io.Serializable {
         INode assoc(int shift, int hash, Object key, Object val, Box addedLeaf);
         INode without(int shift, int hash, Object key);
         INode assoc(AtomicReference<Thread> edit, int shift, int hash, Object key, Object val, Box addedLeaf);
@@ -336,9 +370,10 @@ public final class PersistentHashMap extends Fn
     }
 
     public static final class BitmapIndexedNode implements INode {
+        private static final long serialVersionUID = 1L;
         public static final BitmapIndexedNode EMPTY = new BitmapIndexedNode(null, 0, new Object[0]);
 
-        final AtomicReference<Thread> edit;
+        final transient AtomicReference<Thread> edit;
         int bitmap;
         Object[] array;
 
@@ -576,7 +611,8 @@ public final class PersistentHashMap extends Fn
     }
 
     static final class HashCollisionNode implements INode {
-        final AtomicReference<Thread> edit;
+        private static final long serialVersionUID = 1L;
+        final transient AtomicReference<Thread> edit;
         final int hash;
         int count;
         Object[] array;
@@ -746,7 +782,9 @@ public final class PersistentHashMap extends Fn
     }
 
     public static final class MapEntry extends Fn
-            implements IObj, Map.Entry<Object, Object>, Seqable, Counted, List<Object>, RandomAccess, Comparable<Object> {
+            implements IMapEntry, IPersistentVector, IObj, IHashEq,
+            Map.Entry<Object, Object>, List<Object>, RandomAccess, Comparable<Object>, java.io.Serializable {
+        private static final long serialVersionUID = 1L;
         public final Object key;
         public final Object val;
         private final PersistentHashMap meta;
@@ -766,15 +804,27 @@ public final class PersistentHashMap extends Fn
             return m == meta ? this : new MapEntry(m, key, val);
         }
 
+        @Override public Object key() { return key; }
+        @Override public Object val() { return val; }
         @Override public Object getKey() { return key; }
         @Override public Object getValue() { return val; }
         @Override public Object setValue(Object value) { throw new UnsupportedOperationException(); }
 
+        @Override
         public Object nth(int i) {
             return switch (i) {
                 case 0 -> key;
                 case 1 -> val;
                 default -> throw new IndexOutOfBoundsException("Index " + i + " out of bounds for MapEntry");
+            };
+        }
+
+        @Override
+        public Object nth(int i, Object notFound) {
+            return switch (i) {
+                case 0 -> key;
+                case 1 -> val;
+                default -> notFound;
             };
         }
 
@@ -784,11 +834,45 @@ public final class PersistentHashMap extends Fn
 
         @Override public int count() { return 2; }
         @Override public ISeq seq() { return PersistentList.createFromArray(key, val); }
+        @Override public ISeq rseq() { return PersistentList.createFromArray(val, key); }
+        @Override public Object peek() { return val; }
+        @Override public IPersistentStack pop() { return PersistentVector.createOwning(key); }
+        @Override public IPersistentCollection cons(Object o) { return toVector().conj(o); }
+        @Override public IPersistentCollection empty() { return PersistentVector.EMPTY; }
+
+        @Override
+        public boolean containsKey(Object k) {
+            if (k instanceof Integer || k instanceof Long || k instanceof Short || k instanceof Byte) {
+                long i = ((Number) k).longValue();
+                return i == 0 || i == 1;
+            }
+            return false;
+        }
+
+        @Override public Object valAt(Object k) { return valAt(k, null); }
+        @Override public Object valAt(Object k, Object notFound) {
+            if (k instanceof Integer || k instanceof Long || k instanceof Short || k instanceof Byte) {
+                long i = ((Number) k).longValue();
+                if (i == 0) return key;
+                if (i == 1) return val;
+            }
+            return notFound;
+        }
+
+        @Override
+        public Associative assoc(Object k, Object v) {
+            return toVector().assoc(k, v);
+        }
 
         @Override
         public Object invoke(Object arg1) {
             if (arg1 instanceof Number n) return nth(n.intValue());
             throw new IllegalArgumentException("Key must be integer");
+        }
+
+        @Override
+        public Object invoke(Object arg1, Object notFound) {
+            return valAt(arg1, notFound);
         }
 
         @Override
@@ -803,6 +887,11 @@ public final class PersistentHashMap extends Fn
                 return RT.equiv(key, e.getKey()) && RT.equiv(val, e.getValue());
             }
             return toVector().equals(obj);
+        }
+
+        @Override
+        public int hasheq() {
+            return Murmur3.mixCollHash(31 * (31 + RT.hash(key)) + RT.hash(val), 2);
         }
 
         @Override
@@ -903,8 +992,7 @@ public final class PersistentHashMap extends Fn
             ensureEditable();
             if (x == null) return this;
             if (x instanceof Map.Entry<?, ?> e) return assoc(e.getKey(), e.getValue());
-            if (x instanceof PersistentVector v && v.cnt == 2) return assoc(v.nth(0), v.nth(1));
-            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return assoc(sv.nth(0), sv.nth(1));
+            if (x instanceof IPersistentVector v && v.count() == 2) return assoc(v.nth(0), v.nth(1));
             if (x instanceof Map<?, ?> m) {
                 TransientHashMap tm = this;
                 for (Map.Entry<?, ?> e : m.entrySet()) tm = tm.assoc(e.getKey(), e.getValue());

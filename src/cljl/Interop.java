@@ -3,6 +3,8 @@ package cljl;
 import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import cljl.lang.IPersistentMap;
+import cljl.lang.PersistentHashMap;
 
 /**
  * High-speed cached Java reflection and interop for Clojol.
@@ -61,6 +63,12 @@ public final class Interop {
     }
 
     public static Class<?> resolveClass(Namespace ns, String name) {
+        if (name != null) {
+            int slash = name.indexOf('/');
+            if (slash > 0 && slash == name.length() - 2 && isArrayDimToken(name.substring(slash + 1))) {
+                return resolveArrayClass(ns, name.substring(0, slash), name.substring(slash + 1));
+            }
+        }
         if (ns != null) {
             Object mapped = ns.getMapping(Symbol.intern(name));
             if (mapped instanceof Class<?> c) return c;
@@ -284,30 +292,35 @@ public final class Interop {
             case "clojure.lang.Counted" -> cljl.lang.Counted.class;
             case "clojure.lang.Sorted" -> cljl.lang.Sorted.class;
             case "clojure.lang.Reversible" -> cljl.lang.Reversible.class;
-            case "clojure.lang.IReduce", "clojure.lang.IReduceInit" -> cljl.lang.IReduceInit.class;
+            case "clojure.lang.IReduce" -> cljl.lang.IReduce.class;
+            case "clojure.lang.IReduceInit" -> cljl.lang.IReduceInit.class;
+            case "clojure.lang.IKVReduce" -> cljl.lang.IKVReduce.class;
+            case "clojure.lang.IDrop" -> cljl.lang.IDrop.class;
             case "clojure.lang.IChunk" -> cljl.lang.IChunk.class;
             case "clojure.lang.IChunkedSeq" -> cljl.lang.IChunkedSeq.class;
             case "clojure.lang.ChunkedCons" -> cljl.lang.ChunkedCons.class;
             case "clojure.lang.ArrayChunk", "clojure.core.ArrayChunk" -> cljl.lang.ArrayChunk.class;
             case "clojure.core.ArrayManager" -> cljl.lang.ArrayManager.class;
-            case "clojure.core.Vec" -> cljl.lang.Vec.class;
-            case "clojure.core.VecNode" -> cljl.lang.Vec.VecNode.class;
-            case "clojure.core.VecSeq" -> cljl.lang.Vec.VecSeq.class;
             case "clojure.lang.IPersistentMap" -> cljl.lang.IPersistentMap.class;
             case "clojure.lang.MapEquivalence" -> cljl.lang.MapEquivalence.class;
             case "clojure.lang.IPersistentVector" -> cljl.lang.IPersistentVector.class;
             case "clojure.lang.IPersistentSet" -> cljl.lang.IPersistentSet.class;
             case "clojure.lang.IPersistentList" -> cljl.lang.IPersistentList.class;
-            case "clojure.lang.IPersistentStack" -> cljl.lang.PersistentColl.class;
-            case "clojure.lang.IPersistentCollection" -> cljl.lang.Seqable.class;
-            case "clojure.lang.PersistentHashMap", "clojure.lang.PersistentArrayMap", "clojure.lang.APersistentMap" -> cljl.lang.PersistentHashMap.class;
-            case "clojure.lang.PersistentHashMap$NodeSeq", "clojure.lang.PersistentArrayMap$Seq" -> cljl.lang.PersistentHashMap.NodeSeq.class;
+            case "clojure.lang.IPersistentStack" -> cljl.lang.IPersistentStack.class;
+            case "clojure.lang.IPersistentCollection" -> cljl.lang.IPersistentCollection.class;
+            case "clojure.lang.PersistentHashMap", "clojure.lang.APersistentMap" -> cljl.lang.PersistentHashMap.class;
+            case "clojure.lang.PersistentArrayMap" -> cljl.lang.PersistentArrayMap.class;
+            case "clojure.lang.PersistentHashMap$NodeSeq" -> cljl.lang.PersistentHashMap.NodeSeq.class;
+            case "clojure.lang.PersistentArrayMap$Seq" -> cljl.lang.PersistentArrayMap.ArrayMapSeq.class;
             case "clojure.lang.PersistentVector", "clojure.lang.APersistentVector", "clojure.lang.LazilyPersistentVector" -> cljl.lang.PersistentVector.class;
             case "clojure.lang.PersistentVector$ChunkedSeq" -> cljl.lang.PersistentVector.VecSeq.class;
             case "clojure.lang.PersistentVector$Node" -> cljl.lang.PersistentVector.Node.class;
             case "clojure.lang.PersistentVector$TransientVector" -> cljl.lang.PersistentVector.TransientVector.class;
             case "clojure.lang.APersistentVector$RSeq" -> cljl.lang.PersistentVector.RVecSeq.class;
             case "clojure.lang.APersistentVector$SubVector" -> cljl.lang.PersistentVector.SubVec.class;
+            case "clojure.core.Vec" -> cljl.lang.Vec.class;
+            case "clojure.core.VecNode" -> cljl.lang.Vec.VecNode.class;
+            case "clojure.core.VecSeq" -> cljl.lang.Vec.VecSeq.class;
             case "clojure.lang.Cons" -> cljl.lang.Cons.class;
             case "clojure.lang.Box" -> cljl.lang.Box.class;
             case "clojure.lang.Util" -> cljl.lang.Util.class;
@@ -315,7 +328,7 @@ public final class Interop {
             case "clojure.lang.Reflector" -> Interop.class;
             case "clojure.lang.ArityException" -> IllegalArgumentException.class;
             case "clojure.lang.IType" -> cljl.lang.IType.class;
-            case "clojure.lang.IRecord" -> cljl.lang.PersistentRecord.class;
+            case "clojure.lang.IRecord" -> cljl.lang.IRecord.class;
             case "clojure.lang.IEditableCollection" -> cljl.lang.IEditableCollection.class;
             case "clojure.lang.IHashEq" -> cljl.lang.IHashEq.class;
             case "clojure.lang.ITransientSet" -> cljl.lang.ITransientSet.class;
@@ -329,12 +342,18 @@ public final class Interop {
             case "clojure.lang.PersistentTreeMap" -> cljl.lang.PersistentTreeMap.class;
             case "clojure.lang.PersistentTreeSet" -> cljl.lang.PersistentTreeSet.class;
             case "clojure.lang.PersistentStructMap" -> cljl.lang.PersistentStructMap.class;
-            case "clojure.lang.MapEntry", "clojure.lang.IMapEntry" -> cljl.lang.PersistentHashMap.MapEntry.class;
+            case "clojure.lang.MapEntry" -> cljl.lang.PersistentHashMap.MapEntry.class;
+            case "clojure.lang.IMapEntry" -> cljl.lang.IMapEntry.class;
             case "clojure.lang.LazySeq" -> cljl.lang.LazySeq.class;
             case "clojure.lang.LongRange" -> cljl.lang.LongRange.class;
+            case "clojure.lang.Range" -> cljl.lang.Range.class;
+            case "clojure.lang.Repeat" -> cljl.lang.Repeat.class;
+            case "clojure.lang.Iterate" -> cljl.lang.Iterate.class;
+            case "clojure.lang.LispReader$Resolver" -> Reader.Resolver.class;
+            case "clojure.lang.Cycle" -> cljl.lang.Cycle.class;
             case "clojure.lang.Reduced" -> cljl.lang.Reduced.class;
             case "clojure.lang.Ratio" -> cljl.lang.Ratio.class;
-            case "clojure.lang.BigInt" -> java.math.BigInteger.class;
+            case "clojure.lang.BigInt" -> cljl.lang.BigInt.class;
             case "clojure.lang.TaggedLiteral" -> cljl.lang.TaggedLiteral.class;
             case "clojure.lang.ReaderConditional" -> cljl.lang.ReaderConditional.class;
             case "clojure.lang.ExceptionInfo" -> Core.ExceptionInfo.class;
@@ -968,6 +987,7 @@ public final class Interop {
         Class<?> ac = arg.getClass();
         if (param == ac) return 0;
         if (param.isAssignableFrom(ac)) return 1;
+        if (param == PersistentHashMap.class && arg instanceof IPersistentMap) return 2;
         if (param == Comparator.class && arg instanceof Fn) return 1;
         if (arg instanceof Fn && isFunctionalInterface(param)) return 2;
         if (param == long.class || param == Long.class) {
@@ -1038,6 +1058,7 @@ public final class Interop {
     public static Object coerceArg(Class<?> param, Object arg) {
         if (arg == null) return null;
         if (param.isInstance(arg)) return arg;
+        if (param == PersistentHashMap.class && arg instanceof IPersistentMap) return PersistentHashMap.fromMap(arg);
         if (param == Comparator.class && arg instanceof Fn f) return f.asComparator();
         if (arg instanceof Fn f && isFunctionalInterface(param)) return adaptFnToSam(param, f);
         if (param == int.class || param == Integer.class) return ((Number) arg).intValue();
@@ -1145,18 +1166,29 @@ public final class Interop {
         return (best != null && !ambiguous && !best.isVarArgs() && Modifier.isPublic(best.getModifiers())) ? best : null;
     }
 
+    private static boolean effectiveVarArgs(Class<?>[] params, boolean isVarArgs, Object[] args) {
+        if (!isVarArgs) return false;
+        int n = args == null ? 0 : args.length;
+        if (n == params.length) {
+            Object last = args[n - 1];
+            if (last == null || params[params.length - 1].isInstance(last)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public static Object invokeConstructorWithTags(Class<?> clazz, Class<?>[] paramTags, Object[] args) {
         if (paramTags == null) return invokeConstructor(clazz, args);
         if (isConcurrencyClass(clazz)) Atom.markMultiThreaded();
         int arity = args == null ? 0 : args.length;
-        if (paramTags.length != arity) {
-            throw new IllegalArgumentException("Expected " + paramTags.length + " args for " + clazz.getName() + "/new, got " + arity);
-        }
         Constructor<?> best = null;
         int bestScore = Integer.MAX_VALUE;
         for (Constructor<?> c : clazz.getConstructors()) {
             if (!matchesParamTags(c.getParameterTypes(), paramTags)) continue;
-            int score = matchScore(c.getParameterTypes(), false, args);
+            boolean va = effectiveVarArgs(c.getParameterTypes(), c.isVarArgs(), args);
+            if (!va && paramTags.length != arity) continue;
+            int score = matchScore(c.getParameterTypes(), va, args);
             if (score >= 0 && score < bestScore) {
                 bestScore = score;
                 best = c;
@@ -1168,8 +1200,9 @@ public final class Interop {
         if (!Modifier.isPublic(best.getModifiers()) || !isAccessibleFromHere(clazz)) {
             try { best.setAccessible(true); } catch (Exception ignored) {}
         }
+        boolean va = effectiveVarArgs(best.getParameterTypes(), best.isVarArgs(), args);
         try {
-            return best.newInstance(coerceArgs(best.getParameterTypes(), false, args));
+            return best.newInstance(coerceArgs(best.getParameterTypes(), va, args));
         } catch (InvocationTargetException e) {
             throw RT.sneakyThrow(e.getTargetException());
         } catch (ReflectiveOperationException e) {
@@ -1181,15 +1214,14 @@ public final class Interop {
         if (paramTags == null) return invokeStaticMethod(clazz, methodName, args);
         if (isConcurrencyClass(clazz)) Atom.markMultiThreaded();
         int arity = args == null ? 0 : args.length;
-        if (paramTags.length != arity) {
-            throw new IllegalArgumentException("Expected " + paramTags.length + " args for " + clazz.getName() + "/" + methodName + ", got " + arity);
-        }
         Method best = null;
         int bestScore = Integer.MAX_VALUE;
         for (Method m : clazz.getMethods()) {
             if (!m.getName().equals(methodName) || !Modifier.isStatic(m.getModifiers())) continue;
             if (!matchesParamTags(m.getParameterTypes(), paramTags)) continue;
-            int score = matchScore(m.getParameterTypes(), false, args);
+            boolean va = effectiveVarArgs(m.getParameterTypes(), m.isVarArgs(), args);
+            if (!va && paramTags.length != arity) continue;
+            int score = matchScore(m.getParameterTypes(), va, args);
             if (score >= 0 && score < bestScore) {
                 bestScore = score;
                 best = m;
@@ -1199,13 +1231,21 @@ public final class Interop {
             throw new IllegalArgumentException("No matching static method " + clazz.getName() + "/" + methodName + " with param-tags");
         }
         best = setAccessibleSafe(best, clazz);
+        boolean va = effectiveVarArgs(best.getParameterTypes(), best.isVarArgs(), args);
         try {
-            return boxResult(best.invoke(null, coerceArgs(best.getParameterTypes(), false, args)));
+            return boxResult(best.invoke(null, coerceArgs(best.getParameterTypes(), va, args)));
         } catch (InvocationTargetException e) {
             throw RT.sneakyThrow(e.getTargetException());
         } catch (ReflectiveOperationException e) {
             throw RT.sneakyThrow(e);
         }
+    }
+
+    public static Object invokeInstanceMethodWithTags(Object target, String methodName, Class<?>[] paramTags, Object[] args) {
+        if (target == null) {
+            throw new NullPointerException("Cannot call ." + methodName + " on nil");
+        }
+        return invokeQualifiedInstanceMethod(target.getClass(), methodName, paramTags, target, args);
     }
 
     public static Object invokeQualifiedInstanceMethod(
@@ -1221,15 +1261,14 @@ public final class Interop {
         }
         if (isConcurrencyClass(declaredClass)) Atom.markMultiThreaded();
         int arity = args == null ? 0 : args.length;
-        if (paramTags.length != arity) {
-            throw new IllegalArgumentException("Expected " + paramTags.length + " args for " + declaredClass.getName() + "/." + methodName + ", got " + arity);
-        }
         Method best = null;
         int bestScore = Integer.MAX_VALUE;
         for (Method m : declaredClass.getMethods()) {
             if (!m.getName().equals(methodName) || Modifier.isStatic(m.getModifiers())) continue;
             if (!matchesParamTags(m.getParameterTypes(), paramTags)) continue;
-            int score = matchScore(m.getParameterTypes(), false, args);
+            boolean va = effectiveVarArgs(m.getParameterTypes(), m.isVarArgs(), args);
+            if (!va && paramTags.length != arity) continue;
+            int score = matchScore(m.getParameterTypes(), va, args);
             if (score >= 0 && score < bestScore) {
                 bestScore = score;
                 best = m;
@@ -1239,8 +1278,9 @@ public final class Interop {
             throw new IllegalArgumentException("No matching instance method " + declaredClass.getName() + "/." + methodName + " with param-tags");
         }
         best = setAccessibleSafe(best, declaredClass);
+        boolean va = effectiveVarArgs(best.getParameterTypes(), best.isVarArgs(), args);
         try {
-            return boxResult(best.invoke(target, coerceArgs(best.getParameterTypes(), false, args)));
+            return boxResult(best.invoke(target, coerceArgs(best.getParameterTypes(), va, args)));
         } catch (InvocationTargetException e) {
             throw RT.sneakyThrow(e.getTargetException());
         } catch (ReflectiveOperationException e) {
@@ -1248,71 +1288,140 @@ public final class Interop {
         }
     }
 
-    public static Fn createStaticMethodFn(Class<?> clazz, String methodName, Class<?>[] paramTags) {
-        if (paramTags != null) {
-            boolean found = false;
-            for (Method m : clazz.getMethods()) {
-                if (m.getName().equals(methodName) && Modifier.isStatic(m.getModifiers())
-                        && matchesParamTags(m.getParameterTypes(), paramTags)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                throw new IllegalArgumentException("No matching static method " + clazz.getName() + "/" + methodName + " for param-tags");
+    private static List<Method> dedupMethods(List<Method> raw) {
+        Map<List<Class<?>>, Method> bySig = new LinkedHashMap<>();
+        for (Method m : raw) {
+            List<Class<?>> sig = Arrays.asList(m.getParameterTypes());
+            Method prev = bySig.get(sig);
+            if (prev == null || (prev.isBridge() && !m.isBridge())
+                    || (!m.isBridge() && prev.getReturnType().isAssignableFrom(m.getReturnType()))) {
+                bySig.put(sig, m);
             }
         }
-        return new StaticMethodValueFn(clazz, methodName, paramTags);
+        return new ArrayList<>(bySig.values());
+    }
+
+    private static Method[] buildUniqueByArity(Class<?> clazz, String label, List<Method> methods, Class<?>[] paramTags) {
+        List<Method> dedup = dedupMethods(methods);
+        if (dedup.isEmpty()) {
+            throw new IllegalArgumentException("No matching method " + label + (paramTags != null ? " for param-tags" : ""));
+        }
+        if (paramTags != null) {
+            if (dedup.size() > 1) {
+                throw new IllegalArgumentException("Ambiguous method " + label + " for param-tags (" + dedup.size() + " matches)");
+            }
+            Method m = setAccessibleSafe(dedup.get(0), clazz);
+            int pCount = m.getParameterCount();
+            Method[] arr = new Method[pCount + 1];
+            arr[pCount] = m;
+            return arr;
+        }
+        int maxArity = 0;
+        for (Method m : dedup) {
+            maxArity = Math.max(maxArity, m.getParameterCount());
+        }
+        Method[] byArity = new Method[maxArity + 1];
+        for (Method m : dedup) {
+            int a = m.getParameterCount();
+            if (byArity[a] != null) {
+                throw new IllegalArgumentException("Method " + label + " is ambiguous for arity " + a + "; specify ^[...] :param-tags");
+            }
+            byArity[a] = setAccessibleSafe(m, clazz);
+        }
+        return byArity;
+    }
+
+    public static Fn createStaticMethodFn(Class<?> clazz, String methodName, Class<?>[] paramTags) {
+        List<Method> matches = new ArrayList<>();
+        for (Method m : clazz.getMethods()) {
+            if (m.getName().equals(methodName) && Modifier.isStatic(m.getModifiers())
+                    && (paramTags == null || matchesParamTags(m.getParameterTypes(), paramTags))) {
+                matches.add(m);
+            }
+        }
+        Method[] byArity = buildUniqueByArity(clazz, clazz.getName() + "/" + methodName, matches, paramTags);
+        return new StaticMethodValueFn(clazz, methodName, paramTags, byArity);
     }
 
     public static Fn createInstanceMethodFn(Class<?> clazz, String methodName, Class<?>[] paramTags) {
-        boolean found = false;
+        List<Method> matches = new ArrayList<>();
         for (Method m : clazz.getMethods()) {
             if (m.getName().equals(methodName) && !Modifier.isStatic(m.getModifiers())
-                    && matchesParamTags(m.getParameterTypes(), paramTags)) {
-                found = true;
-                break;
+                    && (paramTags == null || matchesParamTags(m.getParameterTypes(), paramTags))) {
+                matches.add(m);
             }
         }
-        if (!found) {
-            throw new IllegalArgumentException("No matching instance method " + clazz.getName() + "/." + methodName);
-        }
-        return new InstanceMethodValueFn(clazz, methodName, paramTags);
+        Method[] byArity = buildUniqueByArity(clazz, clazz.getName() + "/." + methodName, matches, paramTags);
+        return new InstanceMethodValueFn(clazz, methodName, paramTags, byArity);
     }
 
     public static Fn createConstructorFn(Class<?> clazz, Class<?>[] paramTags) {
-        if (paramTags != null) {
-            boolean found = false;
-            for (Constructor<?> c : clazz.getConstructors()) {
-                if (matchesParamTags(c.getParameterTypes(), paramTags)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                throw new IllegalArgumentException("No matching constructor " + clazz.getName() + "/new for param-tags");
+        List<Constructor<?>> matches = new ArrayList<>();
+        for (Constructor<?> c : clazz.getConstructors()) {
+            if (paramTags == null || matchesParamTags(c.getParameterTypes(), paramTags)) {
+                matches.add(c);
             }
         }
-        return new ConstructorValueFn(clazz, paramTags);
+        if (matches.isEmpty()) {
+            throw new IllegalArgumentException("No matching constructor " + clazz.getName() + "/new" + (paramTags != null ? " for param-tags" : ""));
+        }
+        if (paramTags != null && matches.size() > 1) {
+            throw new IllegalArgumentException("Ambiguous constructor " + clazz.getName() + "/new for param-tags (" + matches.size() + " matches)");
+        }
+        int maxArity = 0;
+        for (Constructor<?> c : matches) maxArity = Math.max(maxArity, c.getParameterCount());
+        Constructor<?>[] byArity = new Constructor<?>[maxArity + 1];
+        for (Constructor<?> c : matches) {
+            int a = c.getParameterCount();
+            if (byArity[a] != null) {
+                throw new IllegalArgumentException("Constructor " + clazz.getName() + "/new is ambiguous for arity " + a + "; specify ^[...] :param-tags");
+            }
+            if (!Modifier.isPublic(c.getModifiers()) || !isAccessibleFromHere(clazz)) {
+                try { c.setAccessible(true); } catch (Exception ignored) {}
+            }
+            byArity[a] = c;
+        }
+        return new ConstructorValueFn(clazz, paramTags, byArity);
     }
 
     private static final class StaticMethodValueFn extends Fn.NamedFn {
         private final Class<?> clazz;
         private final String methodName;
         private final Class<?>[] paramTags;
+        private final Method[] byArity;
+        private final Method varArgsMethod;
 
-        StaticMethodValueFn(Class<?> clazz, String methodName, Class<?>[] paramTags) {
+        StaticMethodValueFn(Class<?> clazz, String methodName, Class<?>[] paramTags, Method[] byArity) {
             super(clazz.getName() + "/" + methodName);
             this.clazz = clazz;
             this.methodName = methodName;
             this.paramTags = paramTags;
+            this.byArity = byArity;
+            Method va = null;
+            for (Method m : byArity) {
+                if (m != null && m.isVarArgs()) { va = m; break; }
+            }
+            this.varArgsMethod = va;
         }
 
         @Override
         public Object invokeVarargs(Object[] args) {
-            return paramTags != null
-                    ? invokeStaticMethodWithTags(clazz, methodName, paramTags, args)
-                    : invokeStaticMethod(clazz, methodName, args);
+            int n = args.length;
+            Method m = (n < byArity.length) ? byArity[n] : null;
+            if (m == null && varArgsMethod != null && n >= varArgsMethod.getParameterCount() - 1) {
+                m = varArgsMethod;
+            }
+            if (m == null) {
+                throw arityError(n);
+            }
+            boolean va = effectiveVarArgs(m.getParameterTypes(), m.isVarArgs(), args);
+            try {
+                return boxResult(m.invoke(null, coerceArgs(m.getParameterTypes(), va, args)));
+            } catch (InvocationTargetException e) {
+                throw RT.sneakyThrow(e.getTargetException());
+            } catch (ReflectiveOperationException e) {
+                throw RT.sneakyThrow(e);
+            }
         }
     }
 
@@ -1320,12 +1429,20 @@ public final class Interop {
         private final Class<?> clazz;
         private final String methodName;
         private final Class<?>[] paramTags;
+        private final Method[] byArity;
+        private final Method varArgsMethod;
 
-        InstanceMethodValueFn(Class<?> clazz, String methodName, Class<?>[] paramTags) {
+        InstanceMethodValueFn(Class<?> clazz, String methodName, Class<?>[] paramTags, Method[] byArity) {
             super(clazz.getName() + "/." + methodName);
             this.clazz = clazz;
             this.methodName = methodName;
             this.paramTags = paramTags;
+            this.byArity = byArity;
+            Method va = null;
+            for (Method m : byArity) {
+                if (m != null && m.isVarArgs()) { va = m; break; }
+            }
+            this.varArgsMethod = va;
         }
 
         @Override
@@ -1334,26 +1451,68 @@ public final class Interop {
                 throw arityError(0);
             }
             Object target = args[0];
+            if (target == null) {
+                throw new NullPointerException("Cannot call " + clazz.getName() + "/." + methodName + " on nil");
+            }
+            if (!clazz.isInstance(target)) {
+                throw new ClassCastException("Cannot cast " + target.getClass().getName() + " to " + clazz.getName());
+            }
             Object[] rest = args.length == 1 ? Fn.EMPTY_ARGS : Arrays.copyOfRange(args, 1, args.length);
-            return invokeQualifiedInstanceMethod(clazz, methodName, paramTags, target, rest);
+            int n = rest.length;
+            Method m = (n < byArity.length) ? byArity[n] : null;
+            if (m == null && varArgsMethod != null && n >= varArgsMethod.getParameterCount() - 1) {
+                m = varArgsMethod;
+            }
+            if (m == null) {
+                throw arityError(args.length);
+            }
+            boolean va = effectiveVarArgs(m.getParameterTypes(), m.isVarArgs(), rest);
+            try {
+                return boxResult(m.invoke(target, coerceArgs(m.getParameterTypes(), va, rest)));
+            } catch (InvocationTargetException e) {
+                throw RT.sneakyThrow(e.getTargetException());
+            } catch (ReflectiveOperationException e) {
+                throw RT.sneakyThrow(e);
+            }
         }
     }
 
     private static final class ConstructorValueFn extends Fn.NamedFn {
         private final Class<?> clazz;
         private final Class<?>[] paramTags;
+        private final Constructor<?>[] byArity;
+        private final Constructor<?> varArgsCtor;
 
-        ConstructorValueFn(Class<?> clazz, Class<?>[] paramTags) {
+        ConstructorValueFn(Class<?> clazz, Class<?>[] paramTags, Constructor<?>[] byArity) {
             super(clazz.getName() + "/new");
             this.clazz = clazz;
             this.paramTags = paramTags;
+            this.byArity = byArity;
+            Constructor<?> va = null;
+            for (Constructor<?> c : byArity) {
+                if (c != null && c.isVarArgs()) { va = c; break; }
+            }
+            this.varArgsCtor = va;
         }
 
         @Override
         public Object invokeVarargs(Object[] args) {
-            return paramTags != null
-                    ? invokeConstructorWithTags(clazz, paramTags, args)
-                    : invokeConstructor(clazz, args);
+            int n = args.length;
+            Constructor<?> c = (n < byArity.length) ? byArity[n] : null;
+            if (c == null && varArgsCtor != null && n >= varArgsCtor.getParameterCount() - 1) {
+                c = varArgsCtor;
+            }
+            if (c == null) {
+                throw arityError(n);
+            }
+            boolean va = effectiveVarArgs(c.getParameterTypes(), c.isVarArgs(), args);
+            try {
+                return c.newInstance(coerceArgs(c.getParameterTypes(), va, args));
+            } catch (InvocationTargetException e) {
+                throw RT.sneakyThrow(e.getTargetException());
+            } catch (ReflectiveOperationException e) {
+                throw RT.sneakyThrow(e);
+            }
         }
     }
 }

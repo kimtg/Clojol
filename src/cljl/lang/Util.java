@@ -35,7 +35,7 @@ public final class Util {
     }
 
     public static int hashCombine(int seed, int hash) {
-        seed ^= hash + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= hash + 0x9e3779b9 + (seed << 6) + (seed >>> 2);
         return seed;
     }
 

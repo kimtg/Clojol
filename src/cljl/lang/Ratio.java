@@ -52,7 +52,7 @@ public final class Ratio extends Number implements Comparable<Number> {
             if (num.bitLength() <= 63) {
                 return num.longValue();
             }
-            return num;
+            return BigInt.fromBigInteger(num);
         }
         return new Ratio(num, den);
     }
@@ -115,10 +115,24 @@ public final class Ratio extends Number implements Comparable<Number> {
         if (other instanceof Long || other instanceof Integer || other instanceof Short || other instanceof Byte) {
             return numerator.compareTo(BigInteger.valueOf(other.longValue()).multiply(denominator));
         }
+        if (other instanceof BigInt bi) {
+            return numerator.compareTo(bi.toBigInteger().multiply(denominator));
+        }
         if (other instanceof BigInteger bi) {
             return numerator.compareTo(bi.multiply(denominator));
         }
-        return Double.compare(doubleValue(), other.doubleValue());
+        if (other instanceof BigDecimal bd) {
+            int scale = bd.scale();
+            BigInteger unscaled = bd.unscaledValue();
+            if (scale >= 0) {
+                BigInteger pow10 = BigInteger.TEN.pow(scale);
+                return numerator.multiply(pow10).compareTo(unscaled.multiply(denominator));
+            } else {
+                BigInteger pow10 = BigInteger.TEN.pow(-scale);
+                return numerator.compareTo(unscaled.multiply(pow10).multiply(denominator));
+            }
+        }
+        return cljl.Numbers.compare(this, other);
     }
 
     @Override

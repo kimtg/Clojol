@@ -440,24 +440,24 @@ public final class StdLib {
         ns.intern("postwalk", Fn.of2("postwalk", (f, form) -> postwalkImpl((Fn) f, form)));
         ns.intern("prewalk", Fn.of2("prewalk", (f, form) -> prewalkImpl((Fn) f, form)));
         ns.intern("keywordize-keys", Fn.of1("keywordize-keys", m -> postwalkImpl(Fn.of1("kw-keys", x -> {
-            if (x instanceof PersistentHashMap pm) {
+            if (x instanceof IPersistentMap pm) {
                 PersistentHashMap.TransientHashMap t = PersistentHashMap.EMPTY.asTransient();
                 for (ISeq s = pm.seq(); s != null; s = s.next()) {
-                    PersistentHashMap.MapEntry e = (PersistentHashMap.MapEntry) s.first();
-                    Object k = e.key instanceof String str ? Keyword.intern(str) : e.key;
-                    t = t.assoc(k, e.val);
+                    Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                    Object k = e.getKey() instanceof String str ? Keyword.intern(str) : e.getKey();
+                    t = t.assoc(k, e.getValue());
                 }
                 return t.persistent();
             }
             return x;
         }), m)));
         ns.intern("stringify-keys", Fn.of1("stringify-keys", m -> postwalkImpl(Fn.of1("str-keys", x -> {
-            if (x instanceof PersistentHashMap pm) {
+            if (x instanceof IPersistentMap pm) {
                 PersistentHashMap.TransientHashMap t = PersistentHashMap.EMPTY.asTransient();
                 for (ISeq s = pm.seq(); s != null; s = s.next()) {
-                    PersistentHashMap.MapEntry e = (PersistentHashMap.MapEntry) s.first();
-                    Object k = e.key instanceof Keyword kw ? kw.getName() : e.key;
-                    t = t.assoc(k, e.val);
+                    Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                    Object k = e.getKey() instanceof Keyword kw ? kw.getName() : e.getKey();
+                    t = t.assoc(k, e.getValue());
                 }
                 return t.persistent();
             }
@@ -497,13 +497,13 @@ public final class StdLib {
             for (int i = 0; i < pv.cnt; i++) tv = tv.conj(inner.invoke(pv.nth(i)));
             return outer.invoke(tv.persistent());
         }
-        if (form instanceof PersistentHashMap pm) {
+        if (form instanceof IPersistentMap pm) {
             PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
             for (ISeq s = pm.seq(); s != null; s = s.next()) {
                 Object walkedEntry = inner.invoke(s.first());
                 if (walkedEntry instanceof Map.Entry<?, ?> e) {
                     tm = tm.assoc(e.getKey(), e.getValue());
-                } else if (walkedEntry instanceof PersistentVector pv && pv.count() == 2) {
+                } else if (walkedEntry instanceof IPersistentVector pv && pv.count() == 2) {
                     tm = tm.assoc(pv.nth(0), pv.nth(1));
                 }
             }
@@ -859,7 +859,7 @@ public final class StdLib {
             Object aObj = counters.deref();
             if (aObj instanceof Atom a) {
                 a.swap(Fn.of1("inc-c", m -> {
-                    PersistentHashMap pm = (PersistentHashMap) m;
+                    IPersistentMap pm = (IPersistentMap) m;
                     long cur = Numbers.toLong(pm.valAt(name, 0L));
                     return pm.assoc(name, cur + 1L);
                 }));
@@ -1229,7 +1229,7 @@ public final class StdLib {
             }
             long totalTest = 0, totalPass = 0, totalFail = 0, totalErr = 0;
             for (Namespace t : targets) {
-                PersistentHashMap m = (PersistentHashMap) testNsFn.invoke(t);
+                IPersistentMap m = (IPersistentMap) testNsFn.invoke(t);
                 totalTest += Numbers.toLong(m.valAt(kTest, 0L));
                 totalPass += Numbers.toLong(m.valAt(kPass, 0L));
                 totalFail += Numbers.toLong(m.valAt(kFail, 0L));
@@ -1475,14 +1475,15 @@ public final class StdLib {
             PersistentVector res = PersistentVector.create(items);
             return pv.meta() != null ? res.withMeta(pv.meta()) : res;
         }
-        if (form instanceof PersistentHashMap pm) {
+        if (form instanceof IPersistentMap pm) {
             PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
             for (ISeq s = pm.seq(); s != null; s = s.next()) {
                 Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
                 tm = tm.assoc(substituteAreTemplate(e.getKey(), subs), substituteAreTemplate(e.getValue(), subs));
             }
             PersistentHashMap res = tm.persistent();
-            return pm.meta() != null ? res.withMeta(pm.meta()) : res;
+            PersistentHashMap m = (pm instanceof IMeta im) ? im.meta() : null;
+            return m != null ? res.withMeta(m) : res;
         }
         if (form instanceof PersistentHashSet ps) {
             PersistentHashSet.TransientHashSet ts = PersistentHashSet.EMPTY.asTransient();

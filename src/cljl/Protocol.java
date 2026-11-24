@@ -8,17 +8,31 @@ import java.util.concurrent.CopyOnWriteArrayList;
 /**
  * Clojure Protocol descriptor and fast polymorphic class-based method dispatch table.
  */
-public final class Protocol {
+public final class Protocol implements IPersistentMap, Map<Object, Object>, IHashEq, IKVReduce {
     public interface Dispatchable {
         Fn __protocolFn(Protocol p, Keyword methodKey);
         boolean __satisfies(Protocol p);
+        default Map<Keyword, Fn> __protocolImpls(Protocol p) { return null; }
     }
 
+    private static final Keyword KW_ON = Keyword.intern("on");
+    private static final Keyword KW_ON_INTERFACE = Keyword.intern("on-interface");
+    private static final Keyword KW_SIGS = Keyword.intern("sigs");
+    private static final Keyword KW_VAR = Keyword.intern("var");
+    private static final Keyword KW_METHOD_MAP = Keyword.intern("method-map");
+    private static final Keyword KW_IMPLS = Keyword.intern("impls");
+    private static final Keyword KW_DOC = Keyword.intern("doc");
+    private static final Keyword KW_EXTEND_VIA_META = Keyword.intern("extend-via-metadata");
+
     public final Symbol name;
+    public final String nsName;
     public final String doc;
     public final Class<?> onInterface;
-    // Method name -> declared fixed arities (1..4) present on onInterface (null if no generated interface)
+    // Method name -> declared fixed arities (1..20) present on onInterface (null if no generated interface)
     public final Map<String, int[]> interfaceMethodArities;
+    public final boolean extendViaMetadata;
+    public final PersistentHashMap sigs;
+    public volatile Var protoVar;
     public final ConcurrentHashMap<Keyword, Fn> methodDefaults = new ConcurrentHashMap<>();
     // Set true if extend/extend-type overrides a class implementing onInterface or if protocol is redefined
     public volatile boolean hasInterfaceOverrides = false;
@@ -34,16 +48,35 @@ public final class Protocol {
     public void registerMethodVar(Var var, Keyword key, String name) {
         methodVars.add(new MethodVarEntry(var, key, name));
     }
+
+    public void setVar(Var v) {
+        this.protoVar = v;
+    }
+
     // Target Class<?> -> (methodName Keyword -> Fn)
     private final ConcurrentHashMap<Class<?>, ConcurrentHashMap<Keyword, Fn>> impls = new ConcurrentHashMap<>();
     // Cached resolved dispatch: Target Class<?> -> (methodName Keyword -> Fn or MISSING_IMPL)
     private final ConcurrentHashMap<Class<?>, ConcurrentHashMap<Keyword, Fn>> methodCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Class<?>, Boolean> satisfiesCache = new ConcurrentHashMap<>();
+    // Cached metadata dispatch symbols: methodKey -> Symbol(nsName, methodName)
+    private final ConcurrentHashMap<Keyword, Symbol> metaDispatchSyms = new ConcurrentHashMap<>();
     // Special key for nil dispatch
     public static final Class<?> NIL_CLASS = Void.class;
     private static final Fn MISSING_IMPL = Fn.ofVarargs("protocol-missing", args -> {
         throw new IllegalStateException("Protocol missing sentinel invoked");
     });
+
+    private Symbol metaSymFor(Keyword methodKey) {
+        return metaDispatchSyms.computeIfAbsent(methodKey, k -> Symbol.intern(nsName, k.getName()));
+    }
+
+    private Fn resolveMetadataImpl(Keyword methodKey, Object target) {
+        if (!extendViaMetadata || !(target instanceof IMeta im)) return null;
+        PersistentHashMap m = im.meta();
+        if (m == null) return null;
+        Object v = m.valAt(metaSymFor(methodKey));
+        return (v instanceof Fn f) ? f : null;
+    }
 
     /**
      * Fast protocol method dispatcher base with a tear-free 2-entry Polymorphic Inline Cache (PIC).
@@ -99,6 +132,10 @@ public final class Protocol {
                 this.slot1 = null;
                 this.slot2 = null;
             }
+            if (p.extendViaMetadata) {
+                Fn mf = p.resolveMetadataImpl(methodKey, target);
+                if (mf != null) return mf;
+            }
             if (target instanceof Dispatchable d) {
                 Fn df = d.__protocolFn(p, methodKey);
                 if (df != null) return df;
@@ -108,7 +145,7 @@ public final class Protocol {
             if (impl instanceof Compiler.CompiledFn cf) {
                 impl = cf.ensureJit();
             }
-            if (!(target instanceof Dispatchable) && p.epoch == ep) {
+            if (!p.extendViaMetadata && !(target instanceof Dispatchable) && p.epoch == ep) {
                 CacheEntry entry = new CacheEntry(cls, impl);
                 CacheEntry cur1 = this.slot1;
                 if (cur1 == null || cur1.cls == cls) {
@@ -153,14 +190,32 @@ public final class Protocol {
     }
 
     public Protocol(Symbol name, String doc, Class<?> onInterface) {
-        this(name, doc, onInterface, null);
+        this(name, doc, onInterface, null, false, null, null);
     }
 
     public Protocol(Symbol name, String doc, Class<?> onInterface, Map<String, int[]> interfaceMethodArities) {
+        this(name, doc, onInterface, interfaceMethodArities, false, null, null);
+    }
+
+    public Protocol(
+            Symbol name,
+            String doc,
+            Class<?> onInterface,
+            Map<String, int[]> interfaceMethodArities,
+            boolean extendViaMetadata,
+            PersistentHashMap sigs,
+            Var protoVar) {
         this.name = name;
+        this.nsName = protoVar != null ? protoVar.ns.name.name : RT.currentNS().name.name;
         this.doc = doc;
         this.onInterface = onInterface;
         this.interfaceMethodArities = interfaceMethodArities;
+        this.extendViaMetadata = extendViaMetadata;
+        this.sigs = sigs != null ? sigs : PersistentHashMap.EMPTY;
+        this.protoVar = protoVar;
+        if (extendViaMetadata) {
+            this.hasInterfaceOverrides = true;
+        }
         if (onInterface != null) {
             BY_INTERFACE.put(onInterface, this);
         }
@@ -206,6 +261,22 @@ public final class Protocol {
     }
 
     public boolean satisfies(Object x) {
+        if (extendViaMetadata && x instanceof IMeta im) {
+            PersistentHashMap m = im.meta();
+            if (m != null && m.count() > 0) {
+                for (ISeq s = sigs.seq(); s != null; s = s.next()) {
+                    Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                    if (e.getKey() instanceof Keyword mk) {
+                        if (m.valAt(metaSymFor(mk)) instanceof Fn) return true;
+                    }
+                }
+                if (interfaceMethodArities != null) {
+                    for (String mn : interfaceMethodArities.keySet()) {
+                        if (m.valAt(metaSymFor(Keyword.intern(mn))) instanceof Fn) return true;
+                    }
+                }
+            }
+        }
         if (x == null) return impls.containsKey(NIL_CLASS);
         if (x instanceof Dispatchable d && d.__satisfies(this)) return true;
         return extendsType(x.getClass());
@@ -295,6 +366,10 @@ public final class Protocol {
     }
 
     public Fn resolveMethod(Keyword methodKey, Object target) {
+        if (extendViaMetadata) {
+            Fn mf = resolveMetadataImpl(methodKey, target);
+            if (mf != null) return mf;
+        }
         if (target instanceof Dispatchable d) {
             Fn df = d.__protocolFn(this, methodKey);
             if (df != null) return df;
@@ -314,6 +389,10 @@ public final class Protocol {
     }
 
     public Fn resolveMethodOrNull(Keyword methodKey, Object target) {
+        if (extendViaMetadata) {
+            Fn mf = resolveMetadataImpl(methodKey, target);
+            if (mf != null) return mf;
+        }
         if (target instanceof Dispatchable d) {
             Fn df = d.__protocolFn(this, methodKey);
             if (df != null) return df;
@@ -330,7 +409,33 @@ public final class Protocol {
     }
 
     public PersistentHashMap findImplFor(Object target) {
+        if (extendViaMetadata && target instanceof IMeta im) {
+            PersistentHashMap m = im.meta();
+            if (m != null && m.count() > 0) {
+                PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
+                boolean found = false;
+                for (ISeq s = sigs.seq(); s != null; s = s.next()) {
+                    Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                    if (e.getKey() instanceof Keyword mk) {
+                        Object fn = m.valAt(metaSymFor(mk));
+                        if (fn instanceof Fn) {
+                            tm = tm.assoc(mk, fn);
+                            found = true;
+                        }
+                    }
+                }
+                if (found) return tm.persistent();
+            }
+        }
         if (target instanceof Dispatchable d && d.__satisfies(this)) {
+            Map<Keyword, Fn> dm = d.__protocolImpls(this);
+            if (dm != null) {
+                PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
+                for (Map.Entry<Keyword, Fn> e : dm.entrySet()) {
+                    tm = tm.assoc(e.getKey(), e.getValue());
+                }
+                return tm.persistent();
+            }
             return PersistentHashMap.EMPTY;
         }
         Class<?> cls = (target == null) ? NIL_CLASS : target.getClass();
@@ -354,6 +459,90 @@ public final class Protocol {
         epoch++;
         invalidateMethodFns();
     }
+
+    // ========================================================================
+    // IPersistentMap view (Clojure protocol map parity: :on, :on-interface, :sigs, :var, :method-map, :impls)
+    // ========================================================================
+
+    private PersistentHashMap buildImplsMap() {
+        PersistentHashMap.TransientHashMap outer = PersistentHashMap.EMPTY.asTransient();
+        for (Map.Entry<Class<?>, ConcurrentHashMap<Keyword, Fn>> e : impls.entrySet()) {
+            Class<?> k = e.getKey() == NIL_CLASS ? null : e.getKey();
+            PersistentHashMap.TransientHashMap inner = PersistentHashMap.EMPTY.asTransient();
+            for (Map.Entry<Keyword, Fn> me : e.getValue().entrySet()) {
+                inner = inner.assoc(me.getKey(), me.getValue());
+            }
+            outer = outer.assoc(k, inner.persistent());
+        }
+        return outer.persistent();
+    }
+
+    private PersistentHashMap buildMethodMap() {
+        PersistentHashMap.TransientHashMap mm = PersistentHashMap.EMPTY.asTransient();
+        for (ISeq s = sigs.seq(); s != null; s = s.next()) {
+            Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+            mm = mm.assoc(e.getKey(), e.getKey());
+        }
+        if (interfaceMethodArities != null) {
+            for (String mn : interfaceMethodArities.keySet()) {
+                Keyword k = Keyword.intern(mn);
+                mm = mm.assoc(k, k);
+            }
+        }
+        return mm.persistent();
+    }
+
+    public PersistentHashMap asMap() {
+        PersistentHashMap m = PersistentHashMap.EMPTY
+                .assoc(KW_ON, onInterface != null ? Symbol.intern(onInterface.getName()) : name)
+                .assoc(KW_ON_INTERFACE, onInterface)
+                .assoc(KW_SIGS, sigs)
+                .assoc(KW_VAR, protoVar)
+                .assoc(KW_METHOD_MAP, buildMethodMap())
+                .assoc(KW_IMPLS, buildImplsMap());
+        if (doc != null) m = m.assoc(KW_DOC, doc);
+        if (extendViaMetadata) m = m.assoc(KW_EXTEND_VIA_META, Boolean.TRUE);
+        return m;
+    }
+
+    @Override public Object valAt(Object key) { return valAt(key, null); }
+    @Override public Object valAt(Object key, Object notFound) {
+        if (KW_ON.equals(key)) return onInterface != null ? Symbol.intern(onInterface.getName()) : name;
+        if (KW_ON_INTERFACE.equals(key)) return onInterface;
+        if (KW_SIGS.equals(key)) return sigs;
+        if (KW_VAR.equals(key)) return protoVar;
+        if (KW_METHOD_MAP.equals(key)) return buildMethodMap();
+        if (KW_IMPLS.equals(key)) return buildImplsMap();
+        if (KW_DOC.equals(key)) return doc != null ? doc : notFound;
+        if (KW_EXTEND_VIA_META.equals(key)) return extendViaMetadata ? Boolean.TRUE : notFound;
+        return notFound;
+    }
+
+    @Override public boolean containsKey(Object key) { return asMap().containsKey(key); }
+    @Override public IMapEntry entryAt(Object key) { return asMap().entryAt(key); }
+    @Override public IPersistentMap assoc(Object key, Object val) { return asMap().assoc(key, val); }
+    @Override public IPersistentMap without(Object key) { return asMap().without(key); }
+    @Override public IPersistentMap empty() { return PersistentHashMap.EMPTY; }
+    @Override public IPersistentCollection cons(Object o) { return asMap().cons(o); }
+    @Override public int count() { return asMap().count(); }
+    @Override public ISeq seq() { return asMap().seq(); }
+    @Override public boolean equiv(Object o) { return this == o || asMap().equiv(o); }
+    @Override public int hasheq() { return asMap().hasheq(); }
+    @Override public Object kvreduce(Fn f, Object init) { return asMap().kvreduce(f, init); }
+    @Override public Iterator<Map.Entry<Object, Object>> iterator() { return asMap().iterator(); }
+
+    // java.util.Map view
+    @Override public int size() { return count(); }
+    @Override public boolean isEmpty() { return false; }
+    @Override public boolean containsValue(Object value) { return asMap().containsValue(value); }
+    @Override public Object get(Object key) { return valAt(key); }
+    @Override public Set<Object> keySet() { return asMap().keySet(); }
+    @Override public Collection<Object> values() { return asMap().values(); }
+    @Override public Set<Map.Entry<Object, Object>> entrySet() { return asMap().entrySet(); }
+    @Override public Object put(Object k, Object v) { throw new UnsupportedOperationException(); }
+    @Override public Object remove(Object k) { throw new UnsupportedOperationException(); }
+    @Override public void putAll(Map<?, ?> m) { throw new UnsupportedOperationException(); }
+    @Override public void clear() { throw new UnsupportedOperationException(); }
 
     @Override
     public String toString() {

@@ -2,12 +2,16 @@ package cljl.lang;
 
 import cljl.Fn;
 import cljl.RT;
+import java.io.Serializable;
 import java.util.*;
 
 public final class PersistentStructMap extends Fn
-        implements IPersistentMap, IObj, Map<Object, Object>, Iterable<Map.Entry<Object, Object>> {
+        implements IPersistentMap, IObj, IHashEq, IKVReduce, Map<Object, Object>, Iterable<Map.Entry<Object, Object>>, Serializable {
 
-    public static final class Def {
+    private static final long serialVersionUID = 1L;
+
+    public static final class Def implements Serializable {
+        private static final long serialVersionUID = 1L;
         public final ISeq keys;
         public final Map<RT.EquivKey, Integer> keyMap;
         public final Object[] keyArray;
@@ -116,7 +120,7 @@ public final class PersistentStructMap extends Fn
     }
 
     @Override
-    public Associative assoc(Object key, Object val) {
+    public IPersistentMap assoc(Object key, Object val) {
         Integer idx = def.keyMap.get(new RT.EquivKey(key));
         if (idx != null) {
             if (RT.equiv(vals[idx], val)) return this;
@@ -127,12 +131,50 @@ public final class PersistentStructMap extends Fn
         return new PersistentStructMap(meta, def, vals, ext.assoc(key, val));
     }
 
+    @Override
     public PersistentStructMap without(Object key) {
         if (def.keyMap.containsKey(new RT.EquivKey(key))) {
             throw new IllegalArgumentException("Can't remove struct key: " + key);
         }
         PersistentHashMap newExt = ext.without(key);
         return newExt == ext ? this : new PersistentStructMap(meta, def, vals, newExt);
+    }
+
+    @Override
+    public IPersistentCollection cons(Object o) {
+        if (o == null) return this;
+        if (o instanceof Map.Entry<?, ?> e) {
+            return assoc(e.getKey(), e.getValue());
+        }
+        if (o instanceof IPersistentVector v) {
+            if (v.count() != 2) throw new IllegalArgumentException("Vector arg to map conj must be a pair");
+            return assoc(v.nth(0), v.nth(1));
+        }
+        IPersistentMap ret = this;
+        for (ISeq s = RT.seq(o); s != null; s = s.next()) {
+            Object item = s.first();
+            if (item instanceof Map.Entry<?, ?> e) {
+                ret = ret.assoc(e.getKey(), e.getValue());
+            } else {
+                throw new IllegalArgumentException("Can't conj " + item + " to struct map");
+            }
+        }
+        return ret;
+    }
+
+    @Override
+    public IPersistentCollection empty() {
+        return construct(def, null).withMeta(meta);
+    }
+
+    @Override
+    public Object kvreduce(Fn f, Object init) {
+        Object acc = init;
+        for (int i = 0; i < vals.length; i++) {
+            acc = f.invoke(acc, def.keyArray[i], vals[i]);
+            if (acc instanceof Reduced r) return r.deref();
+        }
+        return ext.kvreduce(f, acc);
     }
 
     @Override public Object invoke(Object key) { return valAt(key, null); }
@@ -206,6 +248,17 @@ public final class PersistentStructMap extends Fn
             if (!m.containsKey(k) || !RT.equiv(e.getValue(), m.get(k))) return false;
         }
         return true;
+    }
+
+    @Override
+    public int hasheq() {
+        int sum = 0;
+        int n = 0;
+        for (Entry<Object, Object> e : this) {
+            sum += Murmur3.mixCollHash(31 * (31 + RT.hash(e.getKey())) + RT.hash(e.getValue()), 2);
+            n++;
+        }
+        return Murmur3.mixCollHash(sum, n);
     }
 
     @Override

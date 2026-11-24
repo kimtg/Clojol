@@ -1,12 +1,16 @@
 package cljl.lang;
 
 import cljl.RT;
+import java.io.Serializable;
 import java.util.*;
 
-public abstract class ASeq implements ISeq, IObj, Sequential {
+public abstract class ASeq implements ISeq, IObj, Sequential, IHashEq, Serializable {
+    private static final long serialVersionUID = 1L;
     protected final PersistentHashMap meta;
     private int hash;
     private volatile boolean hasHash;
+    private int hasheq;
+    private volatile boolean hasHasheq;
 
     protected ASeq() {
         this.meta = null;
@@ -37,6 +41,7 @@ public abstract class ASeq implements ISeq, IObj, Sequential {
         return new Cons(o, this);
     }
 
+    @Override
     public int count() {
         int i = 1;
         for (ISeq s = next(); s != null; s = s.next(), i++) {
@@ -117,7 +122,7 @@ public abstract class ASeq implements ISeq, IObj, Sequential {
     public boolean equals(Object obj) {
         if (this == obj) return true;
         if (!(obj instanceof Seqable || obj instanceof List<?>)) return false;
-        if (obj instanceof PersistentHashMap || obj instanceof PersistentHashSet
+        if (obj instanceof IPersistentMap || obj instanceof IPersistentSet
                 || obj instanceof Map<?, ?> || obj instanceof Set<?>) {
             return false;
         }
@@ -129,6 +134,17 @@ public abstract class ASeq implements ISeq, IObj, Sequential {
             ms = ms.next();
         }
         return ms == null;
+    }
+
+    @Override
+    public int hasheq() {
+        if (!hasHasheq) {
+            int h = Murmur3.hashOrdered(this);
+            this.hasheq = h;
+            this.hasHasheq = true;
+            return h;
+        }
+        return this.hasheq;
     }
 
     @Override

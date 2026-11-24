@@ -1115,7 +1115,7 @@ public final class StdLibMore {
                 Fn.of2("seq-make", (node, children) -> {
                     Object m = node instanceof IMeta im ? im.meta() : null;
                     Object s = children == null ? PersistentList.EMPTY : children;
-                    return m instanceof PersistentHashMap pm && s instanceof IObj sm ? sm.withMeta(pm) : s;
+                    return m instanceof IPersistentMap pm && s instanceof IObj sm ? sm.withMeta(PersistentHashMap.fromMap(pm)) : s;
                 }),
                 root));
         ns.intern("seq-zip", seqZip);
@@ -1214,7 +1214,7 @@ public final class StdLibMore {
             Object p = rawPathFn.invoke(loc);
             Object r = p == null ? null : RT.seq(RT.get(p, kR));
             if (r == null) return null;
-            PersistentHashMap newPath = (PersistentHashMap) RT.assoc(RT.assoc(p, kL, RT.conj(RT.get(p, kL), nodeFn.invoke(loc))),
+            Object newPath = RT.assoc(RT.assoc(p, kL, RT.conj(RT.get(p, kL), nodeFn.invoke(loc))),
                     kR, RT.next(r));
             return PersistentVector.createOwning(RT.first(r), newPath).withMeta(((IMeta) loc).meta());
         });
@@ -1233,7 +1233,7 @@ public final class StdLibMore {
             Object l = p == null ? null : RT.get(p, kL);
             if (l == null || RT.count(l) == 0) return null;
             PersistentVector lv = (PersistentVector) l;
-            PersistentHashMap newPath = (PersistentHashMap) RT.assoc(RT.assoc(p, kL, lv.pop()),
+            Object newPath = RT.assoc(RT.assoc(p, kL, lv.pop()),
                     kR, RT.cons(nodeFn.invoke(loc), RT.get(p, kR)));
             return PersistentVector.createOwning(lv.peek(), newPath).withMeta(((IMeta) loc).meta());
         });
@@ -1247,7 +1247,7 @@ public final class StdLibMore {
             for (int i = 1; i < lv.count(); i++) newR.add(lv.nth(i));
             newR.add(nodeFn.invoke(loc));
             newR.addAll(toList(RT.get(p, kR)));
-            PersistentHashMap newPath = (PersistentHashMap) RT.assoc(RT.assoc(p, kL, PersistentVector.EMPTY),
+            Object newPath = RT.assoc(RT.assoc(p, kL, PersistentVector.EMPTY),
                     kR, PersistentList.create(newR));
             return PersistentVector.createOwning(lv.nth(0), newPath).withMeta(((IMeta) loc).meta());
         });
@@ -1267,14 +1267,14 @@ public final class StdLibMore {
         Fn insertLeftFn = Fn.of2("insert-left", (loc, item) -> {
             Object p = rawPathFn.invoke(loc);
             if (p == null) throw new IllegalStateException("Insert at top");
-            PersistentHashMap np = (PersistentHashMap) RT.assoc(RT.assoc(p, kL, RT.conj(RT.get(p, kL), item)),
+            Object np = RT.assoc(RT.assoc(p, kL, RT.conj(RT.get(p, kL), item)),
                     kChanged, Boolean.TRUE);
             return PersistentVector.createOwning(nodeFn.invoke(loc), np).withMeta(((IMeta) loc).meta());
         });
         Fn insertRightFn = Fn.of2("insert-right", (loc, item) -> {
             Object p = rawPathFn.invoke(loc);
             if (p == null) throw new IllegalStateException("Insert at top");
-            PersistentHashMap np = (PersistentHashMap) RT.assoc(RT.assoc(p, kR, RT.cons(item, RT.get(p, kR))),
+            Object np = RT.assoc(RT.assoc(p, kR, RT.cons(item, RT.get(p, kR))),
                     kChanged, Boolean.TRUE);
             return PersistentVector.createOwning(nodeFn.invoke(loc), np).withMeta(((IMeta) loc).meta());
         });
@@ -1321,7 +1321,7 @@ public final class StdLibMore {
             if (p == null) throw new IllegalStateException("Remove at top");
             PersistentVector lv = (PersistentVector) RT.get(p, kL);
             if (lv.count() > 0) {
-                PersistentHashMap np = (PersistentHashMap) RT.assoc(RT.assoc(p, kL, lv.pop()), kChanged, Boolean.TRUE);
+                Object np = RT.assoc(RT.assoc(p, kL, lv.pop()), kChanged, Boolean.TRUE);
                 Object cur = PersistentVector.createOwning(lv.peek(), np).withMeta(((IMeta) loc).meta());
                 while (RT.truthy(branchFn.invoke(cur))) {
                     Object d = downFn.invoke(cur);
@@ -1440,7 +1440,7 @@ public final class StdLibMore {
         Fn resolveSpec = Fn.of1("resolve-spec", s -> {
             if (s instanceof SpecObj) return s;
             if (s instanceof Keyword || s instanceof Symbol) {
-                Object found = ((PersistentHashMap) reg.deref()).valAt(s);
+                Object found = ((IPersistentMap) reg.deref()).valAt(s);
                 return found;
             }
             if (s instanceof PersistentHashSet || s instanceof Set<?>) {
@@ -1457,7 +1457,7 @@ public final class StdLibMore {
         ns.intern("def-impl", Fn.of2("def-impl", (k, s) -> {
             Object spec = resolveSpec.invoke(s);
             if (spec == null) throw new IllegalArgumentException("Unable to resolve spec: " + s);
-            reg.swap(Fn.of1("reg-put", m -> ((PersistentHashMap) m).assoc(k, spec)));
+            reg.swap(Fn.of1("reg-put", m -> ((IPersistentMap) m).assoc(k, spec)));
             return k;
         }));
         ns.internMacro("def", Fn.of2("def", (k, form) ->
@@ -2089,10 +2089,9 @@ public final class StdLibMore {
             return new PriorityMap(m2, o2, priCmp, meta);
         }
 
-        @Override public Object cons(Object x) {
+        @Override public PriorityMap cons(Object x) {
             if (x instanceof Map.Entry<?, ?> e) return assoc(e.getKey(), e.getValue());
-            if (x instanceof PersistentVector v && v.cnt == 2) return assoc(v.nth(0), v.nth(1));
-            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return assoc(sv.nth(0), sv.nth(1));
+            if (x instanceof IPersistentVector v && v.count() == 2) return assoc(v.nth(0), v.nth(1));
             if (x instanceof Map<?, ?> m) {
                 PriorityMap res = this;
                 for (Map.Entry<?, ?> e : m.entrySet()) res = res.assoc(e.getKey(), e.getValue());
@@ -2107,14 +2106,14 @@ public final class StdLibMore {
             return new PriorityMap(map.without(k), ordered.without(new PriKey(oldPri, k)), priCmp, meta);
         }
 
-        @Override public Object empty() { return new PriorityMap(PersistentHashMap.EMPTY, (PersistentTreeMap) ordered.empty(), priCmp, meta); }
+        @Override public PriorityMap empty() { return new PriorityMap(PersistentHashMap.EMPTY, (PersistentTreeMap) ordered.empty(), priCmp, meta); }
 
         @Override public Object peek() {
             ISeq s = seq();
             return s == null ? null : s.first();
         }
 
-        @Override public Object pop() {
+        @Override public PriorityMap pop() {
             Object p = peek();
             if (p == null) return this;
             return without(((Map.Entry<?, ?>) p).getKey());
@@ -2200,10 +2199,9 @@ public final class StdLibMore {
             boolean existed = map.containsKey(k);
             return new OrderedMap(map.assoc(k, v), existed ? order : order.conj(k), meta);
         }
-        @Override public Object cons(Object x) {
+        @Override public OrderedMap cons(Object x) {
             if (x instanceof Map.Entry<?, ?> e) return assoc(e.getKey(), e.getValue());
-            if (x instanceof PersistentVector v && v.cnt == 2) return assoc(v.nth(0), v.nth(1));
-            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return assoc(sv.nth(0), sv.nth(1));
+            if (x instanceof IPersistentVector v && v.count() == 2) return assoc(v.nth(0), v.nth(1));
             if (x instanceof Map<?, ?> m) {
                 OrderedMap res = this;
                 for (Map.Entry<?, ?> e : m.entrySet()) res = res.assoc(e.getKey(), e.getValue());
@@ -2220,7 +2218,7 @@ public final class StdLibMore {
             }
             return new OrderedMap(map.without(k), tv.persistent(), meta);
         }
-        @Override public Object empty() { return new OrderedMap(PersistentHashMap.EMPTY, PersistentVector.EMPTY, meta); }
+        @Override public OrderedMap empty() { return new OrderedMap(PersistentHashMap.EMPTY, PersistentVector.EMPTY, meta); }
 
         @Override public ISeq seq() {
             if (map.count() == 0) return null;

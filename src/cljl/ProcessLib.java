@@ -1,6 +1,7 @@
 package cljl;
 
 import cljl.lang.IDeref;
+import cljl.lang.IPersistentMap;
 import cljl.lang.ISeq;
 import cljl.lang.PersistentHashMap;
 import java.io.*;
@@ -51,9 +52,9 @@ public final class ProcessLib {
 
         ns.intern("start", Fn.ofVarargs("start", args -> {
             if (args.length == 0) throw new IllegalArgumentException("start requires at least one argument");
-            PersistentHashMap opts = PersistentHashMap.EMPTY;
+            IPersistentMap opts = PersistentHashMap.EMPTY;
             int idx = 0;
-            if (args[0] instanceof PersistentHashMap m) {
+            if (args[0] instanceof IPersistentMap m) {
                 opts = m;
                 idx = 1;
             }
@@ -116,9 +117,9 @@ public final class ProcessLib {
 
         ns.intern("exec", Fn.ofVarargs("exec", args -> {
             if (args.length == 0) throw new IllegalArgumentException("exec requires at least one argument");
-            PersistentHashMap opts = PersistentHashMap.EMPTY;
+            IPersistentMap opts = PersistentHashMap.EMPTY;
             int idx = 0;
-            if (args[0] instanceof PersistentHashMap m) {
+            if (args[0] instanceof IPersistentMap m) {
                 opts = m;
                 idx = 1;
             }

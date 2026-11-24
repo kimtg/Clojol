@@ -58,9 +58,36 @@ final class CompilerIntrinsics {
         };
     }
 
+    private static boolean isStaticallyPrimitive(Node n) {
+        if (n instanceof ConstNode cn) return cn.isLong || cn.isDouble;
+        if (n instanceof LocalNode ln) return ln.hint == ValType.LONG || ln.hint == ValType.DOUBLE || ln.staticDouble;
+        return n instanceof LongCastNode || n instanceof DoubleCastNode
+                || n instanceof UncheckedAdd2Node || n instanceof UncheckedSub2Node
+                || n instanceof UncheckedMul2Node || n instanceof UncheckedIncNode
+                || n instanceof UncheckedDecNode || n instanceof UncheckedNegateNode
+                || n instanceof BitOp2Node || n instanceof BitNotNode
+                || n instanceof AlengthNode || n instanceof CountNode;
+    }
+
+    private static void checkWarnBoxed(String name, Node[] args) {
+        if (!Compiler.isWarnOnBoxed()) return;
+        for (Node a : args) {
+            if (!isStaticallyPrimitive(a)) {
+                Compiler.warnBoxedMath(name);
+                return;
+            }
+        }
+    }
+
     private static final class MathOps {
         static Node tryCreate(String name, Node[] args, int arity) {
             boolean unchecked = RT.truthy(RT.UNCHECKED_MATH.get());
+            if (Compiler.isWarnOnBoxed()) {
+                switch (name) {
+                    case "+", "-", "*", "/", "inc", "dec", "rem", "mod", "quot" -> checkWarnBoxed(name, args);
+                    default -> {}
+                }
+            }
             return switch (name) {
                 case "+" -> switch (arity) {
                     case 0 -> new ConstNode(0L);

@@ -10,7 +10,9 @@ import java.util.concurrent.atomic.AtomicReference;
  * and TransientVector support for O(1) amortized batch construction.
  */
 public final class PersistentVector extends Fn
-        implements IPersistentVector, IObj, IEditableCollection, IReduceInit, List<Object>, RandomAccess, Comparable<Object> {
+        implements IPersistentVector, IObj, IEditableCollection, IReduce, IKVReduce, IHashEq,
+        List<Object>, RandomAccess, Comparable<Object>, java.io.Serializable {
+    private static final long serialVersionUID = 1L;
 
     private static final AtomicReference<Thread> NO_EDIT = new AtomicReference<>(null);
     public static final Node EMPTY_NODE = new Node(NO_EDIT, new Object[32]);
@@ -23,9 +25,12 @@ public final class PersistentVector extends Fn
     private final PersistentHashMap meta;
     private int hash;
     private volatile boolean hasHash;
+    private int hasheq;
+    private volatile boolean hasHasheq;
 
-    public static final class Node {
-        public final AtomicReference<Thread> edit;
+    public static final class Node implements java.io.Serializable {
+        private static final long serialVersionUID = 1L;
+        public final transient AtomicReference<Thread> edit;
         public final Object[] array;
 
         public Node(AtomicReference<Thread> edit, Object[] array) {
@@ -357,19 +362,10 @@ public final class PersistentVector extends Fn
 
     @Override
     public int compareTo(Object o) {
-        if (o instanceof SubVec sv) {
-            int n = sv.count();
-            if (this.cnt < n) return -1;
-            if (this.cnt > n) return 1;
-            for (int i = 0; i < this.cnt; i++) {
-                int c = RT.compare(this.nth(i), sv.nth(i));
-                if (c != 0) return c;
-            }
-            return 0;
-        }
-        PersistentVector v = (PersistentVector) o;
-        if (this.cnt < v.cnt) return -1;
-        if (this.cnt > v.cnt) return 1;
+        IPersistentVector v = (IPersistentVector) o;
+        int n = v.count();
+        if (this.cnt < n) return -1;
+        if (this.cnt > n) return 1;
         for (int i = 0; i < this.cnt; i++) {
             int c = RT.compare(this.nth(i), v.nth(i));
             if (c != 0) return c;
@@ -387,10 +383,10 @@ public final class PersistentVector extends Fn
             }
             return true;
         }
-        if (obj instanceof SubVec sv) {
-            if (this.cnt != sv.count()) return false;
+        if (obj instanceof IPersistentVector iv) {
+            if (this.cnt != iv.count()) return false;
             for (int i = 0; i < cnt; i++) {
-                if (!RT.equiv(nth(i), sv.nth(i))) return false;
+                if (!RT.equiv(nth(i), iv.nth(i))) return false;
             }
             return true;
         }
@@ -403,7 +399,8 @@ public final class PersistentVector extends Fn
             return true;
         }
         if (obj instanceof Seqable) {
-            if (obj instanceof Map<?, ?> || obj instanceof Set<?>) return false;
+            if (obj instanceof Map<?, ?> || obj instanceof Set<?>
+                    || obj instanceof IPersistentMap || obj instanceof IPersistentSet) return false;
             ISeq ms = RT.seq(obj);
             for (int i = 0; i < cnt; i++) {
                 if (ms == null || !RT.equiv(nth(i), ms.first())) return false;
@@ -412,6 +409,21 @@ public final class PersistentVector extends Fn
             return ms == null;
         }
         return false;
+    }
+
+    @Override
+    public int hasheq() {
+        if (!hasHasheq) {
+            int h = 1;
+            for (int i = 0; i < cnt; i++) {
+                h = 31 * h + RT.hash(nth(i));
+            }
+            int res = Murmur3.mixCollHash(h, cnt);
+            this.hasheq = res;
+            this.hasHasheq = true;
+            return res;
+        }
+        return this.hasheq;
     }
 
     @Override
@@ -501,6 +513,24 @@ public final class PersistentVector extends Fn
     }
 
     @Override
+    public Object reduce(Fn f) {
+        if (cnt == 0) return f.invoke();
+        Object acc = nth(0);
+        int i = 1;
+        while (i < cnt) {
+            Object[] arr = arrayFor(i);
+            int off = i & 0x1f;
+            int limit = Math.min(arr.length, off + (cnt - i));
+            for (int j = off; j < limit; j++) {
+                acc = f.invoke(acc, arr[j]);
+                if (acc instanceof Reduced r) return r.deref();
+            }
+            i += (limit - off);
+        }
+        return acc;
+    }
+
+    @Override
     public Object reduce(Fn f, Object init) {
         Object acc = init;
         int i = 0;
@@ -509,6 +539,22 @@ public final class PersistentVector extends Fn
             int limit = Math.min(arr.length, cnt - i);
             for (int j = 0; j < limit; j++) {
                 acc = f.invoke(acc, arr[j]);
+                if (acc instanceof Reduced r) return r.deref();
+            }
+            i += limit;
+        }
+        return acc;
+    }
+
+    @Override
+    public Object kvreduce(Fn f, Object init) {
+        Object acc = init;
+        int i = 0;
+        while (i < cnt) {
+            Object[] arr = arrayFor(i);
+            int limit = Math.min(arr.length, cnt - i);
+            for (int j = 0; j < limit; j++) {
+                acc = f.invoke(acc, (long) (i + j), arr[j]);
                 if (acc instanceof Reduced r) return r.deref();
             }
             i += limit;
@@ -641,13 +687,17 @@ public final class PersistentVector extends Fn
     }
 
     public static final class SubVec extends Fn
-            implements IPersistentVector, IObj, IReduceInit, PersistentColl, List<Object>, RandomAccess, Comparable<Object> {
+            implements IPersistentVector, IObj, IReduce, IKVReduce, IHashEq, PersistentColl,
+            List<Object>, RandomAccess, Comparable<Object>, java.io.Serializable {
+        private static final long serialVersionUID = 1L;
         public final PersistentVector v;
         public final int start;
         public final int end;
         private final PersistentHashMap meta;
         private int hash;
         private volatile boolean hasHash;
+        private int hasheq;
+        private volatile boolean hasHasheq;
 
         public SubVec(PersistentHashMap meta, PersistentVector v, int start, int end) {
             if (v instanceof PersistentVector pv) {
@@ -685,7 +735,7 @@ public final class PersistentVector extends Fn
         }
 
         @Override
-        public Object cons(Object x) {
+        public SubVec cons(Object x) {
             return conj(x);
         }
 
@@ -700,14 +750,14 @@ public final class PersistentVector extends Fn
         }
 
         @Override
-        public Object pop() {
+        public IPersistentVector pop() {
             if (end <= start) throw new IllegalStateException("Can't pop empty vector");
             if (end - 1 == start) return EMPTY.withMeta(meta);
             return new SubVec(meta, v, start, end - 1);
         }
 
         @Override
-        public Object empty() {
+        public PersistentVector empty() {
             return EMPTY.withMeta(meta);
         }
 
@@ -761,30 +811,39 @@ public final class PersistentVector extends Fn
         }
 
         @Override public ISeq seq() { return start < end ? new VecSeq(null, v, start, end) : null; }
+        @Override public Object reduce(Fn f) {
+            int cnt = count();
+            if (cnt == 0) return f.invoke();
+            Object acc = nth(0);
+            for (int i = 1; i < cnt; i++) {
+                acc = f.invoke(acc, nth(i));
+                if (acc instanceof Reduced r) return r.deref();
+            }
+            return acc;
+        }
         @Override public Object reduce(Fn f, Object init) {
             if (start >= end) return init;
             return new VecSeq(null, v, start, end).reduce(f, init);
         }
+        @Override public Object kvreduce(Fn f, Object init) {
+            Object acc = init;
+            int cnt = count();
+            for (int i = 0; i < cnt; i++) {
+                acc = f.invoke(acc, (long) i, nth(i));
+                if (acc instanceof Reduced r) return r.deref();
+            }
+            return acc;
+        }
         @Override public ISeq rseq() { return start < end ? new RVecSeq(null, v, end - 1, start) : null; }
 
         @Override public int compareTo(Object o) {
-            if (o instanceof PersistentVector pv) {
-                int c1 = count();
-                if (c1 < pv.cnt) return -1;
-                if (c1 > pv.cnt) return 1;
-                for (int i = 0; i < c1; i++) {
-                    int c = RT.compare(nth(i), pv.nth(i));
-                    if (c != 0) return c;
-                }
-                return 0;
-            }
-            SubVec sv = (SubVec) o;
+            IPersistentVector iv = (IPersistentVector) o;
             int c1 = count();
-            int c2 = sv.count();
+            int c2 = iv.count();
             if (c1 < c2) return -1;
             if (c1 > c2) return 1;
             for (int i = 0; i < c1; i++) {
-                int c = RT.compare(nth(i), sv.nth(i));
+                int c = RT.compare(nth(i), iv.nth(i));
                 if (c != 0) return c;
             }
             return 0;
@@ -793,14 +852,9 @@ public final class PersistentVector extends Fn
         @Override public boolean equals(Object obj) {
             if (this == obj) return true;
             int cnt = count();
-            if (obj instanceof PersistentVector pv) {
-                if (cnt != pv.cnt) return false;
-                for (int i = 0; i < cnt; i++) if (!RT.equiv(nth(i), pv.nth(i))) return false;
-                return true;
-            }
-            if (obj instanceof SubVec sv) {
-                if (cnt != sv.count()) return false;
-                for (int i = 0; i < cnt; i++) if (!RT.equiv(nth(i), sv.nth(i))) return false;
+            if (obj instanceof IPersistentVector iv) {
+                if (cnt != iv.count()) return false;
+                for (int i = 0; i < cnt; i++) if (!RT.equiv(nth(i), iv.nth(i))) return false;
                 return true;
             }
             if (obj instanceof List<?> list && !(obj instanceof Seqable)) {
@@ -810,7 +864,8 @@ public final class PersistentVector extends Fn
                 return true;
             }
             if (obj instanceof Seqable) {
-                if (obj instanceof PersistentHashMap || obj instanceof PersistentHashSet) return false;
+                if (obj instanceof Map<?, ?> || obj instanceof Set<?>
+                        || obj instanceof IPersistentMap || obj instanceof IPersistentSet) return false;
                 ISeq ms = RT.seq(obj);
                 for (int i = 0; i < cnt; i++) {
                     if (ms == null || !RT.equiv(nth(i), ms.first())) return false;
@@ -819,6 +874,19 @@ public final class PersistentVector extends Fn
                 return ms == null;
             }
             return false;
+        }
+
+        @Override public int hasheq() {
+            if (!hasHasheq) {
+                int h = 1;
+                int cnt = count();
+                for (int i = 0; i < cnt; i++) h = 31 * h + RT.hash(nth(i));
+                int res = Murmur3.mixCollHash(h, cnt);
+                this.hasheq = res;
+                this.hasHasheq = true;
+                return res;
+            }
+            return this.hasheq;
         }
 
         @Override public int hashCode() {

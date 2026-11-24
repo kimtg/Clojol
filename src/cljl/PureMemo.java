@@ -252,7 +252,7 @@ public final class PureMemo {
         }
 
         public Object get(Object k) {
-            if (!(k instanceof Long || k instanceof BigInteger)) return MISS_OBJ;
+            if (!(k instanceof Long || k instanceof cljl.lang.BigInt || k instanceof BigInteger)) return MISS_OBJ;
             int idx = mix1(k.hashCode()) & HASH_MASK;
             EntryObj1 e = table[idx];
             if (e != null && e.k.getClass() == k.getClass() && e.k.equals(k)) {
@@ -262,7 +262,7 @@ public final class PureMemo {
         }
 
         public Object put(Object k, Object v) {
-            if (k instanceof Long || k instanceof BigInteger) {
+            if (k instanceof Long || k instanceof cljl.lang.BigInt || k instanceof BigInteger) {
                 int idx = mix1(k.hashCode()) & HASH_MASK;
                 table[idx] = new EntryObj1(k, v);
             }

@@ -1,14 +1,20 @@
 package cljl;
 
+import cljl.lang.IHashEq;
 import cljl.lang.IObj;
+import cljl.lang.Murmur3;
 import cljl.lang.PersistentHashMap;
+import cljl.lang.Util;
+import java.io.Serializable;
 import java.util.Objects;
 
-public final class Symbol extends Fn implements IObj, cljl.lang.Named, Comparable<Symbol> {
+public final class Symbol extends Fn implements IObj, cljl.lang.Named, IHashEq, Comparable<Symbol>, Serializable {
+    private static final long serialVersionUID = 1L;
     public final String ns;
     public final String name;
     private final PersistentHashMap meta;
     private int hash;
+    private int hasheq;
     private String str;
 
     public Symbol(PersistentHashMap meta, String ns, String name) {
@@ -82,10 +88,22 @@ public final class Symbol extends Fn implements IObj, cljl.lang.Named, Comparabl
     }
 
     @Override
+    public int hasheq() {
+        int h = this.hasheq;
+        if (h == 0) {
+            h = Util.hashCombine(Murmur3.hashUnencodedChars(name),
+                    ns == null ? 0 : Murmur3.hashUnencodedChars(ns));
+            if (h == 0) h = 1;
+            this.hasheq = h;
+        }
+        return h;
+    }
+
+    @Override
     public int hashCode() {
         int h = this.hash;
         if (h == 0) {
-            h = 31 * Objects.hashCode(ns) + name.hashCode() + 0x9e3779b9;
+            h = Util.hashCombine(name.hashCode(), ns == null ? 0 : ns.hashCode());
             if (h == 0) h = 1;
             this.hash = h;
         }

@@ -4,6 +4,7 @@ import cljl.RT;
 import java.util.*;
 
 public final class PersistentList extends ASeq implements IPersistentList {
+    private static final long serialVersionUID = 1L;
     public final Object first;
     public final ISeq rest;
     public final int count;
@@ -78,16 +79,21 @@ public final class PersistentList extends ASeq implements IPersistentList {
         return new PersistentList(meta, first, rest, count);
     }
 
+    @Override
     public Object peek() {
         return first;
     }
 
-    public ISeq pop() {
+    @Override
+    public IPersistentList pop() {
         if (rest == null) return EMPTY.withMeta(meta);
-        return rest;
+        if (rest instanceof IPersistentList pl) return pl;
+        return EMPTY.withMeta(meta);
     }
 
     public static final class EmptyList extends ASeq implements IPersistentList {
+        private static final long serialVersionUID = 1L;
+
         public EmptyList(PersistentHashMap meta) {
             super(meta);
         }
@@ -110,8 +116,13 @@ public final class PersistentList extends ASeq implements IPersistentList {
             return new EmptyList(meta);
         }
 
-        public Object peek() { return null; }
-        public ISeq pop() { throw new IllegalStateException("Can't pop empty list"); }
+        @Override public Object peek() { return null; }
+        @Override public IPersistentList pop() { throw new IllegalStateException("Can't pop empty list"); }
+
+        @Override
+        public int hasheq() {
+            return Murmur3.mixCollHash(1, 0);
+        }
 
         @Override
         public int hashCode() {
@@ -122,7 +133,7 @@ public final class PersistentList extends ASeq implements IPersistentList {
         public boolean equals(Object obj) {
             if (this == obj) return true;
             if (!(obj instanceof Seqable || obj instanceof List<?>)) return false;
-            if (obj instanceof PersistentHashMap || obj instanceof PersistentHashSet
+            if (obj instanceof IPersistentMap || obj instanceof IPersistentSet
                     || obj instanceof Map<?, ?> || obj instanceof Set<?>) {
                 return false;
             }

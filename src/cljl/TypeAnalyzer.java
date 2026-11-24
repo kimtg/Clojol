@@ -1239,6 +1239,14 @@ public final class TypeAnalyzer {
             return record(n, sawBottom ? ValType.BOTTOM : last);
         }
         if (n instanceof LetNode ln) {
+            if (ln.isLetfn) {
+                for (int slot : ln.slots) {
+                    if (slotTypes[slot] != ValType.ANY) {
+                        slotTypes[slot] = ValType.ANY;
+                        changed = true;
+                    }
+                }
+            }
             for (int i = 0; i < ln.slots.length; i++) {
                 int slot = ln.slots[i];
                 Node init = ln.inits[i];
@@ -1363,7 +1371,7 @@ public final class TypeAnalyzer {
         }
         if (n instanceof MapNode mn) {
             for (Node e : mn.kvs) analyzeNode(e);
-            return record(n, ValType.ref(PersistentHashMap.class, true));
+            return record(n, ValType.ref(IPersistentMap.class, true));
         }
         if (n instanceof SetNode sn) {
             for (Node e : sn.elems) analyzeNode(e);
@@ -1372,7 +1380,7 @@ public final class TypeAnalyzer {
         if (n instanceof CaseNode cn) {
             analyzeNode(cn.expr);
             ValType joined = ValType.BOTTOM;
-            for (Node b : cn.table.values()) {
+            for (Node b : (cn.hashMode ? cn.bucketThens.values() : cn.table.values())) {
                 joined = ValType.join(joined, analyzeNode(b));
             }
             if (cn.hasDefault) {

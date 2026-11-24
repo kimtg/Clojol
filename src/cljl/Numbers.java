@@ -1,12 +1,13 @@
 package cljl;
 
+import cljl.lang.BigInt;
 import cljl.lang.Ratio;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.MathContext;
 
 /**
- * High-speed numeric tower for Clojol supporting Long, Double, BigInteger,
+ * High-speed numeric tower for Clojol supporting Long, Double, BigInt, BigInteger,
  * BigDecimal, and Ratio with fast-paths for 64-bit Long and Double.
  */
 public final class Numbers {
@@ -17,8 +18,14 @@ public final class Numbers {
         return o instanceof Number;
     }
 
+    /** Fixed-precision integers only (Long/Integer/Short/Byte) — matches Clojure's int?. */
+    public static boolean isInt(Object o) {
+        return o instanceof Long || o instanceof Integer || o instanceof Short || o instanceof Byte;
+    }
+
+    /** All integers including BigInt and BigInteger — matches Clojure's integer?. */
     public static boolean isInteger(Object o) {
-        return o instanceof Long || o instanceof Integer || o instanceof BigInteger
+        return o instanceof Long || o instanceof Integer || o instanceof BigInt || o instanceof BigInteger
                 || o instanceof Short || o instanceof Byte;
     }
 
@@ -49,6 +56,11 @@ public final class Numbers {
         if (o instanceof Character c) return (long) c;
         if (o instanceof Double d) return longCast(d.doubleValue());
         if (o instanceof Float f) return longCast((double) f.floatValue());
+        if (o instanceof BigInt bi) {
+            if (bi.bipart == null) return bi.lpart;
+            if (bi.bipart.bitLength() <= 63) return bi.bipart.longValue();
+            throw new IllegalArgumentException("Value out of range for long: " + o);
+        }
         if (o instanceof BigInteger bi) {
             if (bi.bitLength() <= 63) return bi.longValue();
             throw new IllegalArgumentException("Value out of range for long: " + o);
@@ -141,8 +153,27 @@ public final class Numbers {
         throw new ClassCastException("Cannot cast " + (o == null ? "nil" : o.getClass().getName()) + " to Number");
     }
 
+    public static BigInt toBigInt(Object o) {
+        if (o instanceof BigInt bi) return bi;
+        if (o instanceof BigInteger bi) return BigInt.fromBigInteger(bi);
+        if (o instanceof BigDecimal bd) return BigInt.fromBigInteger(bd.toBigInteger());
+        if (o instanceof Ratio r) return BigInt.fromBigInteger(r.numerator.divide(r.denominator));
+        if (o instanceof Double || o instanceof Float) {
+            return BigInt.fromBigInteger(BigDecimal.valueOf(((Number) o).doubleValue()).toBigInteger());
+        }
+        if (o instanceof Number n) return BigInt.fromLong(n.longValue());
+        if (o instanceof String s) return BigInt.fromBigInteger(new BigInteger(s));
+        throw new ClassCastException("Cannot convert to BigInt: " + o);
+    }
+
     public static BigInteger toBigInteger(Object o) {
         if (o instanceof BigInteger bi) return bi;
+        if (o instanceof BigInt bi) return bi.toBigInteger();
+        if (o instanceof BigDecimal bd) return bd.toBigInteger();
+        if (o instanceof Ratio r) return r.numerator.divide(r.denominator);
+        if (o instanceof Double || o instanceof Float) {
+            return BigDecimal.valueOf(((Number) o).doubleValue()).toBigInteger();
+        }
         if (o instanceof Number n) return BigInteger.valueOf(n.longValue());
         if (o instanceof String s) return new BigInteger(s);
         throw new ClassCastException("Cannot convert to BigInteger: " + o);
@@ -155,6 +186,7 @@ public final class Numbers {
 
     public static BigDecimal toBigDecimal(Object o) {
         if (o instanceof BigDecimal bd) return bd;
+        if (o instanceof BigInt bi) return bi.bipart == null ? BigDecimal.valueOf(bi.lpart) : new BigDecimal(bi.bipart);
         if (o instanceof BigInteger bi) return new BigDecimal(bi);
         if (o instanceof Ratio r) {
             MathContext mc = currentMathContext();
@@ -170,7 +202,7 @@ public final class Numbers {
         if (bi.bitLength() <= 63) {
             return bi.longValue();
         }
-        return bi;
+        return BigInt.fromBigInteger(bi);
     }
 
     public static Number add(Object x, Object y) {
@@ -209,8 +241,8 @@ public final class Numbers {
                     rx.numerator.multiply(ry.denominator).add(ry.numerator.multiply(rx.denominator)),
                     rx.denominator.multiply(ry.denominator));
         }
-        if (x instanceof BigInteger || y instanceof BigInteger) {
-            return toBigInteger(x).add(toBigInteger(y));
+        if (x instanceof BigInt || y instanceof BigInt || x instanceof BigInteger || y instanceof BigInteger) {
+            return BigInt.fromBigInteger(toBigInteger(x).add(toBigInteger(y)));
         }
         return Math.addExact(toLong(x), toLong(y));
     }
@@ -231,7 +263,7 @@ public final class Numbers {
             try {
                 return Math.addExact(lx, ly);
             } catch (ArithmeticException e) {
-                return BigInteger.valueOf(lx).add(BigInteger.valueOf(ly));
+                return BigInt.fromBigInteger(BigInteger.valueOf(lx).add(BigInteger.valueOf(ly)));
             }
         }
         return add(x, y);
@@ -244,7 +276,8 @@ public final class Numbers {
         if (x instanceof Integer || x instanceof Short || x instanceof Byte) {
             return Math.negateExact(((Number) x).longValue());
         }
-        if (x instanceof BigInteger bi) return bi.negate();
+        if (x instanceof BigInt bi) return BigInt.fromBigInteger(bi.toBigInteger().negate());
+        if (x instanceof BigInteger bi) return BigInt.fromBigInteger(bi.negate());
         if (x instanceof BigDecimal bd) {
             MathContext mc = currentMathContext();
             return mc != null ? bd.negate(mc) : bd.negate();
@@ -255,7 +288,7 @@ public final class Numbers {
 
     public static Number minusP(Object x) {
         if (x instanceof Long lx) {
-            if (lx == Long.MIN_VALUE) return BigInteger.valueOf(lx).negate();
+            if (lx == Long.MIN_VALUE) return BigInt.fromBigInteger(BigInteger.valueOf(lx).negate());
             return -lx;
         }
         return minus(x);
@@ -297,8 +330,8 @@ public final class Numbers {
                     rx.numerator.multiply(ry.denominator).subtract(ry.numerator.multiply(rx.denominator)),
                     rx.denominator.multiply(ry.denominator));
         }
-        if (x instanceof BigInteger || y instanceof BigInteger) {
-            return toBigInteger(x).subtract(toBigInteger(y));
+        if (x instanceof BigInt || y instanceof BigInt || x instanceof BigInteger || y instanceof BigInteger) {
+            return BigInt.fromBigInteger(toBigInteger(x).subtract(toBigInteger(y)));
         }
         return Math.subtractExact(toLong(x), toLong(y));
     }
@@ -310,7 +343,7 @@ public final class Numbers {
             try {
                 return Math.subtractExact(lx, ly);
             } catch (ArithmeticException e) {
-                return BigInteger.valueOf(lx).subtract(BigInteger.valueOf(ly));
+                return BigInt.fromBigInteger(BigInteger.valueOf(lx).subtract(BigInteger.valueOf(ly)));
             }
         }
         return minus(x, y);
@@ -350,8 +383,8 @@ public final class Numbers {
             Ratio ry = toRatio(y);
             return Ratio.create(rx.numerator.multiply(ry.numerator), rx.denominator.multiply(ry.denominator));
         }
-        if (x instanceof BigInteger || y instanceof BigInteger) {
-            return toBigInteger(x).multiply(toBigInteger(y));
+        if (x instanceof BigInt || y instanceof BigInt || x instanceof BigInteger || y instanceof BigInteger) {
+            return BigInt.fromBigInteger(toBigInteger(x).multiply(toBigInteger(y)));
         }
         return Math.multiplyExact(toLong(x), toLong(y));
     }
@@ -363,14 +396,13 @@ public final class Numbers {
             try {
                 return Math.multiplyExact(lx, ly);
             } catch (ArithmeticException e) {
-                return BigInteger.valueOf(lx).multiply(BigInteger.valueOf(ly));
+                return BigInt.fromBigInteger(BigInteger.valueOf(lx).multiply(BigInteger.valueOf(ly)));
             }
         }
         return multiply(x, y);
     }
 
     public static double divideChecked(double x, double y) {
-        if (y == 0.0) throw new ArithmeticException("Divide by zero");
         return x / y;
     }
 
@@ -384,9 +416,7 @@ public final class Numbers {
 
     public static Number divide(Object x, Object y) {
         if (x instanceof Double || y instanceof Double || x instanceof Float || y instanceof Float) {
-            double dy = toDouble(y);
-            if (dy == 0.0) throw new ArithmeticException("Divide by zero");
-            return toDouble(x) / dy;
+            return toDouble(x) / toDouble(y);
         }
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
             BigDecimal bdy = toBigDecimal(y);
@@ -395,11 +425,7 @@ public final class Numbers {
             if (mc != null) {
                 return toBigDecimal(x).divide(bdy, mc);
             }
-            try {
-                return toBigDecimal(x).divide(bdy);
-            } catch (ArithmeticException e) {
-                return toBigDecimal(x).divide(bdy, MathContext.DECIMAL128);
-            }
+            return toBigDecimal(x).divide(bdy);
         }
         if (x instanceof Long lx && y instanceof Long ly) {
             if (ly == 0) throw new ArithmeticException("Divide by zero");
@@ -414,7 +440,7 @@ public final class Numbers {
             if (ry.numerator.equals(BigInteger.ZERO)) throw new ArithmeticException("Divide by zero");
             return Ratio.create(rx.numerator.multiply(ry.denominator), rx.denominator.multiply(ry.numerator));
         }
-        if (x instanceof BigInteger || y instanceof BigInteger) {
+        if (x instanceof BigInt || y instanceof BigInt || x instanceof BigInteger || y instanceof BigInteger) {
             return Ratio.create(toBigInteger(x), toBigInteger(y));
         }
         return Ratio.create(toLong(x), toLong(y));
@@ -431,7 +457,10 @@ public final class Numbers {
             return tr == 0.0 ? 0.0 : tr;
         }
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
-            return toBigDecimal(x).divideToIntegralValue(toBigDecimal(y));
+            MathContext mc = currentMathContext();
+            return mc != null
+                    ? toBigDecimal(x).divideToIntegralValue(toBigDecimal(y), mc)
+                    : toBigDecimal(x).divideToIntegralValue(toBigDecimal(y));
         }
         if (x instanceof Ratio || y instanceof Ratio) {
             Ratio rx = toRatio(x);
@@ -440,10 +469,10 @@ public final class Numbers {
             BigInteger q = rx.numerator.multiply(ry.denominator).divide(rx.denominator.multiply(ry.numerator));
             return reduceBigInt(q);
         }
-        if (x instanceof BigInteger || y instanceof BigInteger) {
+        if (x instanceof BigInt || y instanceof BigInt || x instanceof BigInteger || y instanceof BigInteger) {
             BigInteger by = toBigInteger(y);
             if (by.signum() == 0) throw new ArithmeticException("Divide by zero");
-            return reduceBigInt(toBigInteger(x).divide(by));
+            return BigInt.fromBigInteger(toBigInteger(x).divide(by));
         }
         return toLong(x) / toLong(y);
     }
@@ -456,14 +485,17 @@ public final class Numbers {
             return toDouble(x) % toDouble(y);
         }
         if (x instanceof BigDecimal || y instanceof BigDecimal) {
-            return toBigDecimal(x).remainder(toBigDecimal(y));
+            MathContext mc = currentMathContext();
+            return mc != null
+                    ? toBigDecimal(x).remainder(toBigDecimal(y), mc)
+                    : toBigDecimal(x).remainder(toBigDecimal(y));
         }
         if (x instanceof Ratio || y instanceof Ratio) {
             Number q = quotient(x, y);
             return minus(x, multiply(q, y));
         }
-        if (x instanceof BigInteger || y instanceof BigInteger) {
-            return reduceBigInt(toBigInteger(x).remainder(toBigInteger(y)));
+        if (x instanceof BigInt || y instanceof BigInt || x instanceof BigInteger || y instanceof BigInteger) {
+            return BigInt.fromBigInteger(toBigInteger(x).remainder(toBigInteger(y)));
         }
         return toLong(x) % toLong(y);
     }
@@ -496,7 +528,7 @@ public final class Numbers {
 
     public static Number incP(Object x) {
         if (x instanceof Long lx) {
-            if (lx == Long.MAX_VALUE) return BigInteger.valueOf(lx).add(BigInteger.ONE);
+            if (lx == Long.MAX_VALUE) return BigInt.fromBigInteger(BigInteger.valueOf(lx).add(BigInteger.ONE));
             return lx + 1L;
         }
         return addP(x, 1L);
@@ -509,7 +541,7 @@ public final class Numbers {
 
     public static Number decP(Object x) {
         if (x instanceof Long lx) {
-            if (lx == Long.MIN_VALUE) return BigInteger.valueOf(lx).subtract(BigInteger.ONE);
+            if (lx == Long.MIN_VALUE) return BigInt.fromBigInteger(BigInteger.valueOf(lx).subtract(BigInteger.ONE));
             return lx - 1L;
         }
         return minusP(x, 1L);
@@ -521,6 +553,7 @@ public final class Numbers {
         if (x instanceof Float fx) return Math.abs(fx);
         if (x instanceof Integer ix) return Math.abs((long) ix);
         if (x instanceof Short || x instanceof Byte) return Math.abs(toLong(x));
+        if (x instanceof BigInt bi) return BigInt.fromBigInteger(bi.toBigInteger().abs());
         if (x instanceof BigInteger bi) return bi.abs();
         if (x instanceof BigDecimal bd) return bd.abs();
         if (x instanceof Ratio r) return isNeg(r) ? minus(r) : r;
@@ -532,6 +565,7 @@ public final class Numbers {
         if (x instanceof Double dx) return dx == 0.0;
         if (x instanceof Float fx) return fx == 0.0f;
         if (x instanceof Integer || x instanceof Short || x instanceof Byte) return ((Number) x).longValue() == 0L;
+        if (x instanceof BigInt bi) return bi.bipart == null ? bi.lpart == 0L : bi.bipart.signum() == 0;
         if (x instanceof BigInteger bi) return bi.signum() == 0;
         if (x instanceof BigDecimal bd) return bd.signum() == 0;
         if (x instanceof Ratio r) return r.numerator.signum() == 0;
@@ -543,6 +577,7 @@ public final class Numbers {
         if (x instanceof Double dx) return dx > 0.0;
         if (x instanceof Float fx) return fx > 0.0f;
         if (x instanceof Integer || x instanceof Short || x instanceof Byte) return ((Number) x).longValue() > 0L;
+        if (x instanceof BigInt bi) return bi.bipart == null ? bi.lpart > 0L : bi.bipart.signum() > 0;
         if (x instanceof BigInteger bi) return bi.signum() > 0;
         if (x instanceof BigDecimal bd) return bd.signum() > 0;
         if (x instanceof Ratio r) return r.numerator.signum() > 0;
@@ -554,6 +589,7 @@ public final class Numbers {
         if (x instanceof Double dx) return dx < 0.0;
         if (x instanceof Float fx) return fx < 0.0f;
         if (x instanceof Integer || x instanceof Short || x instanceof Byte) return ((Number) x).longValue() < 0L;
+        if (x instanceof BigInt bi) return bi.bipart == null ? bi.lpart < 0L : bi.bipart.signum() < 0;
         if (x instanceof BigInteger bi) return bi.signum() < 0;
         if (x instanceof BigDecimal bd) return bd.signum() < 0;
         if (x instanceof Ratio r) return r.numerator.signum() < 0;
@@ -735,7 +771,7 @@ public final class Numbers {
     public static boolean equiv(Number x, Number y) {
         if (x instanceof Long lx && y instanceof Long ly) return lx.longValue() == ly.longValue();
         if (isInteger(x) && isInteger(y)) {
-            if (x instanceof BigInteger || y instanceof BigInteger) {
+            if (x instanceof BigInt || y instanceof BigInt || x instanceof BigInteger || y instanceof BigInteger) {
                 return toBigInteger(x).equals(toBigInteger(y));
             }
             return x.longValue() == y.longValue();
@@ -777,6 +813,7 @@ public final class Numbers {
 
     private static BigDecimal toBigDecimalExact(Number n) {
         if (n instanceof BigDecimal bd) return bd;
+        if (n instanceof BigInt bi) return bi.bipart == null ? BigDecimal.valueOf(bi.lpart) : new BigDecimal(bi.bipart);
         if (n instanceof BigInteger bi) return new BigDecimal(bi);
         if (n instanceof Double || n instanceof Float) return new BigDecimal(n.doubleValue());
         return BigDecimal.valueOf(n.longValue());
@@ -809,7 +846,7 @@ public final class Numbers {
         if (x instanceof Ratio || y instanceof Ratio) {
             return toRatio(x).compareTo(toRatio(y));
         }
-        if (x instanceof BigInteger || y instanceof BigInteger) {
+        if (x instanceof BigInt || y instanceof BigInt || x instanceof BigInteger || y instanceof BigInteger) {
             return toBigInteger(x).compareTo(toBigInteger(y));
         }
         return Long.compare(x.longValue(), y.longValue());
@@ -829,6 +866,7 @@ public final class Numbers {
 
     private static Ratio toRatio(Object x) {
         if (x instanceof Ratio r) return r;
+        if (x instanceof BigInt bi) return new Ratio(bi.toBigInteger(), BigInteger.ONE);
         if (x instanceof BigInteger bi) return new Ratio(bi, BigInteger.ONE);
         return new Ratio(BigInteger.valueOf(toLong(x)), BigInteger.ONE);
     }

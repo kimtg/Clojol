@@ -405,7 +405,7 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
         callArgs[0] = meta();
         int i = 1;
         for (ISeq s = args; s != null; s = s.next()) callArgs[i++] = s.first();
-        return resetMeta((PersistentHashMap) alter.applyTo(callArgs));
+        return resetMeta(PersistentHashMap.fromMap(alter.applyTo(callArgs)));
     }
 
     public void addWatch(Object key, Fn callback) {

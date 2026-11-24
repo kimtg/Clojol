@@ -33,6 +33,19 @@ public final class Reader {
     private static final Symbol VECTOR = Symbol.intern("clojure.core", "vector");
     private static final Symbol HASH_MAP = Symbol.intern("clojure.core", "hash-map");
     private static final Symbol HASH_SET = Symbol.intern("clojure.core", "hash-set");
+    private static final Symbol WITH_META = Symbol.intern("clojure.core", "with-meta");
+    private static final Keyword LINE_KW = Keyword.intern("line");
+    private static final Keyword COLUMN_KW = Keyword.intern("column");
+    private static final Keyword END_LINE_KW = Keyword.intern("end-line");
+    private static final Keyword END_COLUMN_KW = Keyword.intern("end-column");
+
+    /** Clojure 1.12 LispReader.Resolver interface for *reader-resolver*. */
+    public interface Resolver {
+        Symbol currentNS();
+        Symbol resolveClass(Symbol sym);
+        Symbol resolveAlias(Symbol sym);
+        Symbol resolveVar(Symbol sym);
+    }
 
     private static final class NumberPatterns {
         static final Pattern INT_PAT = Pattern.compile(
@@ -411,9 +424,10 @@ public final class Reader {
             return eofValue;
         }
         int startLine = line;
+        int startCol = col;
         int c = readChar();
         return switch (c) {
-            case '(' -> readList(startLine);
+            case '(' -> readList(startLine, startCol);
             case '[' -> readVector();
             case '{' -> readMap();
             case ')', ']', '}' -> throw readerError("Unmatched delimiter: " + (char) c);
@@ -461,11 +475,17 @@ public final class Reader {
         };
     }
 
-    private Object readList(int startLine) {
+    private Object readList(int startLine, int startCol) {
         List<Object> items = readDelimited(')');
+        int endLine = line;
+        int endCol = col;
         ISeq list = PersistentList.create(items);
         if (list instanceof PersistentList pl) {
-            PersistentHashMap meta = PersistentHashMap.EMPTY.assoc(Keyword.intern("line"), (long) startLine);
+            PersistentHashMap meta = PersistentHashMap.EMPTY
+                    .assoc(LINE_KW, (long) startLine)
+                    .assoc(COLUMN_KW, (long) startCol)
+                    .assoc(END_LINE_KW, (long) endLine)
+                    .assoc(END_COLUMN_KW, (long) endCol);
             return pl.withMeta(meta);
         }
         return list;
@@ -481,12 +501,12 @@ public final class Reader {
         if ((items.size() & 1) != 0) {
             throw readerError("Map literal must contain an even number of forms");
         }
-        return PersistentHashMap.create(items.toArray());
+        return RT.mapUniqueKeys(items.toArray());
     }
 
     private Object readSet() {
         List<Object> items = readDelimited('}');
-        return PersistentHashSet.createFromColl(items);
+        return PersistentHashSet.createWithCheck(items);
     }
 
     private List<Object> readDelimited(char endChar) {
@@ -593,8 +613,8 @@ public final class Reader {
             metaMap = PersistentHashMap.EMPTY.assoc(Keyword.intern("tag"), metaVal);
         } else if (metaVal instanceof Keyword kw) {
             metaMap = PersistentHashMap.EMPTY.assoc(kw, Boolean.TRUE);
-        } else if (metaVal instanceof PersistentHashMap m) {
-            metaMap = m;
+        } else if (metaVal instanceof IPersistentMap m) {
+            metaMap = PersistentHashMap.fromMap(m);
         } else if (metaVal instanceof PersistentVector v) {
             metaMap = PersistentHashMap.EMPTY.assoc(Keyword.intern("param-tags"), v);
         } else {
@@ -605,8 +625,8 @@ public final class Reader {
             PersistentHashMap existing = io.meta();
             if (existing != null) {
                 for (ISeq s = metaMap.seq(); s != null; s = s.next()) {
-                    PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
-                    existing = existing.assoc(me.key, me.val);
+                    Map.Entry<?, ?> me = (Map.Entry<?, ?>) s.first();
+                    existing = existing.assoc(me.getKey(), me.getValue());
                 }
                 return io.withMeta(existing);
             }
@@ -648,7 +668,10 @@ public final class Reader {
                 yield readConditional();
             }
             case ':' -> readNamespacedMap();
-            case '#' -> readSymbolicValue();
+            case '#' -> {
+                if (ednMode) throw readerError("No EDN dispatch macro for: #");
+                yield readSymbolicValue();
+            }
             case '=' -> {
                 if (ednMode) throw readerError("No EDN dispatch macro for: =");
                 yield readEval();
@@ -715,6 +738,19 @@ public final class Reader {
         }
         if (readerFn instanceof Fn f) {
             return f.invoke(form);
+        }
+        // Record/type constructor literals: #pkg.Record{:a 1} and #pkg.Record[1 2]
+        if (tag.ns == null && tag.name.indexOf('.') >= 0) {
+            Class<?> cls = Interop.resolveClass(RT.currentNS(), tag.name);
+            if (cls != null) {
+                if (form instanceof IPersistentMap m) {
+                    return Interop.invokeStaticMethod(cls, "create", new Object[]{m});
+                }
+                if (form instanceof PersistentVector v) {
+                    return Interop.invokeConstructor(cls, v.toArray());
+                }
+                throw readerError("Unreadable constructor form starting with \"#" + tag + "\"");
+            }
         }
         Object defFn = RT.DEFAULT_DATA_READER_FN.get();
         if (defFn instanceof Fn f) {
@@ -862,13 +898,27 @@ public final class Reader {
     private Object readNamespacedMap() {
         String nsStr;
         if (peek() == ':') {
+            if (ednMode) throw readerError("Auto-resolved namespace map not allowed in EDN");
             readChar();
+            Object resolverObj = RT.READER_RESOLVER.get();
             if (peek() == '{') {
-                nsStr = RT.currentNS().name.name;
+                if (resolverObj instanceof Resolver res) {
+                    Symbol cns = res.currentNS();
+                    nsStr = cns != null ? cns.name : RT.currentNS().name.name;
+                } else {
+                    nsStr = RT.currentNS().name.name;
+                }
             } else {
                 String aliasName = readRawToken((char) readChar());
-                Namespace aliased = RT.currentNS().lookupAlias(Symbol.intern(aliasName));
-                nsStr = aliased != null ? aliased.name.name : aliasName;
+                if (resolverObj instanceof Resolver res) {
+                    Symbol resolved = res.resolveAlias(Symbol.intern(aliasName));
+                    if (resolved == null) throw readerError("Invalid alias: " + aliasName);
+                    nsStr = resolved.name;
+                } else {
+                    Namespace aliased = RT.currentNS().lookupAlias(Symbol.intern(aliasName));
+                    if (aliased == null) throw readerError("Invalid alias: " + aliasName);
+                    nsStr = aliased.name.name;
+                }
             }
         } else {
             nsStr = readRawToken((char) readChar());
@@ -897,7 +947,7 @@ public final class Reader {
             out[i] = k;
             out[i + 1] = v;
         }
-        return PersistentHashMap.create(out);
+        return RT.mapUniqueKeys(out);
     }
 
     private Object readSyntaxQuote() {
@@ -923,36 +973,44 @@ public final class Reader {
         if (isUnquoteSplicing(form)) {
             throw readerError("unquote-splicing (~@) not in list");
         }
+        Object ret;
         if (form instanceof Symbol sym) {
             Symbol resolved = resolveSyntaxQuoteSymbol(sym);
-            return PersistentList.createFromArray(QUOTE, resolved);
-        }
-        if (form instanceof PersistentVector pv) {
-            return PersistentList.createFromArray(APPLY, VECTOR,
+            ret = PersistentList.createFromArray(QUOTE, resolved);
+        } else if (form instanceof PersistentVector pv) {
+            ret = PersistentList.createFromArray(APPLY, VECTOR,
                     PersistentList.createFromArray(SEQ, RT.cons(CONCAT, sqExpandList(pv.seq()))));
-        }
-        if (form instanceof PersistentHashMap pm) {
+        } else if (form instanceof IPersistentMap pm) {
             List<Object> flat = new ArrayList<>();
             for (ISeq s = pm.seq(); s != null; s = s.next()) {
-                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
-                flat.add(me.key);
-                flat.add(me.val);
+                Map.Entry<?, ?> me = (Map.Entry<?, ?>) s.first();
+                flat.add(me.getKey());
+                flat.add(me.getValue());
             }
-            return PersistentList.createFromArray(APPLY, HASH_MAP,
+            ret = PersistentList.createFromArray(APPLY, HASH_MAP,
                     PersistentList.createFromArray(SEQ, RT.cons(CONCAT, sqExpandList(PersistentList.create(flat)))));
-        }
-        if (form instanceof PersistentHashSet ps) {
-            return PersistentList.createFromArray(APPLY, HASH_SET,
+        } else if (form instanceof PersistentHashSet ps) {
+            ret = PersistentList.createFromArray(APPLY, HASH_SET,
                     PersistentList.createFromArray(SEQ, RT.cons(CONCAT, sqExpandList(ps.seq()))));
-        }
-        if (form instanceof ISeq || form instanceof List<?>) {
+        } else if (form instanceof ISeq || form instanceof List<?>) {
             ISeq seq = RT.seq(form);
             if (seq == null) {
-                return PersistentList.createFromArray(LIST);
+                ret = PersistentList.createFromArray(LIST);
+            } else {
+                ret = PersistentList.createFromArray(SEQ, RT.cons(CONCAT, sqExpandList(seq)));
             }
-            return PersistentList.createFromArray(SEQ, RT.cons(CONCAT, sqExpandList(seq)));
+        } else {
+            ret = PersistentList.createFromArray(QUOTE, form);
         }
-        return PersistentList.createFromArray(QUOTE, form);
+        if (form instanceof IObj io && io.meta() != null) {
+            PersistentHashMap m = io.meta()
+                    .without(LINE_KW).without(COLUMN_KW)
+                    .without(END_LINE_KW).without(END_COLUMN_KW);
+            if (m.count() > 0) {
+                return PersistentList.createFromArray(WITH_META, ret, syntaxQuote(m));
+            }
+        }
+        return ret;
     }
 
     private ISeq sqExpandList(ISeq seq) {
@@ -986,6 +1044,29 @@ public final class Reader {
         }
         if (sym.ns == null && (sym.name.startsWith(".") || sym.name.equals("&"))) {
             return sym;
+        }
+        Object resolverObj = RT.READER_RESOLVER.get();
+        if (resolverObj instanceof Resolver res) {
+            if (sym.ns == null && sym.name.endsWith(".") && sym.name.length() > 1) {
+                Symbol baseSym = Symbol.intern(sym.name.substring(0, sym.name.length() - 1));
+                Symbol rc = res.resolveClass(baseSym);
+                return rc != null ? Symbol.intern(null, rc.name + ".") : sym;
+            }
+            if (sym.ns != null) {
+                Symbol nsSym = Symbol.intern(sym.ns);
+                Symbol alias = res.resolveAlias(nsSym);
+                if (alias != null) return Symbol.intern(alias.name, sym.name);
+                Symbol cls = res.resolveClass(nsSym);
+                if (cls != null) return Symbol.intern(cls.name, sym.name);
+                return sym;
+            }
+            Symbol cls = res.resolveClass(sym);
+            if (cls != null) return cls;
+            Symbol varSym = res.resolveVar(sym);
+            if (varSym != null) return varSym;
+            if (sym.name.indexOf('.') >= 0) return sym;
+            Symbol cns = res.currentNS();
+            return Symbol.intern(cns != null ? cns.name : RT.currentNS().name.name, sym.name);
         }
         Namespace cur = RT.currentNS();
         if (sym.ns == null && sym.name.endsWith(".") && sym.name.length() > 1) {
@@ -1091,7 +1172,7 @@ public final class Reader {
         Matcher m = NumberPatterns.INT_PAT.matcher(s);
         if (m.matches()) {
             if (m.group(2) != null) {
-                if (m.group(9) != null) return BigInteger.ZERO;
+                if (m.group(9) != null) return BigInt.ZERO;
                 return 0L;
             }
             boolean negate = "-".equals(m.group(1));
@@ -1106,8 +1187,8 @@ public final class Reader {
             if (n == null) return null;
             BigInteger bn = new BigInteger(n, radix);
             if (negate) bn = bn.negate();
-            if (m.group(9) != null) return bn;
-            return bn.bitLength() <= 63 ? bn.longValue() : bn;
+            if (m.group(9) != null) return BigInt.fromBigInteger(bn);
+            return bn.bitLength() <= 63 ? bn.longValue() : BigInt.fromBigInteger(bn);
         }
         m = NumberPatterns.FLOAT_PAT.matcher(s);
         if (m.matches()) {
@@ -1147,16 +1228,27 @@ public final class Reader {
 
         if (s.startsWith(":")) {
             if (s.startsWith("::")) {
+                if (ednMode) throw readerError("Invalid EDN token: " + s);
                 String k = s.substring(2);
                 int slash = k.indexOf('/');
+                Object resolverObj = RT.READER_RESOLVER.get();
                 if (slash == -1) {
+                    if (resolverObj instanceof Resolver res) {
+                        Symbol cns = res.currentNS();
+                        return Keyword.intern(cns != null ? cns.name : RT.currentNS().name.name, k);
+                    }
                     return Keyword.intern(RT.currentNS().name.name, k);
                 } else {
                     String alias = k.substring(0, slash);
                     String name = k.substring(slash + 1);
+                    if (resolverObj instanceof Resolver res) {
+                        Symbol resolved = res.resolveAlias(Symbol.intern(alias));
+                        if (resolved == null) throw readerError("Invalid token: " + s);
+                        return Keyword.intern(resolved.name, name);
+                    }
                     Namespace aliasedNs = RT.currentNS().lookupAlias(Symbol.intern(alias));
-                    String targetNs = aliasedNs != null ? aliasedNs.name.name : alias;
-                    return Keyword.intern(targetNs, name);
+                    if (aliasedNs == null) throw readerError("Invalid token: " + s);
+                    return Keyword.intern(aliasedNs.name.name, name);
                 }
             }
             return Keyword.intern(s.substring(1));
@@ -1170,6 +1262,7 @@ public final class Reader {
                 int idx = Integer.parseInt(s.substring(1));
                 if (idx >= 1) return env.getArg(idx);
             } catch (NumberFormatException ignored) {}
+            throw readerError("arg literal must be %, %& or %integer: " + s);
         }
 
         return Symbol.intern(s);

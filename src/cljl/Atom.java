@@ -748,7 +748,7 @@ public final class Atom implements IRef, IMeta, IReference {
         callArgs[0] = this.meta;
         int i = 1;
         for (ISeq s = args; s != null; s = s.next()) callArgs[i++] = s.first();
-        this.meta = (PersistentHashMap) alter.applyTo(callArgs);
+        this.meta = PersistentHashMap.fromMap(alter.applyTo(callArgs));
         return this.meta;
     }
 

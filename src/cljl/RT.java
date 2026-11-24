@@ -110,10 +110,10 @@ public final class RT {
                     try (InputStream is = url.openStream()) {
                         String content = new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
                         Object form = Reader.readString(content);
-                        if (form instanceof PersistentHashMap pm) {
+                        if (form instanceof IPersistentMap pm) {
                             for (ISeq s = pm.seq(); s != null; s = s.next()) {
-                                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
-                                if (me.key instanceof Symbol tagSym && me.val instanceof Symbol fnSym) {
+                                Map.Entry<?, ?> me = (Map.Entry<?, ?>) s.first();
+                                if (me.getKey() instanceof Symbol tagSym && me.getValue() instanceof Symbol fnSym) {
                                     merged = merged.assoc(tagSym, fnSym);
                                 }
                             }
@@ -242,11 +242,11 @@ public final class RT {
 
     public static int hash(Object o) {
         if (o == null) return 0;
-        if (o instanceof Keyword kw) return kw.hash;
-        if (o instanceof String s) return s.hashCode();
-        if (o instanceof Long l) return Long.hashCode(l);
+        if (o instanceof IHashEq ih) return ih.hasheq();
+        if (o instanceof String s) return Murmur3.hashUnencodedChars(s);
+        if (o instanceof Long l) return Murmur3.hashLong(l);
         if (o instanceof Integer || o instanceof Short || o instanceof Byte) {
-            return Long.hashCode(((Number) o).longValue());
+            return Murmur3.hashLong(((Number) o).longValue());
         }
         if (o instanceof Double d) {
             if (d == 0.0) return 0;
@@ -256,12 +256,15 @@ public final class RT {
             if (f == 0.0f) return 0;
             return Double.hashCode(f.doubleValue());
         }
+        if (o instanceof Character c) {
+            return Murmur3.hashInt(c);
+        }
         if (o instanceof BigInteger bi) {
-            if (bi.bitLength() <= 63) return Long.hashCode(bi.longValue());
+            if (bi.bitLength() <= 63) return Murmur3.hashLong(bi.longValue());
             return bi.hashCode();
         }
         if (o instanceof BigDecimal bd) {
-            return bd.stripTrailingZeros().hashCode();
+            return bd.hashCode();
         }
         return o.hashCode();
     }
@@ -466,18 +469,15 @@ public final class RT {
         if (coll instanceof PersistentVector.SubVec sv) return sv.conj(x);
         if (coll instanceof PersistentList l) return l.cons(x);
         if (coll instanceof PersistentList.EmptyList l) return l.cons(x);
+        if (coll instanceof PersistentArrayMap am) return am.cons(x);
         if (coll instanceof PersistentHashMap m) {
             if (x == null) return m;
             if (x instanceof Map.Entry<?, ?> e) {
                 return m.assoc(e.getKey(), e.getValue());
             }
-            if (x instanceof PersistentVector v) {
+            if (x instanceof IPersistentVector v) {
                 if (v.count() != 2) throw new IllegalArgumentException("Vector arg to map conj must be a pair");
                 return m.assoc(v.nth(0), v.nth(1));
-            }
-            if (x instanceof PersistentVector.SubVec sv) {
-                if (sv.count() != 2) throw new IllegalArgumentException("Vector arg to map conj must be a pair");
-                return m.assoc(sv.nth(0), sv.nth(1));
             }
             if (x instanceof Seqable || x instanceof Map<?, ?>) {
                 PersistentHashMap ret = m;
@@ -485,10 +485,8 @@ public final class RT {
                     Object elem = s.first();
                     if (elem instanceof Map.Entry<?, ?> e) {
                         ret = ret.assoc(e.getKey(), e.getValue());
-                    } else if (elem instanceof PersistentVector v && v.count() == 2) {
+                    } else if (elem instanceof IPersistentVector v && v.count() == 2) {
                         ret = ret.assoc(v.nth(0), v.nth(1));
-                    } else if (elem instanceof PersistentVector.SubVec sv && sv.count() == 2) {
-                        ret = ret.assoc(sv.nth(0), sv.nth(1));
                     } else {
                         throw new IllegalArgumentException("Cannot conj " + elem + " onto map");
                     }
@@ -502,15 +500,13 @@ public final class RT {
         if (coll instanceof PersistentTreeMap m) {
             if (x == null) return m;
             if (x instanceof Map.Entry<?, ?> e) return m.assoc(e.getKey(), e.getValue());
-            if (x instanceof PersistentVector v && v.count() == 2) return m.assoc(v.nth(0), v.nth(1));
-            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return m.assoc(sv.nth(0), sv.nth(1));
+            if (x instanceof IPersistentVector v && v.count() == 2) return m.assoc(v.nth(0), v.nth(1));
             if (x instanceof Seqable || x instanceof Map<?, ?>) {
                 PersistentTreeMap ret = m;
                 for (ISeq s = seq(x); s != null; s = s.next()) {
                     Object elem = s.first();
                     if (elem instanceof Map.Entry<?, ?> e) ret = ret.assoc(e.getKey(), e.getValue());
-                    else if (elem instanceof PersistentVector v && v.count() == 2) ret = ret.assoc(v.nth(0), v.nth(1));
-                    else if (elem instanceof PersistentVector.SubVec sv && sv.count() == 2) ret = ret.assoc(sv.nth(0), sv.nth(1));
+                    else if (elem instanceof IPersistentVector v && v.count() == 2) ret = ret.assoc(v.nth(0), v.nth(1));
                     else throw new IllegalArgumentException("Cannot conj " + elem + " onto map");
                 }
                 return ret;
@@ -520,15 +516,13 @@ public final class RT {
         if (coll instanceof PersistentRecord rec) {
             if (x == null) return rec;
             if (x instanceof Map.Entry<?, ?> e) return rec.assoc(e.getKey(), e.getValue());
-            if (x instanceof PersistentVector v && v.count() == 2) return rec.assoc(v.nth(0), v.nth(1));
-            if (x instanceof PersistentVector.SubVec sv && sv.count() == 2) return rec.assoc(sv.nth(0), sv.nth(1));
+            if (x instanceof IPersistentVector v && v.count() == 2) return rec.assoc(v.nth(0), v.nth(1));
             if (x instanceof Seqable || x instanceof Map<?, ?>) {
                 Associative ret = rec;
                 for (ISeq s = seq(x); s != null; s = s.next()) {
                     Object elem = s.first();
                     if (elem instanceof Map.Entry<?, ?> e) ret = ret.assoc(e.getKey(), e.getValue());
-                    else if (elem instanceof PersistentVector v && v.count() == 2) ret = ret.assoc(v.nth(0), v.nth(1));
-                    else if (elem instanceof PersistentVector.SubVec sv && sv.count() == 2) ret = ret.assoc(sv.nth(0), sv.nth(1));
+                    else if (elem instanceof IPersistentVector v && v.count() == 2) ret = ret.assoc(v.nth(0), v.nth(1));
                     else throw new IllegalArgumentException("Cannot conj " + elem + " onto record");
                 }
                 return ret;
@@ -536,6 +530,7 @@ public final class RT {
             throw new IllegalArgumentException("Cannot conj " + x + " onto record");
         }
         if (coll instanceof ISeq s) return cons(x, s);
+        if (coll instanceof IPersistentCollection pc) return pc.cons(x);
         if (coll instanceof Set<?> s) {
             Set<Object> copy = new LinkedHashSet<>(s);
             copy.add(x);
@@ -551,7 +546,7 @@ public final class RT {
     }
 
     public static Associative assoc(Object coll, Object key, Object val) {
-        if (coll == null) return PersistentHashMap.EMPTY.assoc(key, val);
+        if (coll == null) return PersistentArrayMap.EMPTY.assoc(key, val);
         if (coll instanceof Associative a) return a.assoc(key, val);
         if (coll instanceof Map<?, ?> m) return PersistentHashMap.createFromMap(m).assoc(key, val);
         throw new IllegalArgumentException("assoc not supported on: " + coll.getClass().getName());
@@ -559,10 +554,7 @@ public final class RT {
 
     public static Object dissoc(Object coll, Object key) {
         if (coll == null) return null;
-        if (coll instanceof PersistentHashMap m) return m.without(key);
-        if (coll instanceof PersistentTreeMap m) return m.without(key);
-        if (coll instanceof PersistentRecord rec) return rec.without(key);
-        if (coll instanceof PersistentStructMap sm) return sm.without(key);
+        if (coll instanceof IPersistentMap m) return m.without(key);
         if (coll instanceof PersistentColl pc) return pc.without(key);
         if (coll instanceof Map<?, ?> m) return PersistentHashMap.createFromMap(m).without(key);
         throw new IllegalArgumentException("dissoc not supported on: " + coll.getClass().getName());
@@ -570,9 +562,7 @@ public final class RT {
 
     public static Object pop(Object coll) {
         if (coll == null) return null;
-        if (coll instanceof PersistentVector pv) return pv.pop();
-        if (coll instanceof PersistentList pl) return pl.pop();
-        if (coll instanceof PersistentList.EmptyList el) return el.pop();
+        if (coll instanceof IPersistentStack s) return s.pop();
         if (coll instanceof PersistentColl pc) return pc.pop();
         throw new IllegalArgumentException("pop not supported on: " + coll.getClass().getName());
     }
@@ -608,6 +598,7 @@ public final class RT {
     public static Object transientColl(Object coll) {
         if (coll instanceof PersistentVector pv) return pv.asTransient();
         if (coll instanceof PersistentHashMap pm) return pm.asTransient();
+        if (coll instanceof PersistentArrayMap am) return am.asTransient();
         if (coll instanceof PersistentHashSet ps) return ps.asTransient();
         if (coll instanceof IEditableCollection ec) return ec.asTransient();
         throw new IllegalArgumentException("Cannot create transient from: " + coll);
@@ -637,8 +628,7 @@ public final class RT {
     }
 
     public static boolean isVector(Object x) {
-        return x instanceof IPersistentVector || x instanceof PersistentVector
-                || x instanceof PersistentVector.SubVec || x instanceof PersistentHashMap.MapEntry;
+        return x instanceof IPersistentVector;
     }
 
     public static Object get(Object coll, Object key) {
@@ -670,7 +660,7 @@ public final class RT {
             int i = n.intValue();
             return (i >= 0 && i < tv.count()) ? tv.nth(i) : notFound;
         }
-        if (coll instanceof PersistentHashMap.TransientHashMap tm) {
+        if (coll instanceof ITransientMap tm) {
             return tm.valAt(key, notFound);
         }
         if (coll instanceof PersistentHashSet.TransientHashSet ts) {
@@ -699,19 +689,14 @@ public final class RT {
 
     public static Object find(Object coll, Object key) {
         if (coll == null) return null;
-        if (coll instanceof PersistentHashMap m) return m.entryAt(key);
-        if (coll instanceof PersistentTreeMap m) return m.entryAt(key);
-        if (coll instanceof PersistentRecord r) return r.entryAt(key);
-        if (coll instanceof PersistentVector v && key instanceof Number n) {
-            int i = n.intValue();
-            if (i >= 0 && i < v.count()) return new PersistentHashMap.MapEntry(i, v.nth(i));
+        if (coll instanceof IPersistentVector v) {
+            if (key instanceof Number n) {
+                int i = n.intValue();
+                if (i >= 0 && i < v.count()) return new PersistentHashMap.MapEntry(i, v.nth(i));
+            }
             return null;
         }
-        if (coll instanceof PersistentVector.SubVec sv && key instanceof Number n) {
-            int i = n.intValue();
-            if (i >= 0 && i < sv.count()) return new PersistentHashMap.MapEntry(i, sv.nth(i));
-            return null;
-        }
+        if (coll instanceof Associative a) return a.entryAt(key);
         if (coll instanceof Map<?, ?> m) {
             if (m.containsKey(key)) return new PersistentHashMap.MapEntry(key, m.get(key));
         }
@@ -908,11 +893,19 @@ public final class RT {
         });
     }
 
-    public static PersistentHashMap map(Object... init) {
+    public static IPersistentMap map(Object... init) {
+        if (init == null || init.length == 0) return PersistentArrayMap.EMPTY;
+        if (init.length <= PersistentArrayMap.HASHTABLE_THRESHOLD) {
+            return PersistentArrayMap.createAsIfByAssoc(init);
+        }
         return PersistentHashMap.create(init);
     }
 
-    public static PersistentHashMap mapUniqueKeys(Object... init) {
+    public static IPersistentMap mapUniqueKeys(Object... init) {
+        if (init == null || init.length == 0) return PersistentArrayMap.EMPTY;
+        if (init.length <= PersistentArrayMap.HASHTABLE_THRESHOLD) {
+            return PersistentArrayMap.createWithCheck(init);
+        }
         return PersistentHashMap.createWithCheck(init);
     }
 
@@ -1060,9 +1053,14 @@ public final class RT {
             if (readably) sb.append('M');
             return;
         }
+        if (x instanceof BigInt bi) {
+            sb.append(bi.toString());
+            if (readably) sb.append('N');
+            return;
+        }
         if (x instanceof BigInteger bi) {
             sb.append(bi.toString());
-            if (readably && bi.bitLength() <= 63) sb.append('N');
+            if (readably) sb.append('N');
             return;
         }
         if (x instanceof Double d) {
@@ -1079,27 +1077,19 @@ public final class RT {
             else sb.append(f.toString());
             return;
         }
-        if (x instanceof PersistentVector v) {
+        if (x instanceof IPersistentVector v) {
             if (maxLevel >= 0 && level >= maxLevel) { sb.append('#'); return; }
             sb.append('[');
-            int lim = maxLen >= 0 ? Math.min(maxLen, v.cnt) : v.cnt;
+            int vcnt = v.count();
+            int lim = maxLen >= 0 ? Math.min(maxLen, vcnt) : vcnt;
             for (int i = 0; i < lim; i++) {
                 if (i > 0) sb.append(' ');
                 printDepth(v.nth(i), sb, readably, printMeta, maxLen, maxLevel, level + 1);
             }
-            if (maxLen >= 0 && v.cnt > maxLen) {
+            if (maxLen >= 0 && vcnt > maxLen) {
                 if (lim > 0) sb.append(' ');
                 sb.append("...");
             }
-            sb.append(']');
-            return;
-        }
-        if (x instanceof PersistentHashMap.MapEntry me) {
-            if (maxLevel >= 0 && level >= maxLevel) { sb.append('#'); return; }
-            sb.append('[');
-            printDepth(me.key, sb, readably, printMeta, maxLen, maxLevel, level + 1);
-            sb.append(' ');
-            printDepth(me.val, sb, readably, printMeta, maxLen, maxLevel, level + 1);
             sb.append(']');
             return;
         }

@@ -1,3 +1,5 @@
 package cljl.lang;
 
-public interface IPersistentVector extends Associative, Indexed, Sequential, Counted, Seqable, Reversible {}
+public interface IPersistentVector extends IPersistentStack, Associative, Indexed, Sequential, Counted, Seqable, Reversible {
+    default int length() { return count(); }
+}

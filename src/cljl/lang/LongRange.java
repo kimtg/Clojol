@@ -9,7 +9,8 @@ import java.math.BigInteger;
  * High-performance finite integer range implementing IChunkedSeq, Counted, and IReduceInit.
  * Avoids per-element LazySeq/Cons allocation during reduce, transduce, into, and chunked pipelines.
  */
-public final class LongRange extends ASeq implements IChunkedSeq, Counted, IReduceInit {
+public final class LongRange extends ASeq implements IChunkedSeq, Counted, IReduce, IDrop {
+    private static final long serialVersionUID = 1L;
     public static final int CHUNK_SIZE = 32;
 
     public final long start;
@@ -28,7 +29,7 @@ public final class LongRange extends ASeq implements IChunkedSeq, Counted, IRedu
 
     /**
      * Returns a LongRange for finite non-overflowing integer ranges, PersistentList.EMPTY if empty,
-     * or null if the range cannot be represented as a finite int-counted LongRange (caller falls back to LazySeq).
+     * or null if the range cannot be represented as a finite int-counted LongRange (caller falls back to Range).
      */
     public static ISeq createOrNull(long start, long end, long step) {
         if (step == 0L) {
@@ -37,7 +38,6 @@ public final class LongRange extends ASeq implements IChunkedSeq, Counted, IRedu
         if ((step > 0L && start >= end) || (step < 0L && start <= end)) {
             return PersistentList.EMPTY;
         }
-        // Compute exact element count safely without 64-bit overflow
         BigInteger bStart = BigInteger.valueOf(start);
         BigInteger bEnd = BigInteger.valueOf(end);
         BigInteger bStep = BigInteger.valueOf(step);
@@ -47,9 +47,8 @@ public final class LongRange extends ASeq implements IChunkedSeq, Counted, IRedu
             q = q.add(BigInteger.ONE);
         }
         if (q.signum() <= 0) return PersistentList.EMPTY;
-        if (q.bitLength() > 30) return null; // > 2^30 elements -> fall back to LazySeq
+        if (q.bitLength() > 30) return null;
         int cnt = q.intValue();
-        // Verify final step addition (start + cnt * step) does not overflow long
         BigInteger afterLast = bStart.add(bStep.multiply(BigInteger.valueOf(cnt)));
         if (afterLast.compareTo(BigInteger.valueOf(Long.MAX_VALUE)) > 0
                 || afterLast.compareTo(BigInteger.valueOf(Long.MIN_VALUE)) < 0) {
@@ -102,6 +101,18 @@ public final class LongRange extends ASeq implements IChunkedSeq, Counted, IRedu
     public ISeq chunkedMore() {
         ISeq n = chunkedNext();
         return n == null ? PersistentList.EMPTY : n;
+    }
+
+    @Override
+    public Sequential drop(int n) {
+        if (n <= 0) return this;
+        if (n >= count) return null;
+        return new LongRange(null, start + step * (long) n, end, step, count - n);
+    }
+
+    @Override
+    public Object reduce(Fn f) {
+        return reduce2(f);
     }
 
     public Object reduce2(Fn f) {

@@ -242,13 +242,14 @@ public final class StdLibExtra {
             PersistentVector res = PersistentVector.createOwning(out);
             return pv.meta() != null ? res.withMeta(pv.meta()) : res;
         }
-        if (form instanceof PersistentHashMap pm) {
+        if (form instanceof IPersistentMap pm) {
             PersistentHashMap out = PersistentHashMap.EMPTY;
             for (ISeq s = pm.seq(); s != null; s = s.next()) {
-                PersistentHashMap.MapEntry me = (PersistentHashMap.MapEntry) s.first();
-                out = out.assoc(substituteTemplate(me.key, subs), substituteTemplate(me.val, subs));
+                Map.Entry<?, ?> me = (Map.Entry<?, ?>) s.first();
+                out = out.assoc(substituteTemplate(me.getKey(), subs), substituteTemplate(me.getValue(), subs));
             }
-            return pm.meta() != null ? out.withMeta(pm.meta()) : out;
+            PersistentHashMap m = (pm instanceof IMeta im) ? im.meta() : null;
+            return m != null ? out.withMeta(m) : out;
         }
         if (form instanceof PersistentHashSet ps) {
             List<Object> items = new ArrayList<>();
