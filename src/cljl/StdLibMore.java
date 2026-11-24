@@ -330,7 +330,14 @@ public final class StdLibMore {
     private static synchronized void initMain() {
         if (LOADED.contains("clojure.main")) return;
         Namespace ns = Namespace.findOrCreate("clojure.main");
-        ns.intern("demunge", Fn.of1("demunge", fnName -> String.valueOf(fnName).replace("_BANG_", "!").replace("_QMARK_", "?").replace("_", "-")));
+        ns.intern("demunge", Fn.of1("demunge", fnName -> {
+            String s = String.valueOf(fnName);
+            int dollar = s.indexOf('$');
+            if (dollar >= 0) {
+                return Compiler.demunge(s.substring(0, dollar)) + "/" + Compiler.demunge(s.substring(dollar + 1).replace('$', '/'));
+            }
+            return Compiler.demunge(s);
+        }));
         ns.intern("ex-triage", Fn.of1("ex-triage", data -> {
             Object m = data instanceof Throwable t
                     ? ((Fn) RT.CLOJURE_NS.findInternedVar(Symbol.intern("Throwable->map")).deref()).invoke(t)

@@ -235,7 +235,7 @@ public final class Compiler {
             Arrays.fill(slotHints, ValType.ANY);
             fixed[0] = new FnMethod(0, false, -1, new int[0], new int[0], new int[0],
                     tf.maxSlots, false, tf.body, new ValType[0], slotHints, ValType.ANY);
-            CompiledFn cf = new CompiledFn("<eval>", false, fixed, null, null);
+            CompiledFn cf = new CompiledFn("<eval>", false, fixed, null, null, null, currentSourceFile());
             Fn compiled = BytecodeJIT.compile(cf);
             if (compiled != null) {
                 return compiled.invoke();
@@ -294,6 +294,7 @@ public final class Compiler {
 
     private static final ThreadLocal<Integer> CURRENT_LINE = new ThreadLocal<>();
     private static final ThreadLocal<Integer> CURRENT_COL = new ThreadLocal<>();
+    private static final ThreadLocal<Var> DIRECT_DEF_VAR = new ThreadLocal<>();
     private static final Keyword LINE_KW = Keyword.intern("line");
     private static final Keyword COLUMN_KW = Keyword.intern("column");
     private static final Keyword FILE_KW = Keyword.intern("file");
@@ -753,6 +754,8 @@ public final class Compiler {
     }
 
     public static Node compile(Object form, Scope scope, boolean inTail) {
+        Var directDefVar = DIRECT_DEF_VAR.get();
+        if (directDefVar != null) DIRECT_DEF_VAR.remove();
         Integer prevLine = CURRENT_LINE.get();
         Integer prevCol = CURRENT_COL.get();
         Integer formLine = prevLine;
@@ -867,7 +870,7 @@ public final class Compiler {
             if (form instanceof ISeq seq) {
                 ISeq s = seq.seq();
                 if (s == null) return new ConstNode(PersistentList.EMPTY);
-                return compileSeq(s, scope, inTail);
+                return compileSeq(s, scope, inTail, directDefVar);
             }
 
             return new ConstNode(form);
@@ -975,7 +978,7 @@ public final class Compiler {
         return null;
     }
 
-    private static Node compileSeq(ISeq s, Scope scope, boolean inTail) {
+    private static Node compileSeq(ISeq s, Scope scope, boolean inTail, Var directDefVar) {
         Object op = s.first();
         ISeq args = s.next();
 
@@ -1008,7 +1011,7 @@ public final class Compiler {
                         return compileRecur(args, scope, inTail);
                     }
                     case "fn*" -> {
-                        return compileFn(args, scope);
+                        return compileFn(args, scope, false, directDefVar);
                     }
                     case "defmacro*" -> {
                         return compileDefmacro(args, scope);
@@ -1214,7 +1217,14 @@ public final class Compiler {
                 doc = docStr;
                 more = more.next();
             }
-            initNode = compile(more.first(), scope, false);
+            Var prevDefVar = DIRECT_DEF_VAR.get();
+            DIRECT_DEF_VAR.set(v);
+            try {
+                initNode = compile(more.first(), scope, false);
+            } finally {
+                if (prevDefVar == null) DIRECT_DEF_VAR.remove();
+                else DIRECT_DEF_VAR.set(prevDefVar);
+            }
         }
         if (initNode instanceof ConstNode cn && cn.val instanceof CompiledFn cfn) {
             cfn.setOwnerVar(v);
@@ -1410,10 +1420,14 @@ public final class Compiler {
     }
 
     private static Node compileFn(ISeq args, Scope parentScope) {
-        return compileFn(args, parentScope, false);
+        return compileFn(args, parentScope, false, null);
     }
 
     private static Node compileFn(ISeq args, Scope parentScope, boolean isMacroFn) {
+        return compileFn(args, parentScope, isMacroFn, null);
+    }
+
+    private static Node compileFn(ISeq args, Scope parentScope, boolean isMacroFn, Var ownerVar) {
         Symbol fnName = null;
         ISeq s = args;
         if (s.first() instanceof Symbol sym) {
@@ -1466,9 +1480,14 @@ public final class Compiler {
         String displayName = fnName != null ? fnName.name : "fn";
         if (!anyCaptures) {
             // Pre-allocate stateless CompiledFn at compile time!
-            return new ConstNode(new CompiledFn(displayName, fnName != null, fixedMethods, variadicMethod, null));
+            CompiledFn cf = new CompiledFn(displayName, fnName != null, fixedMethods, variadicMethod, null, null, currentSourceFile());
+            if (ownerVar != null) cf.setOwnerVar(ownerVar);
+            if (!isMacroFn && cf.hasExplicitPrimitiveHints()) {
+                return new ConstNode(cf.ensureJit());
+            }
+            return new ConstNode(cf);
         }
-        return new FnNode(displayName, fnName != null, fixedMethods, variadicMethod);
+        return new FnNode(displayName, fnName != null, fixedMethods, variadicMethod, ownerVar);
     }
 
     private static FnMethod compileFnMethod(Symbol fnName, ISeq mform, Scope parentScope) {
@@ -2045,6 +2064,13 @@ public final class Compiler {
     public static final Node[] EMPTY_NODES = new Node[0];
 
     public abstract static class Node {
+        public final int line;
+
+        protected Node() {
+            Integer cur = CURRENT_LINE.get();
+            this.line = cur != null ? cur.intValue() : -1;
+        }
+
         public abstract Object eval(Object[] frame);
 
         public long evalLong(Object[] frame) {
@@ -2450,6 +2476,7 @@ public final class Compiler {
         public final ValType[] paramHints;
         public final ValType[] slotHints;
         public final ValType returnHint;
+        public final int line;
 
         public FnMethod(
                 int fixedArity,
@@ -2476,6 +2503,8 @@ public final class Compiler {
             this.paramHints = paramHints;
             this.slotHints = slotHints;
             this.returnHint = returnHint != null ? returnHint : ValType.ANY;
+            Integer cur = CURRENT_LINE.get();
+            this.line = (cur != null && cur > 0) ? cur.intValue() : (body != null ? body.line : -1);
         }
 
         public Object[] initFrame(Fn self, Object[][] capturedByMethod, int methodIdx) {
@@ -2504,17 +2533,36 @@ public final class Compiler {
         }
     }
 
+    static String currentSourceFile() {
+        Object sf = SOURCE.get();
+        if (sf == null || "NO_SOURCE_FILE".equals(sf)) sf = RT.FILE.get();
+        String s = sf != null ? String.valueOf(sf) : null;
+        if (s != null) {
+            int slash = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+            if (slash >= 0 && slash + 1 < s.length()) s = s.substring(slash + 1);
+        }
+        return (s != null && !s.isEmpty() && !"NO_SOURCE_PATH".equals(s)) ? s : "NO_SOURCE_FILE";
+    }
+
     public static final class FnNode extends Node {
         public final String name;
         public final boolean isNamed;
         public final FnMethod[] fixedMethods;
         public final FnMethod variadicMethod;
+        public final String sourceFile;
+        public final Var ownerVar;
 
         public FnNode(String name, boolean isNamed, FnMethod[] fixedMethods, FnMethod variadicMethod) {
+            this(name, isNamed, fixedMethods, variadicMethod, null);
+        }
+
+        public FnNode(String name, boolean isNamed, FnMethod[] fixedMethods, FnMethod variadicMethod, Var ownerVar) {
             this.name = name;
             this.isNamed = isNamed;
             this.fixedMethods = fixedMethods;
             this.variadicMethod = variadicMethod;
+            this.sourceFile = currentSourceFile();
+            this.ownerVar = ownerVar;
         }
 
         @Override
@@ -2537,7 +2585,9 @@ public final class Compiler {
                 }
                 captured[fixedMethods.length] = caps;
             }
-            return new CompiledFn(name, isNamed, fixedMethods, variadicMethod, captured);
+            CompiledFn cf = new CompiledFn(name, isNamed, fixedMethods, variadicMethod, captured, null, sourceFile);
+            if (ownerVar != null) cf.setOwnerVar(ownerVar);
+            return cf.hasExplicitPrimitiveHints() ? cf.ensureJit() : cf;
         }
     }
 
@@ -2550,6 +2600,7 @@ public final class Compiler {
         private final FnMethod variadicMethod;
         private final Object[][] captured;
         private final PersistentHashMap meta;
+        private final String sourceFile;
         private volatile Var ownerVar;
         private volatile Fn jitFn;
         private final AtomicInteger calls = new AtomicInteger(0);
@@ -2561,7 +2612,7 @@ public final class Compiler {
                 FnMethod[] fixedMethods,
                 FnMethod variadicMethod,
                 Object[][] captured) {
-            this(name, isNamed, fixedMethods, variadicMethod, captured, null);
+            this(name, isNamed, fixedMethods, variadicMethod, captured, null, null);
         }
 
         public CompiledFn(
@@ -2571,19 +2622,47 @@ public final class Compiler {
                 FnMethod variadicMethod,
                 Object[][] captured,
                 PersistentHashMap meta) {
+            this(name, isNamed, fixedMethods, variadicMethod, captured, meta, null);
+        }
+
+        public CompiledFn(
+                String name,
+                boolean isNamed,
+                FnMethod[] fixedMethods,
+                FnMethod variadicMethod,
+                Object[][] captured,
+                PersistentHashMap meta,
+                String sourceFile) {
             this.name = name;
             this.isNamed = isNamed;
             this.fixedMethods = fixedMethods;
             this.variadicMethod = variadicMethod;
             this.captured = captured;
             this.meta = meta;
+            this.sourceFile = sourceFile;
         }
 
         public FnMethod[] getFixedMethods() { return fixedMethods; }
         public FnMethod getVariadicMethod() { return variadicMethod; }
         public Object[][] getCaptured() { return captured; }
+        public String getSourceFile() { return sourceFile; }
         public Var getOwnerVar() { return ownerVar; }
         public void setOwnerVar(Var ownerVar) { this.ownerVar = ownerVar; }
+
+        public boolean hasExplicitPrimitiveHints() {
+            int lim = Math.min(fixedMethods.length, 5);
+            for (int i = 0; i < lim; i++) {
+                FnMethod m = fixedMethods[i];
+                if (m == null) continue;
+                if (m.returnHint == ValType.LONG || m.returnHint == ValType.DOUBLE) return true;
+                if (m.paramHints != null) {
+                    for (ValType pt : m.paramHints) {
+                        if (pt == ValType.LONG || pt == ValType.DOUBLE) return true;
+                    }
+                }
+            }
+            return false;
+        }
 
         public void patchCaptured(int[] parentSlots, Object[] vals) {
             if (captured == null) return;
@@ -2944,7 +3023,7 @@ public final class Compiler {
         @Override public PersistentHashMap meta() { return meta; }
         @Override public CompiledFn withMeta(PersistentHashMap m) {
             if (this.meta == m) return this;
-            CompiledFn copy = new CompiledFn(name, isNamed, fixedMethods, variadicMethod, captured, m);
+            CompiledFn copy = new CompiledFn(name, isNamed, fixedMethods, variadicMethod, captured, m, sourceFile);
             copy.ownerVar = this.ownerVar;
             copy.jitFn = this.jitFn;
             copy.jitAttempted = this.jitAttempted;

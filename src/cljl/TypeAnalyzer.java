@@ -191,7 +191,14 @@ public final class TypeAnalyzer {
     }
 
     public static List<PrimSpec> discoverPrimSpecs(FnMethod method, CompiledFn ownerFn) {
-        if (method.isVariadic || method.fixedArity == 0 || method.fixedArity > 3) {
+        if (method.isVariadic || method.fixedArity > 4) {
+            return Collections.emptyList();
+        }
+        if (method.fixedArity == 0) {
+            AnalysisResult res = analyze(method, ownerFn, new ValType[0]);
+            if (!res.recurIncompatible && (res.returnType == ValType.LONG || res.returnType == ValType.DOUBLE)) {
+                return Collections.singletonList(new PrimSpec(new ValType[0], res));
+            }
             return Collections.emptyList();
         }
         int arity = method.fixedArity;

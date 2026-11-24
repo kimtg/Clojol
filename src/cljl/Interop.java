@@ -848,11 +848,18 @@ public final class Interop {
         boolean ambiguous = false;
         int candidateCount = 0;
         Method singleCandidate = null;
+        boolean hasVarArgsCandidate = false;
 
         for (Method m : clazz.getMethods()) {
             if (!m.getName().equals(name)) continue;
             if (Modifier.isStatic(m.getModifiers()) != isStatic) continue;
-            if (m.isVarArgs() || m.getParameterCount() != arity) continue;
+            if (m.isVarArgs()) {
+                if (m.getParameterCount() - 1 <= arity) {
+                    hasVarArgsCandidate = true;
+                }
+                continue;
+            }
+            if (m.getParameterCount() != arity) continue;
             candidateCount++;
             singleCandidate = m;
             int s = staticMatchScore(m.getParameterTypes(), argTypes);
@@ -866,9 +873,13 @@ public final class Interop {
                 }
             }
         }
-        if (candidateCount == 1 && singleCandidate != null && staticCompatibleWithUnknown(singleCandidate.getParameterTypes(), argTypes)) {
+        if (!hasVarArgsCandidate && candidateCount == 1 && singleCandidate != null
+                && staticCompatibleWithUnknown(singleCandidate.getParameterTypes(), argTypes)) {
             best = singleCandidate;
             ambiguous = false;
+        }
+        if (hasVarArgsCandidate && hasUnknownArgType(argTypes)) {
+            return null;
         }
         if (best == null || ambiguous) return null;
         if (!Modifier.isPublic(best.getModifiers())) return null;
@@ -888,9 +899,16 @@ public final class Interop {
         boolean ambiguous = false;
         int candidateCount = 0;
         Constructor<?> singleCandidate = null;
+        boolean hasVarArgsCandidate = false;
 
         for (Constructor<?> c : clazz.getConstructors()) {
-            if (c.isVarArgs() || c.getParameterCount() != arity) continue;
+            if (c.isVarArgs()) {
+                if (c.getParameterCount() - 1 <= arity) {
+                    hasVarArgsCandidate = true;
+                }
+                continue;
+            }
+            if (c.getParameterCount() != arity) continue;
             candidateCount++;
             singleCandidate = c;
             int s = staticMatchScore(c.getParameterTypes(), argTypes);
@@ -904,11 +922,25 @@ public final class Interop {
                 }
             }
         }
-        if (candidateCount == 1 && singleCandidate != null && staticCompatibleWithUnknown(singleCandidate.getParameterTypes(), argTypes)) {
+        if (!hasVarArgsCandidate && candidateCount == 1 && singleCandidate != null
+                && staticCompatibleWithUnknown(singleCandidate.getParameterTypes(), argTypes)) {
             best = singleCandidate;
             ambiguous = false;
         }
+        if (hasVarArgsCandidate && hasUnknownArgType(argTypes)) {
+            return null;
+        }
         return (best != null && !ambiguous && Modifier.isPublic(best.getModifiers())) ? best : null;
+    }
+
+    private static boolean hasUnknownArgType(ValType[] argTypes) {
+        if (argTypes == null) return false;
+        for (ValType at : argTypes) {
+            if (at == null || at.kind == ValType.Kind.ANY || at.kind == ValType.Kind.BOTTOM) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean staticCompatibleWithUnknown(Class<?>[] paramTypes, ValType[] argTypes) {

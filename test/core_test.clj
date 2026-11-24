@@ -3274,6 +3274,117 @@
         (finally
           (doseq [f (reverse (file-seq tmp))] (.delete f)))))))
 
+(defn m4-memo-fib [n]
+  (if (< n 2) n (+ (m4-memo-fib (- n 1)) (m4-memo-fib (- n 2)))))
+
+(defn m4-memo-bigfib [n]
+  (if (< n 2) (bigint n) (+' (m4-memo-bigfib (- n 1)) (m4-memo-bigfib (- n 2)))))
+
+(deftest milestone-4-jit-optimizer-test
+  (testing "4.1 SourceFile, LineNumberTable stack traces & clojure.main/demunge"
+    (require 'clojure.main)
+    (is (= "my-ns/foo-bar?!" (clojure.main/demunge "my_ns$foo_bar_QMARK__BANG_")))
+    (let [f (fn m4-boom [x]
+              (let [y (+ x 1)]
+                (if (= y 42)
+                  (throw (ex-info "m4-line-check" {:y y}))
+                  y)))
+          _ (dotimes [_ 20] (f 1))
+          ex (try (f 41) nil (catch Throwable t t))
+          st (when ex (.getStackTrace ex))
+          jit-frame (first (filter #(and (.getClassName ^StackTraceElement %)
+                                         (.contains (.getClassName ^StackTraceElement %) "m4_boom"))
+                                   st))]
+      (is (some? ex))
+      (is (some? jit-frame))
+      (is (= "core_test.clj" (.getFileName ^StackTraceElement jit-frame)))
+      (is (pos? (.getLineNumber ^StackTraceElement jit-frame)))
+      (let [tm (Throwable->map ex)
+            trace-frame (first (filter #(and (vector? %) (= "core_test.clj" (nth % 2))) (:trace tm)))]
+        (is (some? trace-frame))
+        (is (pos? (nth trace-frame 3))))))
+
+  (testing "4.2 Non-empty-stack TryNode & LockingNode lifting in strict JIT mode"
+    (let [f1 (fn [x] (+ 1 (try (/ 10 x) (catch ArithmeticException _ 41))))
+          f2 (fn [x] [(try (+ x 1) (catch Exception _ 0))
+                      (try (/ 10 x) (catch ArithmeticException _ 2))])
+          f3 (fn [lk x] (+ 10 (locking lk (+ 20 (try (/ x 1) (catch Exception _ 0))))))
+          f4 (fn [log x]
+               (let [step (fn [v] (swap! log conj v) v)]
+                 (+ (step 1)
+                    (try (do (step 2) (/ 10 x))
+                         (catch ArithmeticException _ (step 3) 100)
+                         (finally (step 4)))
+                    (step 5))))
+          f5 (fn [n]
+               (loop [i n acc 0]
+                 (if (<= i 0)
+                   acc
+                   (recur (dec i)
+                          (+ acc (try (if (= i 2) (/ 1 0) i)
+                                      (catch ArithmeticException _ 100)))))))
+          lk (Object.)
+          log (atom [])]
+      (dotimes [_ 20]
+        (is (= 42 (f1 0)))
+        (is (= 6 (f1 2)))
+        (is (= [1 2] (f2 0)))
+        (is (= [3 5] (f2 2)))
+        (is (= 42 (f3 lk 12)))
+        (reset! log [])
+        (is (= 106 (f4 log 0)))
+        (is (= [1 2 3 4 5] @log))
+        ;; i=3 -> 3, i=2 -> 100, i=1 -> 1 => 104
+        (is (= 104 (f5 3))))))
+
+  (testing "4.3 Arity 0 & arity 4 real clojure.lang.IFn$* primitive interfaces"
+    (let [f0l (fn ^long [] 42)
+          f0d (fn ^double [] 3.5)
+          f4l (fn ^long [^long a ^long b ^long c ^long d] (+ a b c d))
+          f4d (fn ^double [^double a ^double b ^double c ^double d] (+ a b c d))
+          f4m (fn ^long [^long a b ^long c d] (+ a (long b) c (long d)))
+          k 10
+          f0cap (fn ^long [] (+ k 32))]
+      (is (instance? clojure.lang.IFn$L f0l))
+      (is (= 42 (.invokePrim ^clojure.lang.IFn$L f0l)))
+      (is (= 42 (f0l)))
+      (is (instance? clojure.lang.IFn$D f0d))
+      (is (= 3.5 (.invokePrim ^clojure.lang.IFn$D f0d)))
+      (is (= 3.5 (f0d)))
+      (is (instance? clojure.lang.IFn$LLLLL f4l))
+      (is (= 10 (.invokePrim ^clojure.lang.IFn$LLLLL f4l 1 2 3 4)))
+      (is (= 10 (f4l 1 2 3 4)))
+      (is (instance? clojure.lang.IFn$DDDDD f4d))
+      (is (= 10.0 (.invokePrim ^clojure.lang.IFn$DDDDD f4d 1.0 2.0 3.0 4.0)))
+      (is (instance? clojure.lang.IFn$LOLOL f4m))
+      (is (= 10 (.invokePrim ^clojure.lang.IFn$LOLOL f4m 1 2 3 4)))
+      (is (instance? clojure.lang.IFn$L f0cap))
+      (is (= 42 (.invokePrim ^clojure.lang.IFn$L f0cap)))
+      (is (= {:m 1} (meta (with-meta f4l {:m 1}))))))
+
+  (testing "4.4 Unloadable DynamicClassLoader for JIT classes"
+    (let [f (fn ^long [^long x] (+ x 1))
+          cl (.getClassLoader (class f))]
+      (is (instance? clojure.lang.DynamicClassLoader cl)))
+    (let [custom-cl (clojure.lang.DynamicClassLoader.)
+          f (binding [*fn-loader* custom-cl]
+              (eval '(fn ^long [^long x] (* x 3))))]
+      (is (identical? custom-cl (.getClassLoader (class f))))
+      (is (= 21 (f 7)))))
+
+  (testing "4.5 PureMemo JMM concurrency, large BigInt SoftReference & with-redefs soundness"
+    (let [futs (doall (for [_ (range 8)]
+                        (future [(m4-memo-fib 35) (m4-memo-bigfib 420)])))
+          results (mapv deref futs)]
+      (is (every? #(= 9227465 (first %)) results))
+      ;; fib(420) has ~292 bits (> 256 bits -> exercises SoftReference path)
+      (let [b420 (second (first results))]
+        (is (> (.bitLength (.toBigInteger ^clojure.lang.BigInt b420)) 256))
+        (is (every? #(= b420 (second %)) results)))
+      ;; with-redefs must bypass PureMemo cleanly
+      (is (= 999 (with-redefs [m4-memo-fib (fn [_] 999)] (m4-memo-fib 35))))
+      (is (= 9227465 (m4-memo-fib 35))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

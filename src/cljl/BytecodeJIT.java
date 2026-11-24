@@ -26,7 +26,6 @@ public final class BytecodeJIT {
     private static final boolean STRICT_JIT = Boolean.getBoolean("cljl.jit.strict");
     private static final boolean AUTO_MEMO = !"false".equals(System.getProperty("cljl.jit.automemo"));
     private static final AtomicInteger CLASS_ID = new AtomicInteger(0);
-    private static final JitClassLoader LOADER = new JitClassLoader();
     private static final ConcurrentHashMap<String, Object[]> PENDING_CONSTS = new ConcurrentHashMap<>();
 
     public static Object[] takePendingConsts(String key) {
@@ -149,17 +148,19 @@ public final class BytecodeJIT {
 
     private BytecodeJIT() {}
 
-    private static final class JitClassLoader extends ClassLoader {
-        JitClassLoader() {
-            super(BytecodeJIT.class.getClassLoader());
+    private static final class JitClassLoader extends clojure.lang.DynamicClassLoader {
+        JitClassLoader(ClassLoader parent) {
+            super(parent != null ? parent : BytecodeJIT.class.getClassLoader());
         }
 
         Class<?> define(String binaryName, byte[] bytecode) {
-            return defineClass(binaryName, bytecode, 0, bytecode.length);
+            return defineClass(binaryName, bytecode, null);
         }
 
         @Override
         protected Class<?> findClass(String name) throws ClassNotFoundException {
+            Class<?> cached = clojure.lang.DynamicClassLoader.findInMemoryClass(name);
+            if (cached != null) return cached;
             Class<?> dyn = TypeFactory.findDynamicClass(name);
             if (dyn != null) return dyn;
             ClassLoader rt = RT.baseLoader();
@@ -168,6 +169,26 @@ public final class BytecodeJIT {
             }
             throw new ClassNotFoundException(name);
         }
+    }
+
+    /**
+     * Resolves an unloadable DynamicClassLoader for JIT-compiled function classes:
+     * honors *fn-loader* (RT.FN_LOADER) or Compiler.LOADER when bound to a DynamicClassLoader,
+     * otherwise creates a lightweight child JitClassLoader per compiled function so discarded
+     * REPL/eval closures are eligible for full JVM class unloading (preventing Metaspace leaks).
+     */
+    private static Class<?> defineJitClass(String binaryName, byte[] bytecode) {
+        Object fnLoader = RT.FN_LOADER.get();
+        if (fnLoader instanceof clojure.lang.DynamicClassLoader dcl) {
+            return dcl.defineClass(binaryName, bytecode, null);
+        }
+        Object compLoader = Compiler.LOADER.get();
+        if (compLoader instanceof clojure.lang.DynamicClassLoader dcl) {
+            return dcl.defineClass(binaryName, bytecode, null);
+        }
+        ClassLoader parent = RT.baseLoader();
+        JitClassLoader child = new JitClassLoader(parent);
+        return child.define(binaryName, bytecode);
     }
 
     public static boolean canCompile(CompiledFn cf) {
@@ -187,7 +208,6 @@ public final class BytecodeJIT {
             return true;
         }
         if (n instanceof TryNode tn) {
-            if (!stackEmpty) return false;
             if (!canCompileNode(tn.body, true)) return false;
             for (CatchClause cc : tn.catches) {
                 if (!canCompileNode(cc.handler(), true)) return false;
@@ -198,7 +218,6 @@ public final class BytecodeJIT {
             return canCompileNode(mn.target, false);
         }
         if (n instanceof LockingNode ln) {
-            if (!stackEmpty) return false;
             return canCompileNode(ln.target, true) && canCompileNode(ln.body, true);
         }
         if (n instanceof CaseNode cn) {
@@ -380,7 +399,10 @@ public final class BytecodeJIT {
             String fnBase = sanitizeClassName(cf.getName());
             String internalName = "cljl/jit/" + fnBase + "$" + id;
             String binaryName = "cljl.jit." + fnBase + "$" + id;
-            String sourceFile = (cf.getName() != null && !cf.getName().isEmpty()) ? (cf.getName() + ".clj") : "cljl.clj";
+            String sf = cf.getSourceFile();
+            String sourceFile = (sf != null && !sf.isEmpty() && !"NO_SOURCE_FILE".equals(sf))
+                    ? sf
+                    : ((cf.getName() != null && !cf.getName().isEmpty()) ? (cf.getName() + ".clj") : "NO_SOURCE_FILE");
 
             ClassEmitter ce = new ClassEmitter(internalName, sourceFile);
             emitMethods(ce, cf);
@@ -391,7 +413,7 @@ public final class BytecodeJIT {
                 PENDING_CONSTS.put(internalName, ce.constObjects.toArray());
             }
             try {
-                Class<?> cls = LOADER.define(binaryName, bytecode);
+                Class<?> cls = defineJitClass(binaryName, bytecode);
                 Constructor<?> ctor = cls.getConstructor(
                         Object[][].class, String.class, CompiledFn.class);
                 return (Fn) ctor.newInstance(cf.getCaptured(), cf.getName(), cf);
@@ -413,11 +435,17 @@ public final class BytecodeJIT {
     }
 
     public static Fn instantiateFn(FnNode fnNode, Object[][] captured) {
-        return new CompiledFn(fnNode.name, fnNode.isNamed, fnNode.fixedMethods, fnNode.variadicMethod, captured);
+        CompiledFn cf = new CompiledFn(fnNode.name, fnNode.isNamed, fnNode.fixedMethods, fnNode.variadicMethod, captured, null, fnNode.sourceFile);
+        if (fnNode.ownerVar != null) cf.setOwnerVar(fnNode.ownerVar);
+        return cf.hasExplicitPrimitiveHints() ? cf.ensureJit() : cf;
     }
 
     public static Object[] emptyArray() {
         return Fn.EMPTY_ARGS;
+    }
+
+    public static boolean isOwnerFn(Object cur, Object jitSelf, Object outerFn) {
+        return cur == jitSelf || cur == outerFn;
     }
 
     public static int caseLookup(Object val, Map<RT.EquivKey, Integer> table) {
@@ -516,19 +544,23 @@ public final class BytecodeJIT {
     }
 
     private static void emitMethods(ClassEmitter ce, CompiledFn cf) {
-        FnMethod[] fixed = cf.getFixedMethods();
-        FnMethod variadic = cf.getVariadicMethod();
+        FnMethod[] rawFixed = cf.getFixedMethods();
+        FnMethod[] fixed = new FnMethod[rawFixed.length];
+        for (int i = 0; i < rawFixed.length; i++) {
+            fixed[i] = TryLifter.liftIfNeeded(rawFixed[i]);
+        }
+        FnMethod variadic = TryLifter.liftIfNeeded(cf.getVariadicMethod());
         ce.fixedMethods = fixed;
         ce.ownerFn = cf;
         ce.ownerVar = cf.getOwnerVar();
 
-        // Pass 1: discover primitive specializations and generic analyses for all arities
+        // Pass 1: discover primitive specializations (arities 0..4) and generic analyses for all arities
         AnalysisResult[] genericFixed = new AnalysisResult[fixed.length];
         for (int arity = 0; arity < fixed.length; arity++) {
             FnMethod m = fixed[arity];
             if (m != null) {
                 genericFixed[arity] = TypeAnalyzer.analyzeGeneric(m, cf);
-                if (arity >= 1 && arity <= 3) {
+                if (arity <= 4) {
                     List<PrimSpec> specs = TypeAnalyzer.discoverPrimSpecs(m, cf);
                     if (!specs.isEmpty()) {
                         ce.primSpecsByArity.put(arity, specs);
@@ -538,14 +570,16 @@ public final class BytecodeJIT {
         }
         AnalysisResult genericVariadic = variadic != null ? TypeAnalyzer.analyzeGeneric(variadic, cf) : null;
 
-        // Pass 2: emit primitive specialized methods
+        // Pass 2: emit primitive specialized methods + clojure.lang.IFn$* interface bridges
         boolean hasUnboxedLong1 = false;
         boolean hasUnboxedLong2 = false;
+        Set<String> emittedIFnPrimDescs = new HashSet<>();
         for (Map.Entry<Integer, List<PrimSpec>> e : ce.primSpecsByArity.entrySet()) {
             int arity = e.getKey();
             FnMethod m = fixed[arity];
             for (PrimSpec ps : e.getValue()) {
                 emitPrimInvoke(ce, m, arity, arity, ps, genericFixed[arity]);
+                emitIFnPrimBridge(ce, ps, emittedIFnPrimDescs);
                 if ("invokePrim_J_J".equals(ps.methodName) && "(J)J".equals(ps.descriptor)) {
                     hasUnboxedLong1 = true;
                 } else if ("invokePrim_JJ_J".equals(ps.methodName) && "(JJ)J".equals(ps.descriptor)) {
@@ -588,6 +622,54 @@ public final class BytecodeJIT {
         if (hasHighFixed || variadic != null) {
             emitVarargsInvoke(ce, fixed, genericFixed, variadic, genericVariadic);
         }
+    }
+
+    private static char ifnSigChar(ValType t) {
+        if (t == ValType.LONG) return 'L';
+        if (t == ValType.DOUBLE) return 'D';
+        if (t == ValType.BOOL) return 0; // IFn$* only supports L, D, O
+        return 'O';
+    }
+
+    private static void emitIFnPrimBridge(ClassEmitter ce, PrimSpec ps, Set<String> emittedDescs) {
+        int arity = ps.paramTypes.length;
+        if (arity > 4) return;
+        ValType retT = ps.analysis.returnType;
+        char rChar = ifnSigChar(retT);
+        if (rChar == 0) return;
+
+        StringBuilder ifaceSuffix = new StringBuilder(arity + 1);
+        boolean anyPrim = (rChar == 'L' || rChar == 'D');
+        for (int i = 0; i < arity; i++) {
+            char pc = ifnSigChar(ps.paramTypes[i]);
+            if (pc == 0) return;
+            if (pc == 'L' || pc == 'D') anyPrim = true;
+            ifaceSuffix.append(pc);
+        }
+        ifaceSuffix.append(rChar);
+        if (!anyPrim) return;
+        if (!emittedDescs.add(ps.descriptor)) return;
+
+        ce.addInterface("clojure/lang/IFn$" + ifaceSuffix);
+
+        int localSlot = 1;
+        for (ValType pt : ps.paramTypes) {
+            localSlot += (pt == ValType.LONG || pt == ValType.DOUBLE) ? 2 : 1;
+        }
+        CodeGen cg = ce.beginMethod("invokePrim", ps.descriptor, localSlot);
+        cg.aload(0);
+        int argWords = 1;
+        int slot = 1;
+        for (ValType pt : ps.paramTypes) {
+            cg.loadJvmLocal(slot, pt);
+            int w = (pt == ValType.LONG || pt == ValType.DOUBLE) ? 2 : 1;
+            slot += w;
+            argWords += w;
+        }
+        int retWords = (retT == ValType.LONG || retT == ValType.DOUBLE) ? 2 : 1;
+        cg.invokevirtual(ce.className, ps.methodName, ps.descriptor, argWords, retWords);
+        cg.emitReturnInstruction(retT);
+        cg.finish();
     }
 
     private static boolean isPureConstantForStatic(ConstNode cn) {
@@ -1060,8 +1142,10 @@ public final class BytecodeJIT {
                 cg.checkcast("cljl/Var");
                 cg.invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
                 cg.aload(0);
+                cg.aload(0);
                 cg.getfield(ce.className, "outerFn", "Lcljl/Compiler$CompiledFn;", 1);
-                cg.ifAcmpNe(slowEntry);
+                cg.invokestatic("cljl/BytecodeJIT", "isOwnerFn", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z", 3, 1);
+                cg.ifeq(slowEntry);
             }
             int argWords = 0;
             for (int i = 0; i < arity; i++) {
@@ -1175,17 +1259,21 @@ public final class BytecodeJIT {
         if (specs != null && !specs.isEmpty()) {
             for (PrimSpec ps : specs) {
                 Label nextSpec = new Label();
+                boolean hasGuard = false;
                 for (int i = 0; i < arity; i++) {
                     ValType pt = ps.paramTypes[i];
                     if (pt == ValType.LONG) {
+                        hasGuard = true;
                         cg.aload(1 + i);
                         cg.emitInstanceof("java/lang/Long");
                         cg.ifeq(nextSpec);
                     } else if (pt == ValType.DOUBLE) {
+                        hasGuard = true;
                         cg.aload(1 + i);
                         cg.emitInstanceof("java/lang/Double");
                         cg.ifeq(nextSpec);
                     } else if (pt == ValType.BOOL) {
+                        hasGuard = true;
                         cg.aload(1 + i);
                         cg.emitInstanceof("java/lang/Boolean");
                         cg.ifeq(nextSpec);
@@ -1217,6 +1305,10 @@ public final class BytecodeJIT {
                 cg.invokevirtual(ce.className, ps.methodName, ps.descriptor, argWords, retWords);
                 cg.boxValue(retT);
                 cg.areturn();
+                if (!hasGuard) {
+                    cg.finish();
+                    return;
+                }
                 cg.markLabel(nextSpec);
                 cg.curStack = 0;
             }
@@ -1255,8 +1347,10 @@ public final class BytecodeJIT {
                 cg.checkcast("cljl/Var");
                 cg.invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
                 cg.aload(0);
+                cg.aload(0);
                 cg.getfield(ce.className, "outerFn", "Lcljl/Compiler$CompiledFn;", 1);
-                cg.ifAcmpNe(unmemoized);
+                cg.invokestatic("cljl/BytecodeJIT", "isOwnerFn", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z", 3, 1);
+                cg.ifeq(unmemoized);
             }
             PureMemo.TableObj1 objTable = new PureMemo.TableObj1();
             // Compute table.get(arg0); if != MISS_OBJ return it
@@ -1525,27 +1619,36 @@ public final class BytecodeJIT {
         final List<Object> constObjects = new ArrayList<>();
         final IdentityHashMap<Object, Integer> constIndexMap = new IdentityHashMap<>();
         final List<byte[]> methodInfos = new ArrayList<>();
+        final List<String> extraInterfaces = new ArrayList<>();
 
         final int thisClassIdx;
         final int superClassIdx;
         final int codeAttrNameIdx;
         final int sourceFileAttrNameIdx;
         final int sourceFileUtfIdx;
+        final int lineNumberTableAttrNameIdx;
 
         ClassEmitter(String className, String sourceFile) {
             this.className = className;
             this.sourceFile = sourceFile;
             this.thisClassIdx = cp.addClass(className);
-            this.superClassIdx = cp.addClass("cljl/Fn");
+            this.superClassIdx = cp.addClass("cljl/Fn$NamedFn");
             this.codeAttrNameIdx = cp.addUtf8("Code");
             this.sourceFileAttrNameIdx = cp.addUtf8("SourceFile");
             this.sourceFileUtfIdx = cp.addUtf8(sourceFile);
+            this.lineNumberTableAttrNameIdx = cp.addUtf8("LineNumberTable");
             cp.addFieldref(className, "captured", "[[Ljava/lang/Object;");
             cp.addFieldref(className, "name", "Ljava/lang/String;");
             cp.addFieldref(className, "outerFn", "Lcljl/Compiler$CompiledFn;");
 
             emitConstructor();
             emitGetName();
+        }
+
+        void addInterface(String internalName) {
+            if (!extraInterfaces.contains(internalName)) {
+                extraInterfaces.add(internalName);
+            }
         }
 
         int addConstObject(Object obj) {
@@ -1571,7 +1674,8 @@ public final class BytecodeJIT {
                     "([[Ljava/lang/Object;Ljava/lang/String;Lcljl/Compiler$CompiledFn;)V",
                     4);
             cg.aload(0);
-            cg.invokespecial("cljl/Fn", "<init>", "()V", 1, 0);
+            cg.aload(2);
+            cg.invokespecial("cljl/Fn$NamedFn", "<init>", "(Ljava/lang/String;)V", 2, 0);
             cg.aload(0);
             cg.aload(1);
             cg.putfield(className, "captured", "[[Ljava/lang/Object;");
@@ -1627,6 +1731,10 @@ public final class BytecodeJIT {
             int outerDescIdx = cp.addUtf8("Lcljl/Compiler$CompiledFn;");
 
             int fnIfaceIdx = cp.addClass("clojure/lang/Fn");
+            int[] extraIfaceIdxs = new int[extraInterfaces.size()];
+            for (int i = 0; i < extraInterfaces.size(); i++) {
+                extraIfaceIdxs[i] = cp.addClass(extraInterfaces.get(i));
+            }
 
             ByteArrayOutputStream baos = new ByteArrayOutputStream(1024);
             DataOutputStream out = new DataOutputStream(baos);
@@ -1640,8 +1748,11 @@ public final class BytecodeJIT {
             out.writeShort(0x0011); // ACC_PUBLIC | ACC_FINAL
             out.writeShort(thisClassIdx);
             out.writeShort(superClassIdx);
-            out.writeShort(1); // interfaces count
+            out.writeShort(1 + extraIfaceIdxs.length); // interfaces count
             out.writeShort(fnIfaceIdx);
+            for (int idx : extraIfaceIdxs) {
+                out.writeShort(idx);
+            }
 
             // 3 instance fields + nConsts static final constant fields (trusted as compile-time constants by HotSpot C2)
             out.writeShort(3 + nConsts);
@@ -1683,6 +1794,8 @@ public final class BytecodeJIT {
         final Deque<LoopTarget> loopTargets = new ArrayDeque<>();
         final List<ExceptionEntry> exceptionTable = new ArrayList<>();
         final List<Label> allLabels = new ArrayList<>();
+        final List<int[]> lineNumbers = new ArrayList<>();
+        int lastRecordedLine = -1;
         final Set<Integer> boundedBelowMaxLong = new HashSet<>();
         final Set<Integer> boundedAboveMinLong = new HashSet<>();
         final Set<Integer> nonNegativeLong = new HashSet<>();
@@ -1716,6 +1829,21 @@ public final class BytecodeJIT {
             this.analysis = analysis;
             this.layout = layout;
             this.selfSlot = method != null ? method.selfSlot : -1;
+            if (method != null && method.line > 0) {
+                recordLine(method.line);
+            }
+        }
+
+        void recordLine(int line) {
+            if (line <= 0 || line > 65535 || line == lastRecordedLine) return;
+            int pc = code.size();
+            if (pc > 65535) return;
+            if (!lineNumbers.isEmpty() && lineNumbers.get(lineNumbers.size() - 1)[0] == pc) {
+                lineNumbers.get(lineNumbers.size() - 1)[1] = line;
+            } else {
+                lineNumbers.add(new int[]{pc, line});
+            }
+            lastRecordedLine = line;
         }
 
         ValType typeOf(Node n) {
@@ -2569,6 +2697,7 @@ public final class BytecodeJIT {
         }
 
         boolean emitDiscard(Node n) {
+            recordLine(n.line);
             ValType t = typeOf(n);
             if (n instanceof LetNode ln) {
                 if (emitLetBindings(ln)) return true;
@@ -2734,6 +2863,7 @@ public final class BytecodeJIT {
         // ====================================================================
 
         boolean emitLong(Node node) {
+            recordLine(node.line);
             if (node instanceof ConstNode cn) {
                 if (cn.isLong) {
                     ldcLong(cn.longVal);
@@ -3181,6 +3311,7 @@ public final class BytecodeJIT {
         // ====================================================================
 
         boolean emitDouble(Node node) {
+            recordLine(node.line);
             if (node instanceof ConstNode cn) {
                 if (cn.isDouble) {
                     ldcDouble(cn.doubleVal);
@@ -3704,6 +3835,7 @@ public final class BytecodeJIT {
         }
 
         boolean emitBoolean(Node node) {
+            recordLine(node.line);
             if (node instanceof ConstNode cn) {
                 iconst(cn.boolVal ? 1 : 0);
                 return false;
@@ -4163,6 +4295,7 @@ public final class BytecodeJIT {
         }
 
         private boolean emitLockingTyped(LockingNode ln, ValType targetT) {
+            recordLine(ln.line);
             int valWords = (targetT == ValType.LONG || targetT == ValType.DOUBLE) ? 2 : 1;
             int lockLocal = allocTempLocal();
             int exLocal = allocTempLocal();
@@ -4210,6 +4343,7 @@ public final class BytecodeJIT {
         }
 
         private boolean emitTryTyped(TryNode tn, ValType targetT) {
+            recordLine(tn.line);
             int stackAtEntry = curStack;
             int valWords = (targetT == ValType.LONG || targetT == ValType.DOUBLE) ? 2 : 1;
 
@@ -4771,8 +4905,10 @@ public final class BytecodeJIT {
             invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
             dup();
             aload(0);
+            aload(0);
             getfield(ce.className, "outerFn", "Lcljl/Compiler$CompiledFn;", 1);
-            ifAcmpNe(slowLabel);
+            invokestatic("cljl/BytecodeJIT", "isOwnerFn", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z", 3, 1);
+            ifeq(slowLabel);
             pop();
 
             emitDirectPrimSelfCall(ps, args);
@@ -4811,8 +4947,10 @@ public final class BytecodeJIT {
             invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
             dup();
             aload(0);
+            aload(0);
             getfield(ce.className, "outerFn", "Lcljl/Compiler$CompiledFn;", 1);
-            ifAcmpNe(slowLabel);
+            invokestatic("cljl/BytecodeJIT", "isOwnerFn", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z", 3, 1);
+            ifeq(slowLabel);
             pop();
 
             aload(0);
@@ -5021,6 +5159,7 @@ public final class BytecodeJIT {
         // ====================================================================
 
         boolean emitBoxed(Node node) {
+            recordLine(node.line);
             ValType nt = typeOf(node);
             if (nt == ValType.LONG && !(node instanceof ConstNode)) {
                 if (emitLong(node)) return true;
@@ -5041,6 +5180,7 @@ public final class BytecodeJIT {
         }
 
         boolean emitBoxedImpl(Node node) {
+            recordLine(node.line);
             if (node instanceof ConstNode cn) {
                 Object v = cn.val;
                 if (v == null) {
@@ -6183,7 +6323,16 @@ public final class BytecodeJIT {
             }
 
             try {
-                ByteArrayOutputStream baos = new ByteArrayOutputStream(codeBytes.length + 32 + exceptionTable.size() * 8);
+                List<int[]> validLines = new ArrayList<>(lineNumbers.size());
+                for (int[] entry : lineNumbers) {
+                    if (entry[0] >= 0 && entry[0] < codeBytes.length && entry[0] <= 65535
+                            && entry[1] > 0 && entry[1] <= 65535) {
+                        validLines.add(entry);
+                    }
+                }
+                int lntAttrBytes = validLines.isEmpty() ? 0 : (6 + 2 + validLines.size() * 4);
+                ByteArrayOutputStream baos = new ByteArrayOutputStream(
+                        codeBytes.length + 32 + exceptionTable.size() * 8 + lntAttrBytes);
                 DataOutputStream out = new DataOutputStream(baos);
                 out.writeShort(accessFlags);
                 out.writeShort(nameIdx);
@@ -6191,7 +6340,7 @@ public final class BytecodeJIT {
                 out.writeShort(1);
 
                 out.writeShort(ce.codeAttrNameIdx);
-                out.writeInt(12 + codeBytes.length + exceptionTable.size() * 8);
+                out.writeInt(12 + codeBytes.length + exceptionTable.size() * 8 + lntAttrBytes);
                 out.writeShort(Math.max(maxStack, 6));
                 out.writeShort(maxLocals + maxTempLocals);
                 out.writeInt(codeBytes.length);
@@ -6203,7 +6352,18 @@ public final class BytecodeJIT {
                     out.writeShort(ex.handler.pos);
                     out.writeShort(ex.catchTypeCpIdx);
                 }
-                out.writeShort(0);
+                if (validLines.isEmpty()) {
+                    out.writeShort(0);
+                } else {
+                    out.writeShort(1);
+                    out.writeShort(ce.lineNumberTableAttrNameIdx);
+                    out.writeInt(2 + validLines.size() * 4);
+                    out.writeShort(validLines.size());
+                    for (int[] entry : validLines) {
+                        out.writeShort(entry[0]);
+                        out.writeShort(entry[1]);
+                    }
+                }
                 out.flush();
                 ce.methodInfos.add(baos.toByteArray());
             } catch (IOException e) {

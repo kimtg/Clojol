@@ -66,7 +66,11 @@ public final class ValType {
         if (val instanceof Long) return LONG;
         if (val instanceof Double) return DOUBLE;
         if (val instanceof Boolean) return BOOL;
-        return new ValType(Kind.REF, val.getClass(), true);
+        Class<?> cls = val.getClass();
+        if (val instanceof Fn && cls.getName().startsWith("cljl.jit.")) {
+            return new ValType(Kind.REF, Fn.class, true);
+        }
+        return new ValType(Kind.REF, cls, true);
     }
 
     public static ValType fromTag(Object tag, Namespace ns) {
