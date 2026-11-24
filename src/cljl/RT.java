@@ -193,8 +193,14 @@ public final class RT {
                     url = java.nio.file.Path.of(s).toUri().toURL();
                 }
             }
-            java.net.URLClassLoader ucl = new java.net.URLClassLoader(new java.net.URL[]{url}, baseLoader());
-            setRuntimeClassLoader(ucl, isStrictRuntimeLoader());
+            if (runtimeClassLoader instanceof clojure.lang.DynamicClassLoader dcl) {
+                dcl.addURL(url);
+                classpathDataReaders = null;
+            } else {
+                clojure.lang.DynamicClassLoader dcl = new clojure.lang.DynamicClassLoader(baseLoader());
+                dcl.addURL(url);
+                setRuntimeClassLoader(dcl, isStrictRuntimeLoader());
+            }
             return null;
         } catch (Exception e) {
             throw sneakyThrow(e);

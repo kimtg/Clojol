@@ -349,9 +349,57 @@ public final class Deps {
         return Path.of(System.getProperty("user.home"), ".clojure");
     }
 
+    private static volatile Map<String, String[]> cachedMavenServers;
+    private static volatile String cachedSettingsLocalRepo;
+    private static volatile boolean settingsLoaded;
+
+    private static void ensureMavenSettingsLoaded() {
+        if (settingsLoaded) return;
+        synchronized (Deps.class) {
+            if (settingsLoaded) return;
+            Map<String, String[]> servers = new HashMap<>();
+            String localRepo = null;
+            Path settingsPath = Path.of(System.getProperty("user.home"), ".m2", "settings.xml");
+            if (Files.isRegularFile(settingsPath)) {
+                try {
+                    DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+                    dbf.setFeature(javax.xml.XMLConstants.FEATURE_SECURE_PROCESSING, true);
+                    dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+                    dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+                    dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+                    dbf.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+                    dbf.setXIncludeAware(false);
+                    dbf.setExpandEntityReferences(false);
+                    Document doc = dbf.newDocumentBuilder().parse(settingsPath.toFile());
+                    Element root = doc.getDocumentElement();
+                    String lr = childText(root, "localRepository");
+                    if (lr != null && !lr.isBlank()) localRepo = lr.trim();
+                    Element serversEl = childElement(root, "servers");
+                    if (serversEl != null) {
+                        for (Element se : childElements(serversEl, "server")) {
+                            String id = childText(se, "id");
+                            String user = childText(se, "username");
+                            String pass = childText(se, "password");
+                            if (id != null && user != null && pass != null) {
+                                servers.put(id, new String[]{user, pass});
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Ignore malformed user settings.xml
+                }
+            }
+            cachedMavenServers = servers;
+            cachedSettingsLocalRepo = localRepo;
+            settingsLoaded = true;
+        }
+    }
+
     public static Path getM2RepoDir() {
         String env = System.getenv("M2_REPO");
         if (env != null && !env.isEmpty()) return Path.of(env);
+        ensureMavenSettingsLoaded();
+        if (cachedSettingsLocalRepo != null) return Path.of(cachedSettingsLocalRepo);
         return Path.of(System.getProperty("user.home"), ".m2", "repository");
     }
 
@@ -527,24 +575,14 @@ public final class Deps {
         Map<Symbol, TreeNode> libsBySymbol = new LinkedHashMap<>();
 
         if (opts.scp == null && !resolvedTopDeps.isEmpty()) {
-            ExecutorService pool = Executors.newFixedThreadPool(opts.sthreads, r -> {
+            ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, opts.sthreads), r -> {
                 Thread t = new Thread(r, "cljl-deps-worker");
                 t.setDaemon(true);
                 return t;
             });
             try {
-                Set<Symbol> globalExclusions = new HashSet<>();
-                for (Map.Entry<Symbol, Map<Object, Object>> e : resolvedTopDeps.entrySet()) {
-                    Symbol lib = e.getKey();
-                    Map<Object, Object> coord = applyOverridesAndDefaults(lib, e.getValue(), overrideDeps, defaultDeps);
-                    if (coord == null) continue;
-                    TreeNode node = resolveDepRecursive(
-                            lib, coord, projectDir, repos, overrideDeps, defaultDeps,
-                            globalExclusions, libsBySymbol, new HashSet<>(), pool, traceSteps, "root");
-                    if (node != null) {
-                        treeRoots.add(node);
-                    }
-                }
+                resolveDepsBfs(resolvedTopDeps, projectDir, repos, overrideDeps, defaultDeps,
+                        treeRoots, libsBySymbol, pool, traceSteps);
             } finally {
                 pool.shutdownNow();
             }
@@ -620,6 +658,9 @@ public final class Deps {
     public static void applyClasspath(BasisResult basis, CliOptions opts) {
         if (basis == null) return;
         System.setProperty("clojure.basis", basis.basisFile != null ? basis.basisFile.toString() : "");
+        if (basis.basisMap != null) {
+            StdLib112.setInitialBasis(basis.basisMap);
+        }
         if (basis.classpath != null && !basis.classpath.isEmpty()) {
             String baseCp = System.getProperty("java.class.path", "");
             if (!baseCp.isEmpty() && !basis.classpath.contains(baseCp)) {
@@ -649,8 +690,9 @@ public final class Deps {
             } catch (Exception ignored) {}
         }
         if (!urls.isEmpty() || strict) {
-            URLClassLoader ucl = new URLClassLoader(urls.toArray(new URL[0]), RT.class.getClassLoader());
-            RT.setRuntimeClassLoader(ucl, strict);
+            clojure.lang.DynamicClassLoader dcl = new clojure.lang.DynamicClassLoader(RT.class.getClassLoader());
+            for (URL u : urls) dcl.addURL(u);
+            RT.setRuntimeClassLoader(dcl, strict);
         }
     }
 
@@ -892,6 +934,9 @@ public final class Deps {
                     RT.addClasspath(root);
                 }
             }
+            if (basis.basisMap != null) {
+                StdLib112.mergeBasis(basis.basisMap);
+            }
             for (ISeq s = libCoords.seq(); s != null; s = s.next()) {
                 Map.Entry<?, ?> me = (Map.Entry<?, ?>) s.first();
                 if (me.getKey() instanceof Symbol sym) added.add(sym);
@@ -936,6 +981,9 @@ public final class Deps {
             if (root != null && !root.isEmpty()) {
                 RT.addClasspath(root);
             }
+        }
+        if (basis.basisMap != null) {
+            StdLib112.mergeBasis(basis.basisMap);
         }
         List<Symbol> libs = new ArrayList<>();
         for (Symbol k : basis.libsBySymbol.keySet()) libs.add(k);
@@ -1233,172 +1281,460 @@ public final class Deps {
     // Dependency Coordinate Resolution (Local, Maven, Git)
     // ========================================================================
 
-    private static TreeNode resolveDepRecursive(
-            Symbol lib,
-            Map<Object, Object> coord,
-            Path baseDir,
+    private static final class BfsTask {
+        final Symbol lib;
+        final Map<Object, Object> coord;
+        final Path baseDir;
+        final Set<Symbol> exclusions;
+        final int depth;
+        final TreeNode parent;
+        final String reason;
+
+        BfsTask(Symbol lib, Map<Object, Object> coord, Path baseDir,
+                Set<Symbol> exclusions, int depth, TreeNode parent, String reason) {
+            this.lib = lib;
+            this.coord = coord;
+            this.baseDir = baseDir;
+            this.exclusions = exclusions;
+            this.depth = depth;
+            this.parent = parent;
+            this.reason = reason;
+        }
+    }
+
+    private static boolean isExcluded(Symbol lib, Set<Symbol> exclusions) {
+        if (exclusions == null || exclusions.isEmpty()) return false;
+        if (exclusions.contains(lib)) return true;
+        String g = lib.getNamespace() != null ? lib.getNamespace() : lib.getName();
+        String a = lib.getName();
+        for (Symbol ex : exclusions) {
+            String eg = ex.getNamespace() != null ? ex.getNamespace() : ex.getName();
+            String ea = ex.getName();
+            if (("*".equals(eg) || eg.equals(g)) && ("*".equals(ea) || ea.equals(a))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String deriveGitUrl(Symbol lib) {
+        String ns = lib.getNamespace();
+        String name = lib.getName();
+        if (ns == null || name == null) return null;
+        if (ns.startsWith("io.github.") || ns.startsWith("com.github.")) {
+            String org = ns.substring("io.github.".length());
+            if (!org.isEmpty()) return "https://github.com/" + org + "/" + name + ".git";
+        }
+        if (ns.startsWith("io.gitlab.") || ns.startsWith("com.gitlab.")) {
+            String org = ns.substring("io.gitlab.".length());
+            if (!org.isEmpty()) return "https://gitlab.com/" + org + "/" + name + ".git";
+        }
+        return null;
+    }
+
+    /**
+     * Maven-compatible version comparator (numeric segments, standard qualifiers:
+     * alpha < beta < milestone < rc < snapshot < "" (final) < sp).
+     * Returns > 0 if v1 is newer than v2, < 0 if older, 0 if equal.
+     */
+    public static int compareMavenVersions(String v1, String v2) {
+        if (v1 == null && v2 == null) return 0;
+        if (v1 == null) return -1;
+        if (v2 == null) return 1;
+        if (v1.equals(v2)) return 0;
+        List<String> t1 = tokenizeMavenVersion(v1);
+        List<String> t2 = tokenizeMavenVersion(v2);
+        int max = Math.max(t1.size(), t2.size());
+        for (int i = 0; i < max; i++) {
+            String a = i < t1.size() ? t1.get(i) : "";
+            String b = i < t2.size() ? t2.get(i) : "";
+            int c = compareVersionToken(a, b);
+            if (c != 0) return c;
+        }
+        return 0;
+    }
+
+    private static List<String> tokenizeMavenVersion(String v) {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        int prevType = 0; // 1 = digit, 2 = alpha
+        for (int i = 0; i < v.length(); i++) {
+            char ch = v.charAt(i);
+            if (ch == '.' || ch == '-' || ch == '_') {
+                if (!cur.isEmpty()) {
+                    tokens.add(cur.toString());
+                    cur.setLength(0);
+                }
+                prevType = 0;
+            } else {
+                int type = Character.isDigit(ch) ? 1 : 2;
+                if (prevType != 0 && prevType != type && !cur.isEmpty()) {
+                    tokens.add(cur.toString());
+                    cur.setLength(0);
+                }
+                cur.append(ch);
+                prevType = type;
+            }
+        }
+        if (!cur.isEmpty()) tokens.add(cur.toString());
+        return tokens;
+    }
+
+    private static int qualifierRank(String s) {
+        if (s.isEmpty()) return 6;
+        return switch (s.toLowerCase(Locale.ROOT)) {
+            case "a", "alpha" -> 1;
+            case "b", "beta" -> 2;
+            case "m", "milestone" -> 3;
+            case "rc", "cr" -> 4;
+            case "snapshot" -> 5;
+            case "ga", "final", "release" -> 6;
+            case "sp" -> 7;
+            default -> 8;
+        };
+    }
+
+    private static boolean isAllDigits(String s) {
+        if (s.isEmpty()) return false;
+        for (int i = 0; i < s.length(); i++) {
+            if (!Character.isDigit(s.charAt(i))) return false;
+        }
+        return true;
+    }
+
+    private static int compareVersionToken(String a, String b) {
+        if (a.equals(b)) return 0;
+        boolean aNum = isAllDigits(a);
+        boolean bNum = isAllDigits(b);
+        if (aNum && bNum) {
+            return new java.math.BigInteger(a).compareTo(new java.math.BigInteger(b));
+        }
+        if (aNum && b.isEmpty()) {
+            return new java.math.BigInteger(a).compareTo(java.math.BigInteger.ZERO);
+        }
+        if (bNum && a.isEmpty()) {
+            return java.math.BigInteger.ZERO.compareTo(new java.math.BigInteger(b));
+        }
+        if (aNum) return 1;  // numeric > qualifier (e.g., 1.0.1 > 1.0-alpha)
+        if (bNum) return -1;
+        int ra = qualifierRank(a);
+        int rb = qualifierRank(b);
+        if (ra != rb) return Integer.compare(ra, rb);
+        return a.compareToIgnoreCase(b);
+    }
+
+    private static boolean isVersionRange(String ver) {
+        return ver != null && ver.length() >= 3
+                && (ver.startsWith("[") || ver.startsWith("("))
+                && (ver.endsWith("]") || ver.endsWith(")"));
+    }
+
+    private static String resolveMavenVersionRange(String group, String artifact, String range, Map<String, String> repos) {
+        if (!isVersionRange(range)) return range;
+        boolean loInc = range.startsWith("[");
+        boolean hiInc = range.endsWith("]");
+        String inner = range.substring(1, range.length() - 1).trim();
+        int comma = inner.indexOf(',');
+        if (comma < 0) {
+            // Exact pinned range [1.2.3]
+            return inner;
+        }
+        String lo = inner.substring(0, comma).trim();
+        String hi = inner.substring(comma + 1).trim();
+        List<String> versions = fetchMavenVersions(group, artifact, repos);
+        String best = null;
+        for (String v : versions) {
+            boolean loOk = lo.isEmpty() || (loInc ? compareMavenVersions(v, lo) >= 0 : compareMavenVersions(v, lo) > 0);
+            boolean hiOk = hi.isEmpty() || (hiInc ? compareMavenVersions(v, hi) <= 0 : compareMavenVersions(v, hi) < 0);
+            if (loOk && hiOk && (best == null || compareMavenVersions(v, best) > 0)) {
+                best = v;
+            }
+        }
+        if (best != null) return best;
+        if (!lo.isEmpty()) return lo;
+        if (!hi.isEmpty()) return hi;
+        return range;
+    }
+
+    private static int compareCoordsAtSameDepth(Map<Object, Object> candidate, Map<Object, Object> existing) {
+        // Local/root > git > mvn; for two mvn coords, newer mvn/version wins
+        boolean cLocal = candidate.containsKey(Keyword.intern("local/root"));
+        boolean eLocal = existing.containsKey(Keyword.intern("local/root"));
+        if (cLocal != eLocal) return cLocal ? 1 : -1;
+        Object cVer = candidate.get(Keyword.intern("mvn/version"));
+        Object eVer = existing.get(Keyword.intern("mvn/version"));
+        if (cVer != null && eVer != null) {
+            return compareMavenVersions(cVer.toString(), eVer.toString());
+        }
+        return 0;
+    }
+
+    /**
+     * Breadth-First Search (BFS) nearest-then-newest dependency resolution matching
+     * official Clojure tools.deps semantics, with parallel prefetching of POM/JAR downloads.
+     */
+    private static void resolveDepsBfs(
+            Map<Symbol, Map<Object, Object>> resolvedTopDeps,
+            Path projectDir,
             Map<String, String> repos,
             Map<Symbol, Map<Object, Object>> overrideDeps,
             Map<Symbol, Map<Object, Object>> defaultDeps,
-            Set<Symbol> parentExclusions,
+            List<TreeNode> treeRoots,
             Map<Symbol, TreeNode> libsBySymbol,
-            Set<Symbol> visiting,
             ExecutorService pool,
-            List<Object> traceSteps,
-            String reason) {
+            List<Object> traceSteps) {
 
-        if (parentExclusions.contains(lib) || visiting.contains(lib)) {
-            return null;
+        Map<Symbol, Integer> selectedDepth = new HashMap<>();
+        Map<Symbol, Map<Object, Object>> selectedCoord = new HashMap<>();
+        List<BfsTask> currentLevel = new ArrayList<>();
+
+        for (Map.Entry<Symbol, Map<Object, Object>> e : resolvedTopDeps.entrySet()) {
+            Symbol lib = e.getKey();
+            Map<Object, Object> coord = applyOverridesAndDefaults(lib, e.getValue(), overrideDeps, defaultDeps);
+            if (coord == null) continue;
+            currentLevel.add(new BfsTask(lib, coord, projectDir, Set.of(), 0, null, "root"));
         }
-        if (libsBySymbol.containsKey(lib)) {
-            return libsBySymbol.get(lib);
-        }
 
-        visiting.add(lib);
-        try {
-            Object localRootObj = coord.get(Keyword.intern("local/root"));
-            Object mvnVerObj = coord.get(Keyword.intern("mvn/version"));
-            Object gitUrlObj = coord.get(Keyword.intern("git/url"));
-            Object gitShaObj = coord.get(Keyword.intern("git/sha"));
-            if (gitShaObj == null) gitShaObj = coord.get(Keyword.intern("sha"));
-
-            TreeNode node;
-            Set<Symbol> childExclusions = new HashSet<>(parentExclusions);
-            Object exObj = coord.get(Keyword.intern("exclusions"));
-            if (exObj instanceof Iterable<?> it) {
-                for (Object ex : it) {
-                    if (ex instanceof Symbol exSym) childExclusions.add(exSym);
+        Path m2 = getM2RepoDir();
+        int depth = 0;
+        while (!currentLevel.isEmpty()) {
+            // 1. Select winners for this BFS level (nearest wins; at equal depth, newest wins)
+            Map<Symbol, BfsTask> levelWinners = new LinkedHashMap<>();
+            for (BfsTask task : currentLevel) {
+                if (isExcluded(task.lib, task.exclusions)) continue;
+                Integer prevDepth = selectedDepth.get(task.lib);
+                if (prevDepth != null && prevDepth < depth) {
+                    // Already resolved at a strictly shallower depth -> nearest wins
+                    recordTrace(traceSteps, task.lib, task.coord, "older-or-deeper:" + task.reason);
+                    continue;
+                }
+                BfsTask existingAtLevel = levelWinners.get(task.lib);
+                if (existingAtLevel == null) {
+                    levelWinners.put(task.lib, task);
+                } else if (compareCoordsAtSameDepth(task.coord, existingAtLevel.coord) > 0) {
+                    recordTrace(traceSteps, existingAtLevel.lib, existingAtLevel.coord, "superseded:" + existingAtLevel.reason);
+                    levelWinners.put(task.lib, task);
+                } else {
+                    recordTrace(traceSteps, task.lib, task.coord, "superseded:" + task.reason);
                 }
             }
 
-            if (localRootObj != null) {
-                Path localPath = resolveLocalPath(localRootObj.toString(), baseDir);
-                node = new TreeNode(lib, toPersistentMap(coord), localRootObj.toString(), localPath.toString());
-                libsBySymbol.put(lib, node);
-                recordTrace(traceSteps, lib, coord, reason);
+            if (levelWinners.isEmpty()) break;
 
-                if (Files.isDirectory(localPath)) {
-                    Path childDepsEdn = localPath.resolve("deps.edn");
-                    if (Files.isRegularFile(childDepsEdn)) {
-                        Map<Object, Object> subMap = readEdnMap(childDepsEdn);
+            // 2. Parallel prefetch of Maven POMs & JARs for this BFS level
+            if (levelWinners.size() > 1) {
+                List<Future<?>> prefetches = new ArrayList<>();
+                for (BfsTask task : levelWinners.values()) {
+                    Object mvnVerObj = task.coord.get(Keyword.intern("mvn/version"));
+                    if (mvnVerObj == null) continue;
+                    if ("org.clojure".equals(task.lib.ns) && "clojure".equals(task.lib.name)) continue;
+                    String ver = mvnVerObj.toString();
+                    if ("RELEASE".equals(ver) || "LATEST".equals(ver) || isVersionRange(ver)) continue;
+                    prefetches.add(pool.submit(() -> {
+                        try {
+                            String group = task.lib.getNamespace() != null ? task.lib.getNamespace() : task.lib.getName();
+                            String artifact = task.lib.getName();
+                            validateCoordSegment(group, "Maven groupId");
+                            validateCoordSegment(artifact, "Maven artifactId");
+                            validateCoordSegment(ver, "Maven version");
+                            String classifier = task.coord.get(Keyword.intern("classifier")) != null
+                                    ? task.coord.get(Keyword.intern("classifier")).toString() : null;
+                            String ext = task.coord.get(Keyword.intern("extension")) != null
+                                    ? task.coord.get(Keyword.intern("extension")).toString() : "jar";
+                            String relBase = group.replace('.', '/') + "/" + artifact + "/" + ver + "/" + artifact + "-" + ver;
+                            Path pomPath = safeResolveChild(m2, relBase + ".pom", "Maven POM");
+                            Path jarPath = safeResolveChild(m2, relBase + (classifier != null ? "-" + classifier : "") + "." + ext, "Maven artifact");
+                            if (!Files.isRegularFile(pomPath)) downloadFromRepos(relBase + ".pom", pomPath, repos);
+                            if (!"pom".equals(ext) && !Files.isRegularFile(jarPath)) {
+                                downloadFromRepos(relBase + (classifier != null ? "-" + classifier : "") + "." + ext, jarPath, repos);
+                            }
+                        } catch (Exception ignored) {
+                            // Errors are surfaced deterministically during sequential node materialization below
+                        }
+                    }));
+                }
+                for (Future<?> f : prefetches) {
+                    try { f.get(); } catch (Exception ignored) {}
+                }
+            }
+
+            // 3. Materialize nodes & enqueue next BFS level
+            List<BfsTask> nextLevel = new ArrayList<>();
+            for (BfsTask task : levelWinners.values()) {
+                Symbol lib = task.lib;
+                Map<Object, Object> coord = task.coord;
+                selectedDepth.put(lib, depth);
+                selectedCoord.put(lib, coord);
+
+                Set<Symbol> childExclusions = new HashSet<>(task.exclusions);
+                Object exObj = coord.get(Keyword.intern("exclusions"));
+                if (exObj instanceof Iterable<?> it) {
+                    for (Object ex : it) {
+                        if (ex instanceof Symbol exSym) childExclusions.add(exSym);
+                    }
+                }
+
+                Object localRootObj = coord.get(Keyword.intern("local/root"));
+                Object mvnVerObj = coord.get(Keyword.intern("mvn/version"));
+                Object gitUrlObj = coord.get(Keyword.intern("git/url"));
+                Object gitShaObj = coord.get(Keyword.intern("git/sha"));
+                if (gitShaObj == null) gitShaObj = coord.get(Keyword.intern("sha"));
+                Object gitTagObj = coord.get(Keyword.intern("git/tag"));
+                if (gitUrlObj == null && (gitShaObj != null || gitTagObj != null)) {
+                    gitUrlObj = deriveGitUrl(lib);
+                }
+
+                TreeNode node = null;
+
+                if (localRootObj != null) {
+                    Path localPath = resolveLocalPath(localRootObj.toString(), task.baseDir);
+                    node = new TreeNode(lib, toPersistentMap(coord), localRootObj.toString(), localPath.toString());
+                    libsBySymbol.put(lib, node);
+                    recordTrace(traceSteps, lib, coord, task.reason);
+
+                    if (Files.isDirectory(localPath)) {
+                        Path childDepsEdn = localPath.resolve("deps.edn");
+                        if (Files.isRegularFile(childDepsEdn)) {
+                            Map<Object, Object> subMap = readEdnMap(childDepsEdn);
+                            extractPrepLib(subMap, node);
+                            Map<Symbol, Map<Object, Object>> subDeps = toSymbolCoordMap(subMap.get(Keyword.intern("deps")));
+                            for (Map.Entry<Symbol, Map<Object, Object>> se : subDeps.entrySet()) {
+                                Map<Object, Object> sc = applyOverridesAndDefaults(se.getKey(), se.getValue(), overrideDeps, defaultDeps);
+                                if (sc == null) continue;
+                                nextLevel.add(new BfsTask(se.getKey(), sc, localPath, childExclusions, depth + 1, node, lib.toString()));
+                            }
+                        }
+                    }
+                } else if (mvnVerObj != null) {
+                    String ver = mvnVerObj.toString();
+                    String group = lib.getNamespace() != null ? lib.getNamespace() : lib.getName();
+                    String artifact = lib.getName();
+                    validateCoordSegment(group, "Maven groupId");
+                    validateCoordSegment(artifact, "Maven artifactId");
+
+                    // Clojol itself provides org.clojure/clojure; avoid downloading it from Maven
+                    if ("org.clojure".equals(group) && "clojure".equals(artifact)) {
+                        node = new TreeNode(lib, toPersistentMap(coord), ver, "");
+                        libsBySymbol.put(lib, node);
+                        recordTrace(traceSteps, lib, coord, task.reason);
+                    } else {
+                        if ("RELEASE".equals(ver) || "LATEST".equals(ver)) {
+                            List<String> vers = fetchMavenVersions(group, artifact, repos);
+                            if (!vers.isEmpty()) ver = vers.get(vers.size() - 1);
+                        } else if (isVersionRange(ver)) {
+                            ver = resolveMavenVersionRange(group, artifact, ver, repos);
+                        }
+                        validateCoordSegment(ver, "Maven version");
+                        String classifier = coord.get(Keyword.intern("classifier")) != null
+                                ? coord.get(Keyword.intern("classifier")).toString() : null;
+                        if (classifier != null) validateCoordSegment(classifier, "Maven classifier");
+                        String ext = coord.get(Keyword.intern("extension")) != null
+                                ? coord.get(Keyword.intern("extension")).toString() : "jar";
+                        validateCoordSegment(ext, "Maven extension");
+
+                        String relBase = group.replace('.', '/') + "/" + artifact + "/" + ver + "/" + artifact + "-" + ver;
+                        String jarRel = relBase + (classifier != null ? "-" + classifier : "") + "." + ext;
+                        Path pomPath = safeResolveChild(m2, relBase + ".pom", "Maven POM");
+                        Path jarPath = safeResolveChild(m2, jarRel, "Maven artifact");
+
+                        if (!Files.isRegularFile(pomPath)) {
+                            downloadFromRepos(relBase + ".pom", pomPath, repos);
+                        }
+                        if (!"pom".equals(ext) && !Files.isRegularFile(jarPath)) {
+                            boolean ok = downloadFromRepos(jarRel, jarPath, repos);
+                            if (!ok && !Files.isRegularFile(jarPath)) {
+                                throw new RuntimeException("Could not find artifact " + group + ":" + artifact
+                                        + (classifier != null ? ":" + classifier : "") + ":" + ext + ":" + ver
+                                        + " in repositories: " + repos.keySet());
+                            }
+                        }
+
+                        node = new TreeNode(lib, toPersistentMap(coord), ver, "pom".equals(ext) ? "" : jarPath.toString());
+                        libsBySymbol.put(lib, node);
+                        recordTrace(traceSteps, lib, coord, task.reason);
+
+                        if (Files.isRegularFile(pomPath)) {
+                            PomInfo pom = parsePom(pomPath, repos, m2);
+                            node.licenses.addAll(pom.licenses);
+                            for (PomDep pd : pom.deps) {
+                                if (pd.optional || "test".equals(pd.scope) || "provided".equals(pd.scope) || "system".equals(pd.scope)) {
+                                    continue;
+                                }
+                                Symbol childSym = Symbol.intern(pd.groupId, pd.artifactId);
+                                if (isExcluded(childSym, childExclusions)) continue;
+                                Map<Object, Object> cc = new LinkedHashMap<>();
+                                cc.put(Keyword.intern("mvn/version"), pd.version);
+                                if (pd.classifier != null && !pd.classifier.isEmpty()) {
+                                    cc.put(Keyword.intern("classifier"), pd.classifier);
+                                }
+                                if (pd.type != null && !pd.type.isEmpty() && !"jar".equals(pd.type)) {
+                                    cc.put(Keyword.intern("extension"), pd.type);
+                                }
+                                if (pd.exclusions != null && !pd.exclusions.isEmpty()) {
+                                    cc.put(Keyword.intern("exclusions"), new ArrayList<>(pd.exclusions));
+                                }
+                                cc = applyOverridesAndDefaults(childSym, cc, overrideDeps, defaultDeps);
+                                if (cc == null) continue;
+                                nextLevel.add(new BfsTask(childSym, cc, task.baseDir, childExclusions, depth + 1, node, lib.toString()));
+                            }
+                        }
+                    }
+                } else if (gitUrlObj != null && (gitShaObj != null || gitTagObj != null)) {
+                    String url = gitUrlObj.toString();
+                    validateGitUrl(url);
+                    String sha = gitShaObj != null ? gitShaObj.toString() : null;
+                    if (sha == null && gitTagObj != null) {
+                        String tag = gitTagObj.toString();
+                        validateGitRef(tag, "git/tag");
+                        sha = resolveGitTagSha(url, tag);
+                        if (sha == null) {
+                            throw new RuntimeException("Could not resolve :git/tag " + tag + " from " + url);
+                        }
+                    }
+                    validateGitRef(sha, "git/sha");
+                    String group = lib.getNamespace() != null ? lib.getNamespace() : lib.getName();
+                    String artifact = lib.getName();
+                    validateCoordSegment(group, "git lib group");
+                    validateCoordSegment(artifact, "git lib artifact");
+                    Path gitLibsBase = getGitLibsDir().resolve("libs");
+                    Path gitDir = safeResolveChild(gitLibsBase, group + "/" + artifact + "/" + sha, "git lib");
+                    ensureGitCheckout(url, sha, gitDir);
+
+                    Path rootSub = gitDir;
+                    Object depsRootObj = coord.get(Keyword.intern("deps/root"));
+                    if (depsRootObj != null) {
+                        rootSub = safeResolveChild(gitDir, depsRootObj.toString(), "deps/root");
+                    }
+
+                    String shortSha = sha.length() > 7 ? sha.substring(0, 7) : sha;
+                    node = new TreeNode(lib, toPersistentMap(coord), shortSha, rootSub.toString());
+                    libsBySymbol.put(lib, node);
+                    recordTrace(traceSteps, lib, coord, task.reason);
+
+                    Path subDepsFile = rootSub.resolve("deps.edn");
+                    if (Files.isRegularFile(subDepsFile)) {
+                        Map<Object, Object> subMap = readEdnMap(subDepsFile);
                         extractPrepLib(subMap, node);
                         Map<Symbol, Map<Object, Object>> subDeps = toSymbolCoordMap(subMap.get(Keyword.intern("deps")));
                         for (Map.Entry<Symbol, Map<Object, Object>> se : subDeps.entrySet()) {
                             Map<Object, Object> sc = applyOverridesAndDefaults(se.getKey(), se.getValue(), overrideDeps, defaultDeps);
                             if (sc == null) continue;
-                            TreeNode child = resolveDepRecursive(
-                                    se.getKey(), sc, localPath, repos, overrideDeps, defaultDeps,
-                                    childExclusions, libsBySymbol, visiting, pool, traceSteps, lib.toString());
-                            if (child != null) node.children.add(child);
+                            nextLevel.add(new BfsTask(se.getKey(), sc, rootSub, childExclusions, depth + 1, node, lib.toString()));
                         }
                     }
                 }
-                return node;
-            }
 
-            if (mvnVerObj != null) {
-                String ver = mvnVerObj.toString();
-                String group = lib.getNamespace() != null ? lib.getNamespace() : lib.getName();
-                String artifact = lib.getName();
-                validateCoordSegment(group, "Maven groupId");
-                validateCoordSegment(artifact, "Maven artifactId");
-                if ("RELEASE".equals(ver) || "LATEST".equals(ver)) {
-                    List<String> vers = fetchMavenVersions(group, artifact, repos);
-                    if (!vers.isEmpty()) ver = vers.get(vers.size() - 1);
-                }
-                validateCoordSegment(ver, "Maven version");
-                String classifier = coord.get(Keyword.intern("classifier")) != null
-                        ? coord.get(Keyword.intern("classifier")).toString() : null;
-                if (classifier != null) validateCoordSegment(classifier, "Maven classifier");
-                String ext = coord.get(Keyword.intern("extension")) != null
-                        ? coord.get(Keyword.intern("extension")).toString() : "jar";
-                validateCoordSegment(ext, "Maven extension");
-
-                Path m2 = getM2RepoDir();
-                String relBase = group.replace('.', '/') + "/" + artifact + "/" + ver + "/" + artifact + "-" + ver;
-                Path pomPath = safeResolveChild(m2, relBase + ".pom", "Maven POM");
-                Path jarPath = safeResolveChild(m2, relBase + (classifier != null ? "-" + classifier : "") + "." + ext, "Maven artifact");
-
-                if (!Files.isRegularFile(pomPath)) {
-                    downloadFromRepos(relBase + ".pom", pomPath, repos);
-                }
-                if (!"pom".equals(ext) && !Files.isRegularFile(jarPath)) {
-                    downloadFromRepos(relBase + (classifier != null ? "-" + classifier : "") + "." + ext, jarPath, repos);
-                }
-
-                node = new TreeNode(lib, toPersistentMap(coord), ver, jarPath.toString());
-                libsBySymbol.put(lib, node);
-                recordTrace(traceSteps, lib, coord, reason);
-
-                if (Files.isRegularFile(pomPath)) {
-                    PomInfo pom = parsePom(pomPath, repos, m2);
-                    node.licenses.addAll(pom.licenses);
-                    for (PomDep pd : pom.deps) {
-                        if (pd.optional || "test".equals(pd.scope) || "provided".equals(pd.scope) || "system".equals(pd.scope)) {
-                            continue;
-                        }
-                        Symbol childSym = Symbol.intern(pd.groupId, pd.artifactId);
-                        if (childExclusions.contains(childSym)) continue;
-                        Map<Object, Object> cc = new LinkedHashMap<>();
-                        cc.put(Keyword.intern("mvn/version"), pd.version);
-                        if (pd.exclusions != null && !pd.exclusions.isEmpty()) {
-                            cc.put(Keyword.intern("exclusions"), new ArrayList<>(pd.exclusions));
-                        }
-                        cc = applyOverridesAndDefaults(childSym, cc, overrideDeps, defaultDeps);
-                        if (cc == null) continue;
-                        TreeNode child = resolveDepRecursive(
-                                childSym, cc, baseDir, repos, overrideDeps, defaultDeps,
-                                childExclusions, libsBySymbol, visiting, pool, traceSteps, lib.toString());
-                        if (child != null) node.children.add(child);
+                if (node != null) {
+                    if (task.parent == null) {
+                        treeRoots.add(node);
+                    } else {
+                        task.parent.children.add(node);
                     }
                 }
-                return node;
             }
 
-            if (gitUrlObj != null && gitShaObj != null) {
-                String url = gitUrlObj.toString();
-                String sha = gitShaObj.toString();
-                validateGitUrl(url);
-                validateGitRef(sha, "git/sha");
-                String group = lib.getNamespace() != null ? lib.getNamespace() : lib.getName();
-                String artifact = lib.getName();
-                validateCoordSegment(group, "git lib group");
-                validateCoordSegment(artifact, "git lib artifact");
-                Path gitLibsBase = getGitLibsDir().resolve("libs");
-                Path gitDir = safeResolveChild(gitLibsBase, group + "/" + artifact + "/" + sha, "git lib");
-                ensureGitCheckout(url, sha, gitDir);
-
-                Path rootSub = gitDir;
-                Object depsRootObj = coord.get(Keyword.intern("deps/root"));
-                if (depsRootObj != null) {
-                    rootSub = safeResolveChild(gitDir, depsRootObj.toString(), "deps/root");
-                }
-
-                String shortSha = sha.length() > 7 ? sha.substring(0, 7) : sha;
-                node = new TreeNode(lib, toPersistentMap(coord), shortSha, rootSub.toString());
-                libsBySymbol.put(lib, node);
-                recordTrace(traceSteps, lib, coord, reason);
-
-                Path subDepsFile = rootSub.resolve("deps.edn");
-                if (Files.isRegularFile(subDepsFile)) {
-                    Map<Object, Object> subMap = readEdnMap(subDepsFile);
-                    extractPrepLib(subMap, node);
-                    Map<Symbol, Map<Object, Object>> subDeps = toSymbolCoordMap(subMap.get(Keyword.intern("deps")));
-                    for (Map.Entry<Symbol, Map<Object, Object>> se : subDeps.entrySet()) {
-                        Map<Object, Object> sc = applyOverridesAndDefaults(se.getKey(), se.getValue(), overrideDeps, defaultDeps);
-                        if (sc == null) continue;
-                        TreeNode child = resolveDepRecursive(
-                                se.getKey(), sc, rootSub, repos, overrideDeps, defaultDeps,
-                                childExclusions, libsBySymbol, visiting, pool, traceSteps, lib.toString());
-                        if (child != null) node.children.add(child);
-                    }
-                }
-                return node;
-            }
-
-            return null;
-        } finally {
-            visiting.remove(lib);
+            currentLevel = nextLevel;
+            depth++;
         }
     }
 
@@ -1509,6 +1845,8 @@ public final class Deps {
         String artifactId;
         String version;
         String scope = "compile";
+        String classifier = null;
+        String type = "jar";
         boolean optional = false;
         Set<Symbol> exclusions = new HashSet<>();
     }
@@ -1520,8 +1858,19 @@ public final class Deps {
         final List<String> licenses = new ArrayList<>();
     }
 
+    private static final HttpClient SHARED_HTTP_CLIENT = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .followRedirects(HttpClient.Redirect.NEVER)
+            .build();
+
     private static PomInfo parsePom(Path pomPath, Map<String, String> repos, Path m2) {
+        return parsePom(pomPath, repos, m2, new HashSet<>());
+    }
+
+    private static PomInfo parsePom(Path pomPath, Map<String, String> repos, Path m2, Set<Path> seenPoms) {
         PomInfo info = new PomInfo();
+        Path norm = pomPath.toAbsolutePath().normalize();
+        if (!seenPoms.add(norm)) return info;
         try {
             DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
             dbf.setFeature(javax.xml.XMLConstants.FEATURE_SECURE_PROCESSING, true);
@@ -1539,7 +1888,7 @@ public final class Deps {
             String artifactId = childText(root, "artifactId");
             String version = childText(root, "version");
 
-            // Parent inheritance
+            // Parent inheritance (properties, dependencyManagement, and dependencies)
             Element parentEl = childElement(root, "parent");
             if (parentEl != null) {
                 String pg = childText(parentEl, "groupId");
@@ -1557,9 +1906,10 @@ public final class Deps {
                         downloadFromRepos(pRel, pPom, repos);
                     }
                     if (Files.isRegularFile(pPom)) {
-                        PomInfo parentInfo = parsePom(pPom, repos, m2);
+                        PomInfo parentInfo = parsePom(pPom, repos, m2, seenPoms);
                         info.properties.putAll(parentInfo.properties);
                         info.managedVersions.putAll(parentInfo.managedVersions);
+                        info.deps.addAll(parentInfo.deps);
                     }
                 }
             }
@@ -1597,7 +1947,24 @@ public final class Deps {
                         String g = resolveProps(childText(de, "groupId"), info.properties);
                         String a = resolveProps(childText(de, "artifactId"), info.properties);
                         String v = resolveProps(childText(de, "version"), info.properties);
-                        if (g != null && a != null && v != null) {
+                        String scope = resolveProps(childText(de, "scope"), info.properties);
+                        String type = resolveProps(childText(de, "type"), info.properties);
+                        if ("import".equals(scope) && "pom".equals(type) && g != null && a != null && v != null) {
+                            validateCoordSegment(g, "BOM groupId");
+                            validateCoordSegment(a, "BOM artifactId");
+                            validateCoordSegment(v, "BOM version");
+                            String bomRel = g.replace('.', '/') + "/" + a + "/" + v + "/" + a + "-" + v + ".pom";
+                            Path bomPom = safeResolveChild(m2, bomRel, "BOM POM");
+                            if (!Files.isRegularFile(bomPom)) {
+                                downloadFromRepos(bomRel, bomPom, repos);
+                            }
+                            if (Files.isRegularFile(bomPom)) {
+                                PomInfo bomInfo = parsePom(bomPom, repos, m2, seenPoms);
+                                for (Map.Entry<String, String> me : bomInfo.managedVersions.entrySet()) {
+                                    info.managedVersions.putIfAbsent(me.getKey(), me.getValue());
+                                }
+                            }
+                        } else if (g != null && a != null && v != null) {
                             info.managedVersions.put(g + ":" + a, v);
                         }
                     }
@@ -1614,15 +1981,19 @@ public final class Deps {
                     if (pd.version == null && pd.groupId != null && pd.artifactId != null) {
                         pd.version = info.managedVersions.get(pd.groupId + ":" + pd.artifactId);
                     }
-                    String sc = childText(de, "scope");
+                    String sc = resolveProps(childText(de, "scope"), info.properties);
                     if (sc != null) pd.scope = sc;
-                    String opt = childText(de, "optional");
+                    String cl = resolveProps(childText(de, "classifier"), info.properties);
+                    if (cl != null && !cl.isEmpty()) pd.classifier = cl;
+                    String tp = resolveProps(childText(de, "type"), info.properties);
+                    if (tp != null && !tp.isEmpty()) pd.type = tp;
+                    String opt = resolveProps(childText(de, "optional"), info.properties);
                     pd.optional = "true".equalsIgnoreCase(opt);
                     Element exsEl = childElement(de, "exclusions");
                     if (exsEl != null) {
                         for (Element exEl : childElements(exsEl, "exclusion")) {
-                            String eg = childText(exEl, "groupId");
-                            String ea = childText(exEl, "artifactId");
+                            String eg = resolveProps(childText(exEl, "groupId"), info.properties);
+                            String ea = resolveProps(childText(exEl, "artifactId"), info.properties);
                             if (eg != null && ea != null) pd.exclusions.add(Symbol.intern(eg, ea));
                         }
                     }
@@ -1687,13 +2058,25 @@ public final class Deps {
     private static <T> HttpResponse<T> sendNoDowngrade(
             HttpClient client, URI uri, Duration timeout, HttpResponse.BodyHandler<T> handler)
             throws IOException, InterruptedException {
+        return sendNoDowngrade(client, uri, timeout, handler, null);
+    }
+
+    private static <T> HttpResponse<T> sendNoDowngrade(
+            HttpClient client, URI uri, Duration timeout, HttpResponse.BodyHandler<T> handler, String repoId)
+            throws IOException, InterruptedException {
+        ensureMavenSettingsLoaded();
+        String[] creds = (repoId != null && cachedMavenServers != null) ? cachedMavenServers.get(repoId) : null;
         URI current = uri;
         for (int redirects = 0; redirects < 5; redirects++) {
-            HttpRequest req = HttpRequest.newBuilder(current)
+            HttpRequest.Builder rb = HttpRequest.newBuilder(current)
                     .timeout(timeout)
-                    .GET()
-                    .build();
-            HttpResponse<T> resp = client.send(req, handler);
+                    .GET();
+            if (creds != null && "https".equalsIgnoreCase(current.getScheme())) {
+                String token = Base64.getEncoder().encodeToString(
+                        (creds[0] + ":" + creds[1]).getBytes(StandardCharsets.UTF_8));
+                rb.header("Authorization", "Basic " + token);
+            }
+            HttpResponse<T> resp = client.send(rb.build(), handler);
             int code = resp.statusCode();
             if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
                 Optional<String> loc = resp.headers().firstValue("Location");
@@ -1758,30 +2141,29 @@ public final class Deps {
         return true;
     }
 
-    private static void downloadFromRepos(String relPath, Path target, Map<String, String> repos) {
+    private static boolean downloadFromRepos(String relPath, Path target, Map<String, String> repos) {
         try {
             Files.createDirectories(target.getParent());
         } catch (IOException ignored) {}
-        HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .followRedirects(HttpClient.Redirect.NEVER)
-                .build();
-        for (String baseUrl : repos.values()) {
+        for (Map.Entry<String, String> entry : repos.entrySet()) {
+            String repoId = entry.getKey();
+            String baseUrl = entry.getValue();
             String url = baseUrl.endsWith("/") ? baseUrl + relPath : baseUrl + "/" + relPath;
             Path tmp = null;
             try {
                 tmp = Files.createTempFile(target.getParent(), ".cljl-dl-", ".tmp");
                 HttpResponse<Path> resp = sendNoDowngrade(
-                        client, URI.create(url), Duration.ofSeconds(30), HttpResponse.BodyHandlers.ofFile(tmp));
+                        SHARED_HTTP_CLIENT, URI.create(url), Duration.ofSeconds(30),
+                        HttpResponse.BodyHandlers.ofFile(tmp), repoId);
                 if (resp.statusCode() == 200) {
-                    verifyDownloadChecksum(client, url, tmp);
+                    verifyDownloadChecksum(SHARED_HTTP_CLIENT, url, tmp);
                     try {
                         Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
                     } catch (AtomicMoveNotSupportedException e) {
                         Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
                     }
                     tmp = null;
-                    return;
+                    return true;
                 }
             } catch (SecurityException se) {
                 throw se;
@@ -1792,20 +2174,20 @@ public final class Deps {
                 }
             }
         }
+        return false;
     }
 
     private static List<String> fetchMavenVersions(String group, String artifact, Map<String, String> repos) {
         List<String> out = new ArrayList<>();
         String rel = group.replace('.', '/') + "/" + artifact + "/maven-metadata.xml";
-        HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .followRedirects(HttpClient.Redirect.NEVER)
-                .build();
-        for (String baseUrl : repos.values()) {
+        for (Map.Entry<String, String> entry : repos.entrySet()) {
+            String repoId = entry.getKey();
+            String baseUrl = entry.getValue();
             String url = baseUrl.endsWith("/") ? baseUrl + rel : baseUrl + "/" + rel;
             try {
                 HttpResponse<String> resp = sendNoDowngrade(
-                        client, URI.create(url), Duration.ofSeconds(15), HttpResponse.BodyHandlers.ofString());
+                        SHARED_HTTP_CLIENT, URI.create(url), Duration.ofSeconds(15),
+                        HttpResponse.BodyHandlers.ofString(), repoId);
                 if (resp.statusCode() == 200) {
                     Matcher m = Pattern.compile("<version>([^<]+)</version>").matcher(resp.body());
                     while (m.find()) {
@@ -1825,10 +2207,23 @@ public final class Deps {
         try {
             Files.createDirectories(targetDir.getParent());
             ProcessBuilder pb = new ProcessBuilder("git", "clone", "--quiet", "--", url, targetDir.toString());
+            pb.redirectErrorStream(true);
             Process p = pb.start();
-            if (p.waitFor() == 0) {
-                new ProcessBuilder("git", "-C", targetDir.toString(), "checkout", "--quiet", "--detach", sha).start().waitFor();
+            String cloneOut = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            int cloneExit = p.waitFor();
+            if (cloneExit != 0) {
+                throw new RuntimeException("git clone exited with " + cloneExit + ": " + cloneOut);
             }
+            ProcessBuilder cb = new ProcessBuilder("git", "-C", targetDir.toString(), "checkout", "--quiet", "--detach", sha);
+            cb.redirectErrorStream(true);
+            Process cp = cb.start();
+            String coOut = new String(cp.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            int coExit = cp.waitFor();
+            if (coExit != 0) {
+                throw new RuntimeException("git checkout " + sha + " exited with " + coExit + ": " + coOut);
+            }
+        } catch (RuntimeException re) {
+            throw re;
         } catch (Exception e) {
             throw new RuntimeException("Failed to fetch git dep " + url + " @ " + sha + ": " + e.getMessage(), e);
         }

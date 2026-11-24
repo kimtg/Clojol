@@ -568,6 +568,124 @@
                        "-Sdeps" "{:deps {foo/bar {:mvn/version \"../../../evil\"}}}"])]
       (is (not= 0 (:exit r))))))
 
+(deftest milestone-6-deps-repl-test
+  (testing "6.1 Maven version comparator & symbol completion"
+    (is (neg? (cljl.Deps/compareMavenVersions "1.0.0-alpha" "1.0.0-beta")))
+    (is (neg? (cljl.Deps/compareMavenVersions "1.0.0-beta" "1.0.0-rc1")))
+    (is (neg? (cljl.Deps/compareMavenVersions "1.0.0-rc1" "1.0.0-SNAPSHOT")))
+    (is (neg? (cljl.Deps/compareMavenVersions "1.0.0-SNAPSHOT" "1.0.0")))
+    (is (neg? (cljl.Deps/compareMavenVersions "1.0.0" "1.0.0-sp1")))
+    (is (neg? (cljl.Deps/compareMavenVersions "1.2.0" "1.10.0")))
+    (is (zero? (cljl.Deps/compareMavenVersions "1.0" "1.0.0")))
+    (let [comps (vec (cljl.Main/completeSymbol "map"))]
+      (is (some #(= "map" %) comps))
+      (is (some #(= "mapv" %) comps))))
+
+  (testing "6.2 BFS nearest-then-newest, BOM imports, loud errors & clojure.repl.deps basis refresh"
+    (let [tmp (Files/createTempDirectory "cljl-m6-deps-" (into-array java.nio.file.attribute.FileAttribute []))
+          m2-dir (.resolve tmp "m2")
+          cfg-dir (.resolve tmp "cfg")
+          env {"CLJ_CONFIG" (.toString cfg-dir) "M2_REPO" (.toString m2-dir)}
+          put-mvn! (fn [group art ver pom-xml]
+                     (let [rel (str (.replace group "." "/") "/" art "/" ver "/" art "-" ver)]
+                       (write-file! m2-dir (str rel ".pom") pom-xml)
+                       ;; Write an empty valid zip/jar stub
+                       (let [jar-path (.resolve m2-dir (str rel ".jar"))]
+                         (Files/createDirectories (.getParent jar-path) (into-array java.nio.file.attribute.FileAttribute []))
+                         (with-open [zos (java.util.zip.ZipOutputStream. (Files/newOutputStream jar-path (into-array java.nio.file.OpenOption [])))]
+                           (.putNextEntry zos (java.util.zip.ZipEntry. "META-INF/MANIFEST.MF"))
+                           (.write zos (.getBytes "Manifest-Version: 1.0\n" "UTF-8"))
+                           (.closeEntry zos)))))]
+      (try
+        ;; Install BOM pom managing com.m6/managed -> 3.4.5
+        (write-file! m2-dir "com/m6/bom/1.0.0/bom-1.0.0.pom"
+                     "<project><groupId>com.m6</groupId><artifactId>bom</artifactId><version>1.0.0</version><packaging>pom</packaging>
+                        <dependencyManagement><dependencies>
+                          <dependency><groupId>com.m6</groupId><artifactId>managed</artifactId><version>3.4.5</version></dependency>
+                        </dependencies></dependencyManagement>
+                      </project>")
+        (put-mvn! "com.m6" "managed" "3.4.5"
+                  "<project><groupId>com.m6</groupId><artifactId>managed</artifactId><version>3.4.5</version></project>")
+        ;; Diamond: A -> C 1.0.0 & D 2.0.0; B -> C 2.0.0 & managed (via BOM!)
+        (put-mvn! "com.m6" "c" "1.0.0" "<project><groupId>com.m6</groupId><artifactId>c</artifactId><version>1.0.0</version></project>")
+        (put-mvn! "com.m6" "c" "2.0.0" "<project><groupId>com.m6</groupId><artifactId>c</artifactId><version>2.0.0</version></project>")
+        (put-mvn! "com.m6" "d" "1.0.0" "<project><groupId>com.m6</groupId><artifactId>d</artifactId><version>1.0.0</version></project>")
+        (put-mvn! "com.m6" "d" "2.0.0" "<project><groupId>com.m6</groupId><artifactId>d</artifactId><version>2.0.0</version></project>")
+        (put-mvn! "com.m6" "a" "1.0.0"
+                  "<project><groupId>com.m6</groupId><artifactId>a</artifactId><version>1.0.0</version>
+                     <dependencies>
+                       <dependency><groupId>com.m6</groupId><artifactId>c</artifactId><version>1.0.0</version></dependency>
+                       <dependency><groupId>com.m6</groupId><artifactId>d</artifactId><version>2.0.0</version></dependency>
+                     </dependencies>
+                   </project>")
+        (put-mvn! "com.m6" "b" "1.0.0"
+                  "<project><groupId>com.m6</groupId><artifactId>b</artifactId><version>1.0.0</version>
+                     <dependencyManagement><dependencies>
+                       <dependency><groupId>com.m6</groupId><artifactId>bom</artifactId><version>1.0.0</version><type>pom</type><scope>import</scope></dependency>
+                     </dependencies></dependencyManagement>
+                     <dependencies>
+                       <dependency><groupId>com.m6</groupId><artifactId>c</artifactId><version>2.0.0</version></dependency>
+                       <dependency><groupId>com.m6</groupId><artifactId>managed</artifactId></dependency>
+                     </dependencies>
+                   </project>")
+        ;; Root depends on A (1.0.0), B (1.0.0), and D (1.0.0) directly:
+        ;; - C is at depth 1 via both A (1.0.0) and B (2.0.0) -> newest (2.0.0) MUST win!
+        ;; - D is at depth 0 (1.0.0) and depth 1 via A (2.0.0) -> nearest (1.0.0) MUST win!
+        ;; - managed version MUST be resolved via BOM import (3.4.5)!
+        (write-file! tmp "deps.edn"
+                     "{:paths [\"src\"]
+                       :mvn/repos {}
+                       :deps {com.m6/a {:mvn/version \"1.0.0\"}
+                              com.m6/b {:mvn/version \"1.0.0\"}
+                              com.m6/d {:mvn/version \"1.0.0\"}}}")
+        (let [r (run-cljl {:dir tmp :env env} ["-Sforce" "-Spath"])]
+          (is (= 0 (:exit r)) (:err r))
+          (is (str/includes? (:out r) "c-2.0.0.jar"))
+          (is (not (str/includes? (:out r) "c-1.0.0.jar")))
+          (is (str/includes? (:out r) "d-1.0.0.jar"))
+          (is (not (str/includes? (:out r) "d-2.0.0.jar")))
+          (is (str/includes? (:out r) "managed-3.4.5.jar")))
+
+        ;; Missing artifact MUST fail loudly (non-zero exit), never silently succeed
+        (let [r (run-cljl {:dir tmp :env env}
+                          ["-Sforce" "-Spath"
+                           "-Sdeps" "{:mvn/repos {} :deps {com.m6/does-not-exist {:mvn/version \"9.9.9\"}}}"])]
+          (is (not= 0 (:exit r)))
+          (is (str/includes? (:err r) "Could not find artifact")))
+
+        ;; clojure.repl.deps/add-lib reuses single DynamicClassLoader & refreshes clojure.java.basis/current-basis
+        (let [extra-dir (.resolve tmp "extra-lib")]
+          (write-file! extra-dir "deps.edn" "{:paths [\"src\"]}")
+          (write-file! extra-dir "src/m6extra/core.clj" "(ns m6extra.core) (def val 777)")
+          (let [code (str "(require '[clojure.repl.deps :as rd] '[clojure.java.basis :as b]) "
+                          "(let [cl1 (clojure.lang.RT/baseLoader)] "
+                          "  (rd/add-lib 'm6/extra {:local/root " (pr-str (.toString extra-dir)) "}) "
+                          "  (let [cl2 (clojure.lang.RT/baseLoader)] "
+                          "    (require 'm6extra.core) "
+                          "    (prn [(identical? cl1 cl2) "
+                          "          (instance? clojure.lang.DynamicClassLoader cl2) "
+                          "          (contains? (:libs (b/current-basis)) 'm6/extra) "
+                          "          @(resolve 'm6extra.core/val)])))")
+                r (run-cljl {:dir tmp :env env} ["-Sforce" "-e" code])]
+            (is (= 0 (:exit r)) (:err r))
+            (is (= "[true true true 777]" (str/trim (:out r))))))
+
+        ;; Interactive REPL thread-local *1/*2/*3
+        (let [pb (ProcessBuilder. ^java.util.List [java-bin "-jar" cljl-jar "-Srepro"])
+              _ (.directory pb (.toFile repo-root))
+              p (.start pb)]
+          (with-open [os (.getOutputStream p)]
+            (.write os (.getBytes "(+ 10 20)\n(* *1 2)\n(+ *1 *2)\n" "UTF-8"))
+            (.flush os))
+          (let [out (slurp (.getInputStream p))
+                code (.waitFor p)]
+            (is (= 0 code))
+            (is (str/includes? out "30"))
+            (is (str/includes? out "60"))
+            (is (str/includes? out "90"))))
+        (finally
+          (delete-tree! tmp))))))
+
 (let [res (run-tests 'cljl.cli-test)]
   (when (or (pos? (:fail res)) (pos? (:error res)))
     (System/exit 1)))

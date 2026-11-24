@@ -361,8 +361,33 @@ public final class Main {
         Var v3 = RT.STAR_3;
         Var ve = RT.STAR_E;
 
-        Var.pushThreadBindings(Map.of(RT.REPL, Boolean.TRUE));
+        Map<Var, Object> replBindings = new HashMap<>();
+        replBindings.put(RT.REPL, Boolean.TRUE);
+        replBindings.put(RT.CURRENT_NS, RT.currentNS());
+        replBindings.put(RT.WARN_ON_REFLECTION, RT.WARN_ON_REFLECTION.deref());
+        replBindings.put(RT.UNCHECKED_MATH, RT.UNCHECKED_MATH.deref());
+        replBindings.put(RT.DATA_READERS, RT.DATA_READERS.deref());
+        replBindings.put(RT.DEFAULT_DATA_READER_FN, RT.DEFAULT_DATA_READER_FN.deref());
+        replBindings.put(RT.READ_EVAL, RT.READ_EVAL.deref());
+        replBindings.put(RT.PRINT_META, RT.PRINT_META.deref());
+        replBindings.put(RT.PRINT_LENGTH, RT.PRINT_LENGTH.deref());
+        replBindings.put(RT.PRINT_LEVEL, RT.PRINT_LEVEL.deref());
+        replBindings.put(RT.PRINT_NAMESPACE_MAPS, RT.PRINT_NAMESPACE_MAPS.deref());
+        replBindings.put(v1, null);
+        replBindings.put(v2, null);
+        replBindings.put(v3, null);
+        replBindings.put(ve, null);
+
+        Var.pushThreadBindings(replBindings);
         System.out.println("Clojol " + VERSION + " (Java " + System.getProperty("java.version") + ")");
+
+        // Install SIGINT handler to interrupt running REPL evaluations cleanly rather than killing the VM
+        final Thread replThread = Thread.currentThread();
+        final java.util.concurrent.atomic.AtomicBoolean evaluating = new java.util.concurrent.atomic.AtomicBoolean(false);
+        Runnable restoreSignal = installReplSigintHandler(replThread, evaluating);
+
+        Path historyPath = Path.of(System.getProperty("user.home"), ".clojol_history");
+        boolean interactive = System.console() != null;
 
         BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         StringBuilder buf = new StringBuilder();
@@ -378,7 +403,7 @@ public final class Main {
                     String line = reader.readLine();
                     if (line == null) {
                         if (!buf.isEmpty()) {
-                            processReplBuffer(buf.toString(), v1, v2, v3, ve, reportTarget);
+                            processReplBuffer(buf.toString(), v1, v2, v3, ve, reportTarget, evaluating);
                         }
                         System.out.println();
                         break;
@@ -388,31 +413,120 @@ public final class Main {
                     if (buf.isEmpty() && trimmed.isEmpty()) {
                         continue;
                     }
+                    if (interactive && !trimmed.isEmpty()) {
+                        appendReplHistory(historyPath, line);
+                    }
 
                     buf.append(line).append('\n');
                     if (isBalanced(buf)) {
                         String code = buf.toString();
                         buf.setLength(0);
-                        processReplBuffer(code, v1, v2, v3, ve, reportTarget);
+                        processReplBuffer(code, v1, v2, v3, ve, reportTarget, evaluating);
                     }
                 } catch (Throwable t) {
                     buf.setLength(0);
-                    ve.bindRoot(t);
+                    ve.set(t);
                     printError(t, reportTarget);
                 }
             }
         } finally {
+            restoreSignal.run();
             Var.popThreadBindings();
         }
     }
 
-    private static void processReplBuffer(String code, Var v1, Var v2, Var v3, Var ve, String reportTarget) {
+    private static Runnable installReplSigintHandler(
+            Thread replThread, java.util.concurrent.atomic.AtomicBoolean evaluating) {
+        try {
+            Class<?> sigClass = Class.forName("sun.misc.Signal");
+            Class<?> handlerClass = Class.forName("sun.misc.SignalHandler");
+            Object intSig = sigClass.getConstructor(String.class).newInstance("INT");
+            final Object[] prevHolder = new Object[1];
+            Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+                    handlerClass.getClassLoader(),
+                    new Class<?>[]{handlerClass},
+                    (p, m, args) -> {
+                        if ("handle".equals(m.getName())) {
+                            if (evaluating.get()) {
+                                replThread.interrupt();
+                            } else {
+                                System.out.println();
+                                System.exit(130);
+                            }
+                        }
+                        return null;
+                    });
+            prevHolder[0] = sigClass.getMethod("handle", sigClass, handlerClass).invoke(null, intSig, proxy);
+            return () -> {
+                try {
+                    if (prevHolder[0] != null) {
+                        sigClass.getMethod("handle", sigClass, handlerClass).invoke(null, intSig, prevHolder[0]);
+                    }
+                } catch (Throwable ignored) {}
+            };
+        } catch (Throwable ignored) {
+            return () -> {};
+        }
+    }
+
+    private static void appendReplHistory(Path historyPath, String line) {
+        try {
+            Files.writeString(historyPath, line + "\n", StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (IOException ignored) {}
+    }
+
+    /**
+     * Completes Clojure symbols in the current namespace, aliased namespaces, and clojure.core.
+     */
+    public static List<String> completeSymbol(String prefix) {
+        if (prefix == null) prefix = "";
+        TreeSet<String> matches = new TreeSet<>();
+        Namespace cur = RT.currentNS();
+        int slash = prefix.indexOf('/');
+        if (slash > 0) {
+            String nsPart = prefix.substring(0, slash);
+            String namePart = prefix.substring(slash + 1);
+            Namespace target = cur.lookupAlias(Symbol.intern(nsPart));
+            if (target == null) target = Namespace.find(nsPart);
+            if (target != null) {
+                for (Map.Entry<Symbol, Object> e : target.getMappings().entrySet()) {
+                    if (e.getValue() instanceof Var v && v.ns == target && v.isPublic()) {
+                        String n = e.getKey().name;
+                        if (n.startsWith(namePart)) matches.add(nsPart + "/" + n);
+                    }
+                }
+            }
+        } else {
+            for (Symbol sym : cur.getMappings().keySet()) {
+                if (sym.name.startsWith(prefix)) matches.add(sym.name);
+            }
+            for (Symbol sym : RT.CLOJURE_NS.getMappings().keySet()) {
+                if (sym.name.startsWith(prefix)) matches.add(sym.name);
+            }
+            for (Namespace ns : Namespace.all()) {
+                if (ns.name.name.startsWith(prefix)) matches.add(ns.name.name + "/");
+            }
+        }
+        return new ArrayList<>(matches);
+    }
+
+    private static void processReplBuffer(
+            String code, Var v1, Var v2, Var v3, Var ve, String reportTarget,
+            java.util.concurrent.atomic.AtomicBoolean evaluating) {
         try {
             new Reader(code, "<repl>").consumeForms(form -> {
-                Object res = Compiler.eval(form);
-                v3.bindRoot(v2.get());
-                v2.bindRoot(v1.get());
-                v1.bindRoot(res);
+                evaluating.set(true);
+                Object res;
+                try {
+                    res = Compiler.eval(form);
+                } finally {
+                    evaluating.set(false);
+                    Thread.interrupted(); // clear interrupt flag after returning to REPL prompt
+                }
+                v3.set(v2.get());
+                v2.set(v1.get());
+                v1.set(res);
                 PrintWriter out = RT.outWriter();
                 out.println(RT.printString(res, RT.truthy(RT.PRINT_READABLY.get())));
                 if (RT.truthy(RT.FLUSH_ON_NEWLINE.get())) {
@@ -420,7 +534,7 @@ public final class Main {
                 }
             });
         } catch (Throwable t) {
-            ve.bindRoot(t);
+            ve.set(t);
             printError(t, reportTarget);
         }
     }

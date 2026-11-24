@@ -92,6 +92,43 @@ public final class StdLib112 {
         return cur;
     }
 
+    public static void setInitialBasis(Object basis) {
+        if (basis == null) return;
+        synchronized (StdLib112.class) {
+            INITIAL_BASIS = basis;
+            CURRENT_BASIS.reset(basis);
+        }
+    }
+
+    public static void mergeBasis(PersistentHashMap addedBasis) {
+        if (addedBasis == null) return;
+        computeInitialBasis();
+        Keyword kLibs = Keyword.intern("libs");
+        Keyword kCp = Keyword.intern("classpath");
+        Keyword kRoots = Keyword.intern("classpath-roots");
+        CURRENT_BASIS.swap(Fn.of1("merge-basis", oldObj -> {
+            PersistentHashMap old = oldObj instanceof PersistentHashMap m ? m : PersistentHashMap.EMPTY;
+            PersistentHashMap oldLibs = old.valAt(kLibs) instanceof PersistentHashMap m ? m : PersistentHashMap.EMPTY;
+            PersistentHashMap newLibs = addedBasis.valAt(kLibs) instanceof PersistentHashMap m ? m : PersistentHashMap.EMPTY;
+            for (ISeq s = newLibs.seq(); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                oldLibs = oldLibs.assoc(e.getKey(), e.getValue());
+            }
+            PersistentHashMap oldCp = old.valAt(kCp) instanceof PersistentHashMap m ? m : PersistentHashMap.EMPTY;
+            PersistentHashMap newCp = addedBasis.valAt(kCp) instanceof PersistentHashMap m ? m : PersistentHashMap.EMPTY;
+            for (ISeq s = newCp.seq(); s != null; s = s.next()) {
+                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                oldCp = oldCp.assoc(e.getKey(), e.getValue());
+            }
+            LinkedHashSet<Object> roots = new LinkedHashSet<>();
+            for (ISeq s = RT.seq(old.valAt(kRoots)); s != null; s = s.next()) roots.add(s.first());
+            for (ISeq s = RT.seq(addedBasis.valAt(kRoots)); s != null; s = s.next()) roots.add(s.first());
+            return old.assoc(kLibs, oldLibs)
+                    .assoc(kCp, oldCp)
+                    .assoc(kRoots, PersistentVector.create(new ArrayList<>(roots)));
+        }));
+    }
+
     public static Object updateBasis(Fn f, Object... args) {
         computeInitialBasis();
         return CURRENT_BASIS.swap(Fn.of1("update-basis-fn", old -> {
