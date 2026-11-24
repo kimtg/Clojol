@@ -1040,9 +1040,10 @@ public final class BytecodeJIT {
 
         ValType retT = ps.analysis.returnType;
         if (staticFastName != null) {
-            Label slowEntry = null;
+            Label slowEntry = new Label();
+            cg.getstatic("cljl/Core", "coreRedefined", "Z", 1);
+            cg.ifne(slowEntry);
             if (ce.ownerVar != null) {
-                slowEntry = new Label();
                 cg.loadConstObj(ce.ownerVar);
                 cg.checkcast("cljl/Var");
                 cg.invokevirtual("cljl/Var", "get", "()Ljava/lang/Object;", 1, 1);
@@ -1059,10 +1060,6 @@ public final class BytecodeJIT {
             int retWords = (retT == ValType.LONG || retT == ValType.DOUBLE) ? 2 : 1;
             cg.invokestatic(ce.className, staticFastName, ps.descriptor, argWords, retWords);
             cg.emitReturnInstruction(retT);
-            if (slowEntry == null) {
-                cg.finish();
-                return;
-            }
             cg.markLabel(slowEntry);
             cg.curStack = 0;
         }
@@ -1239,6 +1236,8 @@ public final class BytecodeJIT {
             bodyCg.finish();
 
             Label unmemoized = new Label();
+            cg.getstatic("cljl/Core", "coreRedefined", "Z", 1);
+            cg.ifne(unmemoized);
             if (ce.ownerVar != null) {
                 cg.loadConstObj(ce.ownerVar);
                 cg.checkcast("cljl/Var");
@@ -4867,9 +4866,6 @@ public final class BytecodeJIT {
         }
 
         private void emitResolvedStaticCallRaw(StaticMethodNode sm, Method m) {
-            if (Interop.isConcurrencyClass(m.getDeclaringClass())) {
-                invokestatic("cljl/Atom", "markMultiThreaded", "()V", 0, 0);
-            }
             String owner = m.getDeclaringClass().getName().replace('.', '/');
             Class<?>[] pts = m.getParameterTypes();
             Class<?> ret = m.getReturnType();
@@ -4880,9 +4876,6 @@ public final class BytecodeJIT {
 
         private void emitResolvedInstanceCallRaw(InstanceMethodNode im, Method m) {
             Class<?> ownerCls = m.getDeclaringClass();
-            if (Interop.isConcurrencyClass(ownerCls)) {
-                invokestatic("cljl/Atom", "markMultiThreaded", "()V", 0, 0);
-            }
             String owner = ownerCls.getName().replace('.', '/');
             Class<?>[] pts = m.getParameterTypes();
             Class<?> ret = m.getReturnType();
@@ -5892,9 +5885,6 @@ public final class BytecodeJIT {
             if (node instanceof NewNode nn) {
                 Constructor<?> ctor = analysis != null ? analysis.resolvedCtors.get(nn) : null;
                 if (ctor != null) {
-                    if (Interop.isConcurrencyClass(nn.clazz)) {
-                        invokestatic("cljl/Atom", "markMultiThreaded", "()V", 0, 0);
-                    }
                     String owner = nn.clazz.getName().replace('.', '/');
                     Class<?>[] pts = ctor.getParameterTypes();
                     newInst(owner);

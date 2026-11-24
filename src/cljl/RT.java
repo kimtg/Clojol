@@ -21,8 +21,8 @@ public final class RT {
     public static final Var CURRENT_NS = CLOJURE_NS.intern(Symbol.intern("*ns*")).bindRoot(USER_NS).setDynamic();
     public static final Var OUT = CLOJURE_NS.intern(Symbol.intern("*out*"))
             .bindRoot(new OutputStreamWriter(System.out))
-            .setDynamic()
-            .setMeta(PersistentHashMap.create(Keyword.intern("tag"), Symbol.intern("java.io.Writer")));
+            .setMeta(PersistentHashMap.create(Keyword.intern("tag"), Symbol.intern("java.io.Writer")))
+            .setDynamic();
     public static final Var ERR = CLOJURE_NS.intern(Symbol.intern("*err*"))
             .bindRoot(new PrintWriter(new OutputStreamWriter(System.err), true))
             .setDynamic();

@@ -2165,17 +2165,17 @@ public final class CoreExtras {
             case 99: { Object lib = _a; return (GenClass.compileNamespace((Symbol) lib)); }
             case 100: {
                 Object fObj = _a;
-            Fn f = (Fn) fObj;
-            Map<Var, Object> captured = Var.getThreadBindings();
-            return Fn.ofVarargs("bound-fn", args -> {
-                Var.pushThreadBindings(captured);
-                try {
-                    return f.applyTo(args);
-                } finally {
-                    Var.popThreadBindings();
-                }
-            });
-        
+                Fn f = (Fn) fObj;
+                Object captured = Var.cloneThreadBindingFrame();
+                return Fn.ofVarargs("bound-fn", args -> {
+                    Object saved = Var.getThreadBindingFrame();
+                    Var.resetThreadBindingFrame(captured);
+                    try {
+                        return f.applyTo(args);
+                    } finally {
+                        Var.resetThreadBindingFrame(saved);
+                    }
+                });
             }
             case 101: {
                 Object f = _a; getTapSet().add((Fn) f); return null; 
@@ -2191,7 +2191,6 @@ public final class CoreExtras {
                 Object x = _a;
             CopyOnWriteArraySet<Fn> s = tapSet;
             if (s == null || s.isEmpty()) return Boolean.FALSE;
-            Atom.markMultiThreaded();
             TapExecutorHolder.EXECUTOR.execute(() -> {
                 for (Fn f : s) {
                     try { f.invoke(x); } catch (Throwable ignored) {}
@@ -2236,7 +2235,7 @@ public final class CoreExtras {
         
             }
             case 113: {
-                Object r = _a; ((Ref) r).touch(); return ((Ref) r).deref(); 
+                Object r = _a; return ((Ref) r).touch();
             }
             case 114: { Object r = _a; return ((long) ((Ref) r).getHistoryCount()); }
             case 115: { Object r = _a; return ((long) ((Ref) r).getMinHistory()); }
@@ -2478,22 +2477,28 @@ public final class CoreExtras {
             case 41: { Object ref = _a; Object m = _b; return (((IReference) ref).resetMeta((PersistentHashMap) m)); }
             case 42: {
                 Object bindingMap = _a; Object func = _b;
-            Map<Var, Object> saved = new LinkedHashMap<>();
-            PersistentHashMap bm = (PersistentHashMap) bindingMap;
-            for (ISeq s = bm.seq(); s != null; s = s.next()) {
-                Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
-                Var v = (Var) e.getKey();
-                saved.put(v, v.isBound() ? v.getRawRoot() : Var.UNBOUND);
-                v.bindRoot(e.getValue());
-            }
-            try {
-                return ((Fn) func).invoke();
-            } finally {
-                for (Map.Entry<Var, Object> e : saved.entrySet()) {
-                    e.getKey().bindRoot(e.getValue());
+                Map<Var, Object> saved = new LinkedHashMap<>();
+                Set<Var> wasUnbound = new HashSet<>();
+                for (ISeq s = RT.seq(bindingMap); s != null; s = s.next()) {
+                    Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
+                    Var v = (Var) e.getKey();
+                    if (v.hasRoot()) {
+                        saved.put(v, v.getRawRoot());
+                    } else {
+                        wasUnbound.add(v);
+                    }
+                    v.bindRoot(e.getValue());
                 }
-            }
-        
+                try {
+                    return ((Fn) func).invoke();
+                } finally {
+                    for (Map.Entry<Var, Object> e : saved.entrySet()) {
+                        e.getKey().bindRoot(e.getValue());
+                    }
+                    for (Var v : wasUnbound) {
+                        v.unbindRoot();
+                    }
+                }
             }
             case 43: {
                 Object a = _a; Object h = _b; ((Agent) a).setErrorHandler((Fn) h); return null; 

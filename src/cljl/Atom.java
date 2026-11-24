@@ -19,28 +19,15 @@ import java.util.concurrent.*;
 public final class Atom implements IRef, IMeta, IReference {
     public static final ExecutorService VIRTUAL_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
-    private static final boolean STRICT_ATOM = Boolean.getBoolean("cljl.atom.strict");
-    private static volatile Thread SINGLE_THREAD = null;
-
     /**
-     * Enables single-thread biased fast path for the sole application main thread.
-     * Permanently revoked (set to null) BEFORE any second thread is started via
-     * FutureObj, Agent, tap>, core.async, or Java Thread/Executor interop.
+     * Kept as no-op compatibility hooks; Atom operations are always JMM-atomic across all threads.
      */
-    public static void initMainThread() {
-        if (!STRICT_ATOM) {
-            SINGLE_THREAD = Thread.currentThread();
-        }
-    }
+    public static void initMainThread() {}
 
-    public static void markMultiThreaded() {
-        if (SINGLE_THREAD != null) {
-            SINGLE_THREAD = null;
-        }
-    }
+    public static void markMultiThreaded() {}
 
     public static boolean isSingleThreaded() {
-        return SINGLE_THREAD == Thread.currentThread();
+        return false;
     }
 
     private static final Object UNBOXED = new Object();
@@ -159,6 +146,7 @@ public final class Atom implements IRef, IMeta, IReference {
             if (!RT.truthy(validator.invoke(cur))) {
                 throw new IllegalStateException("Invalid reference state: " + cur);
             }
+            this.hasHooks = true;
         }
         this.validator = validator;
         updateHasHooks();
@@ -171,26 +159,13 @@ public final class Atom implements IRef, IMeta, IReference {
     public Object reset(Object newval) {
         if (newval instanceof Long nl && isFastLong(nl)) {
             long encoded = nl << 1;
-            if (SINGLE_THREAD == Thread.currentThread() && (this.fastVal & 1L) == 0L) {
-                FAST_VH.setRelease(this, encoded);
-                return newval;
-            }
             for (;;) {
                 long f = this.fastVal;
                 if ((f & 1L) != 0L) break;
                 if (FAST_VH.compareAndSet(this, f, encoded)) return newval;
             }
-        } else {
-            ensureBoxed();
         }
-        if (!this.hasHooks) {
-            if (SINGLE_THREAD == Thread.currentThread()) {
-                STATE_VH.setRelease(this, newval);
-                return newval;
-            }
-            STATE_VH.getAndSet(this, newval);
-            return newval;
-        }
+        ensureBoxed();
         validate(newval);
         Object oldval = STATE_VH.getAndSet(this, newval);
         notifyWatches(oldval, newval);
@@ -200,10 +175,6 @@ public final class Atom implements IRef, IMeta, IReference {
     public long resetLong(long newval) {
         if (isFastLong(newval)) {
             long encoded = newval << 1;
-            if (SINGLE_THREAD == Thread.currentThread() && (this.fastVal & 1L) == 0L) {
-                FAST_VH.setRelease(this, encoded);
-                return newval;
-            }
             for (;;) {
                 long f = this.fastVal;
                 if ((f & 1L) != 0L) break;
@@ -221,28 +192,15 @@ public final class Atom implements IRef, IMeta, IReference {
                 return false;
             }
             if (newv instanceof Long nl && isFastLong(nl)) {
-                if (SINGLE_THREAD == Thread.currentThread()) {
-                    FAST_VH.setRelease(this, nl << 1);
-                    return true;
-                }
                 if (FAST_VH.compareAndSet(this, f, nl << 1)) return true;
                 if ((this.fastVal & 1L) == 0L) return false;
-            } else {
-                Object boxed = ensureBoxed();
-                if (boxed instanceof Long sl && sl.longValue() == ol.longValue()) {
-                    oldv = boxed;
-                }
             }
-        }
-        if (!this.hasHooks) {
-            if (SINGLE_THREAD == Thread.currentThread()) {
-                if (this.state == oldv) {
-                    STATE_VH.setRelease(this, newv);
-                    return true;
-                }
-                return false;
+            Object boxed = ensureBoxed();
+            if (boxed instanceof Long sl && sl.longValue() == ol.longValue()) {
+                oldv = boxed;
             }
-            return STATE_VH.compareAndSet(this, oldv, newv);
+        } else {
+            ensureBoxed();
         }
         validate(newv);
         boolean ret = STATE_VH.compareAndSet(this, oldv, newv);
@@ -258,10 +216,6 @@ public final class Atom implements IRef, IMeta, IReference {
     public void resetLongDiscard(long newval) {
         if (isFastLong(newval)) {
             long encoded = newval << 1;
-            if (SINGLE_THREAD == Thread.currentThread() && (this.fastVal & 1L) == 0L) {
-                FAST_VH.setRelease(this, encoded);
-                return;
-            }
             for (;;) {
                 long f = this.fastVal;
                 if ((f & 1L) != 0L) break;
@@ -281,13 +235,8 @@ public final class Atom implements IRef, IMeta, IReference {
                     return PersistentVector.createOwning(Long.valueOf(f >> 1), newval);
                 }
             }
-        } else {
-            ensureBoxed();
         }
-        if (!this.hasHooks) {
-            Object oldval = STATE_VH.getAndSet(this, newval);
-            return PersistentVector.createOwning(oldval, newval);
-        }
+        ensureBoxed();
         validate(newval);
         Object oldval = STATE_VH.getAndSet(this, newval);
         notifyWatches(oldval, newval);
@@ -295,18 +244,6 @@ public final class Atom implements IRef, IMeta, IReference {
     }
 
     private boolean tryAddFastDiscard(long delta, boolean checked) {
-        if (SINGLE_THREAD == Thread.currentThread()) {
-            long fv = this.fastVal;
-            if ((fv & 1L) != 0L) return false;
-            long cur = fv >> 1;
-            long nxt = cur + delta;
-            if ((!checked || ((cur ^ nxt) & (delta ^ nxt)) >= 0L) && isFastLong(nxt)) {
-                FAST_VH.setRelease(this, nxt << 1);
-                return true;
-            }
-            ensureBoxed();
-            return false;
-        }
         if (delta >= -MAX_XADD_DELTA && delta <= MAX_XADD_DELTA) {
             long fv = this.fastVal;
             if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
@@ -335,18 +272,6 @@ public final class Atom implements IRef, IMeta, IReference {
     }
 
     private boolean trySubFastDiscard(long x, boolean checked) {
-        if (SINGLE_THREAD == Thread.currentThread()) {
-            long fv = this.fastVal;
-            if ((fv & 1L) != 0L) return false;
-            long cur = fv >> 1;
-            long nxt = cur - x;
-            if ((!checked || ((cur ^ x) & (cur ^ nxt)) >= 0L) && isFastLong(nxt)) {
-                FAST_VH.setRelease(this, nxt << 1);
-                return true;
-            }
-            ensureBoxed();
-            return false;
-        }
         if (x >= -MAX_XADD_DELTA && x <= MAX_XADD_DELTA) {
             return tryAddFastDiscard(-x, checked);
         }
@@ -366,24 +291,6 @@ public final class Atom implements IRef, IMeta, IReference {
     }
 
     private boolean tryMulFastDiscard(long x, boolean checked) {
-        if (SINGLE_THREAD == Thread.currentThread()) {
-            long fv = this.fastVal;
-            if ((fv & 1L) != 0L) return false;
-            long cur = fv >> 1;
-            long nxt;
-            if (checked) {
-                try { nxt = Math.multiplyExact(cur, x); }
-                catch (ArithmeticException e) { ensureBoxed(); return false; }
-            } else {
-                nxt = cur * x;
-            }
-            if (isFastLong(nxt)) {
-                FAST_VH.setRelease(this, nxt << 1);
-                return true;
-            }
-            ensureBoxed();
-            return false;
-        }
         for (;;) {
             long fv = this.fastVal;
             if ((fv & 1L) != 0L) return false;
@@ -410,18 +317,6 @@ public final class Atom implements IRef, IMeta, IReference {
     }
 
     private Object tryAddFastBoxed(long delta, boolean checked) {
-        if (SINGLE_THREAD == Thread.currentThread()) {
-            long fv = this.fastVal;
-            if ((fv & 1L) != 0L) return UNBOXED;
-            long cur = fv >> 1;
-            long nxt = cur + delta;
-            if ((!checked || ((cur ^ nxt) & (delta ^ nxt)) >= 0L) && isFastLong(nxt)) {
-                FAST_VH.setRelease(this, nxt << 1);
-                return Long.valueOf(nxt);
-            }
-            ensureBoxed();
-            return UNBOXED;
-        }
         if (delta >= -MAX_XADD_DELTA && delta <= MAX_XADD_DELTA) {
             long fv = this.fastVal;
             if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
@@ -450,18 +345,6 @@ public final class Atom implements IRef, IMeta, IReference {
     }
 
     private Object trySubFastBoxed(long x, boolean checked) {
-        if (SINGLE_THREAD == Thread.currentThread()) {
-            long fv = this.fastVal;
-            if ((fv & 1L) != 0L) return UNBOXED;
-            long cur = fv >> 1;
-            long nxt = cur - x;
-            if ((!checked || ((cur ^ x) & (cur ^ nxt)) >= 0L) && isFastLong(nxt)) {
-                FAST_VH.setRelease(this, nxt << 1);
-                return Long.valueOf(nxt);
-            }
-            ensureBoxed();
-            return UNBOXED;
-        }
         if (x >= -MAX_XADD_DELTA && x <= MAX_XADD_DELTA) {
             return tryAddFastBoxed(-x, checked);
         }
@@ -481,24 +364,6 @@ public final class Atom implements IRef, IMeta, IReference {
     }
 
     private Object tryMulFastBoxed(long x, boolean checked) {
-        if (SINGLE_THREAD == Thread.currentThread()) {
-            long fv = this.fastVal;
-            if ((fv & 1L) != 0L) return UNBOXED;
-            long cur = fv >> 1;
-            long nxt;
-            if (checked) {
-                try { nxt = Math.multiplyExact(cur, x); }
-                catch (ArithmeticException e) { ensureBoxed(); return UNBOXED; }
-            } else {
-                nxt = cur * x;
-            }
-            if (isFastLong(nxt)) {
-                FAST_VH.setRelease(this, nxt << 1);
-                return Long.valueOf(nxt);
-            }
-            ensureBoxed();
-            return UNBOXED;
-        }
         for (;;) {
             long fv = this.fastVal;
             if ((fv & 1L) != 0L) return UNBOXED;
@@ -555,10 +420,6 @@ public final class Atom implements IRef, IMeta, IReference {
         if (f == Core.incFn) {
             long fv = this.fastVal;
             if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv < MAX_XADD_ENC) {
-                if (SINGLE_THREAD == Thread.currentThread()) {
-                    FAST_VH.setRelease(this, fv + 2L);
-                    return;
-                }
                 long prev = (long) FAST_VH.getAndAdd(this, 2L);
                 if ((prev & 1L) == 0L) {
                     long nxt = (prev >> 1) + 1L;
@@ -590,10 +451,6 @@ public final class Atom implements IRef, IMeta, IReference {
         if (f == Core.incFn || f == Core.uncheckedIncFn) {
             long fv = this.fastVal;
             if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv < MAX_XADD_ENC) {
-                if (SINGLE_THREAD == Thread.currentThread()) {
-                    FAST_VH.setRelease(this, fv + 2L);
-                    return (fv >> 1) + 1L;
-                }
                 long prev = (long) FAST_VH.getAndAdd(this, 2L);
                 if ((prev & 1L) == 0L) {
                     long nxt = (prev >> 1) + 1L;
@@ -604,10 +461,6 @@ public final class Atom implements IRef, IMeta, IReference {
         } else if (f == Core.decFn || f == Core.uncheckedDecFn) {
             long fv = this.fastVal;
             if ((fv & 1L) == 0L && fv > MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
-                if (SINGLE_THREAD == Thread.currentThread()) {
-                    FAST_VH.setRelease(this, fv - 2L);
-                    return (fv >> 1) - 1L;
-                }
                 long prev = (long) FAST_VH.getAndAdd(this, -2L);
                 if ((prev & 1L) == 0L) {
                     long nxt = (prev >> 1) - 1L;
@@ -624,12 +477,6 @@ public final class Atom implements IRef, IMeta, IReference {
             if (f == Core.addFn || f == Core.uncheckedAddFn) {
                 long fv = this.fastVal;
                 if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
-                    if (SINGLE_THREAD == Thread.currentThread()) {
-                        long nxt = (fv >> 1) + x;
-                        FAST_VH.setRelease(this, nxt << 1);
-                        if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
-                        return nxt;
-                    }
                     long prev = (long) FAST_VH.getAndAdd(this, x << 1);
                     if ((prev & 1L) == 0L) {
                         long nxt = (prev >> 1) + x;
@@ -640,12 +487,6 @@ public final class Atom implements IRef, IMeta, IReference {
             } else if (f == Core.subFn || f == Core.uncheckedSubFn) {
                 long fv = this.fastVal;
                 if ((fv & 1L) == 0L && fv >= MIN_XADD_ENC && fv <= MAX_XADD_ENC) {
-                    if (SINGLE_THREAD == Thread.currentThread()) {
-                        long nxt = (fv >> 1) - x;
-                        FAST_VH.setRelease(this, nxt << 1);
-                        if (nxt < MIN_XADD || nxt > MAX_XADD) ensureBoxed();
-                        return nxt;
-                    }
                     long prev = (long) FAST_VH.getAndAdd(this, (-x) << 1);
                     if ((prev & 1L) == 0L) {
                         long nxt = (prev >> 1) - x;
@@ -659,68 +500,32 @@ public final class Atom implements IRef, IMeta, IReference {
     }
 
     private Object swapBoxed0(Fn f) {
-        if (this.hasHooks) return swapBoxed0WithHooks(f);
-        Object v = readBoxedState();
-        if (SINGLE_THREAD == Thread.currentThread()) {
-            Object newv = f.invoke(v);
-            if (this.state == v && SINGLE_THREAD == Thread.currentThread()) {
-                STATE_VH.setRelease(this, newv);
-                return newv;
-            }
-            v = this.state;
-        }
-        for (;;) {
-            Object newv = f.invoke(v);
-            if (STATE_VH.compareAndSet(this, v, newv)) return newv;
-            Thread.onSpinWait();
-            v = this.state;
-        }
-    }
-
-    private Object swapBoxed0WithHooks(Fn f) {
         Object v = readBoxedState();
         for (;;) {
             Object newv = f.invoke(v);
             validate(newv);
-            if (STATE_VH.compareAndSet(this, v, newv)) {
+            Object witness = STATE_VH.compareAndExchange(this, v, newv);
+            if (witness == v) {
                 notifyWatches(v, newv);
                 return newv;
             }
+            v = witness;
             Thread.onSpinWait();
-            v = this.state;
         }
     }
 
     private Object swapBoxed1(Fn f, Object x, Object s) {
-        if (this.hasHooks) return swapBoxed1WithHooks(f, x);
         Object v = (s != UNBOXED) ? s : ensureBoxed();
-        if (SINGLE_THREAD == Thread.currentThread()) {
-            Object newv = f.invoke(v, x);
-            if (this.state == v && SINGLE_THREAD == Thread.currentThread()) {
-                STATE_VH.setRelease(this, newv);
-                return newv;
-            }
-            v = this.state;
-        }
-        for (;;) {
-            Object newv = f.invoke(v, x);
-            if (STATE_VH.compareAndSet(this, v, newv)) return newv;
-            Thread.onSpinWait();
-            v = this.state;
-        }
-    }
-
-    private Object swapBoxed1WithHooks(Fn f, Object x) {
-        Object v = readBoxedState();
         for (;;) {
             Object newv = f.invoke(v, x);
             validate(newv);
-            if (STATE_VH.compareAndSet(this, v, newv)) {
+            Object witness = STATE_VH.compareAndExchange(this, v, newv);
+            if (witness == v) {
                 notifyWatches(v, newv);
                 return newv;
             }
+            v = witness;
             Thread.onSpinWait();
-            v = this.state;
         }
     }
 
@@ -754,15 +559,6 @@ public final class Atom implements IRef, IMeta, IReference {
 
     public Object swap(Fn f, Object x, Object y) {
         Object v = readBoxedState();
-        if (!this.hasHooks) {
-            for (;;) {
-                Object newv = f.invoke(v, x, y);
-                Object witness = STATE_VH.compareAndExchange(this, v, newv);
-                if (witness == v) return newv;
-                v = witness;
-                Thread.onSpinWait();
-            }
-        }
         for (;;) {
             Object newv = f.invoke(v, x, y);
             validate(newv);
@@ -785,10 +581,10 @@ public final class Atom implements IRef, IMeta, IReference {
         for (;;) {
             all[0] = v;
             Object newv = f.applyTo(all);
-            if (this.hasHooks) validate(newv);
+            validate(newv);
             Object witness = STATE_VH.compareAndExchange(this, v, newv);
             if (witness == v) {
-                if (this.hasHooks) notifyWatches(v, newv);
+                notifyWatches(v, newv);
                 return newv;
             }
             v = witness;
@@ -823,10 +619,10 @@ public final class Atom implements IRef, IMeta, IReference {
         Object v = readBoxedState();
         for (;;) {
             Object newv = f.invoke(v);
-            if (this.hasHooks) validate(newv);
+            validate(newv);
             Object witness = STATE_VH.compareAndExchange(this, v, newv);
             if (witness == v) {
-                if (this.hasHooks) notifyWatches(v, newv);
+                notifyWatches(v, newv);
                 return PersistentVector.createOwning(v, newv);
             }
             v = witness;
@@ -864,10 +660,10 @@ public final class Atom implements IRef, IMeta, IReference {
         Object v = readBoxedState();
         for (;;) {
             Object newv = f.invoke(v, x);
-            if (this.hasHooks) validate(newv);
+            validate(newv);
             Object witness = STATE_VH.compareAndExchange(this, v, newv);
             if (witness == v) {
-                if (this.hasHooks) notifyWatches(v, newv);
+                notifyWatches(v, newv);
                 return PersistentVector.createOwning(v, newv);
             }
             v = witness;
@@ -879,10 +675,10 @@ public final class Atom implements IRef, IMeta, IReference {
         Object v = readBoxedState();
         for (;;) {
             Object newv = f.invoke(v, x, y);
-            if (this.hasHooks) validate(newv);
+            validate(newv);
             Object witness = STATE_VH.compareAndExchange(this, v, newv);
             if (witness == v) {
-                if (this.hasHooks) notifyWatches(v, newv);
+                notifyWatches(v, newv);
                 return PersistentVector.createOwning(v, newv);
             }
             v = witness;
@@ -897,10 +693,10 @@ public final class Atom implements IRef, IMeta, IReference {
         for (;;) {
             all[0] = v;
             Object newv = f.applyTo(all);
-            if (this.hasHooks) validate(newv);
+            validate(newv);
             Object witness = STATE_VH.compareAndExchange(this, v, newv);
             if (witness == v) {
-                if (this.hasHooks) notifyWatches(v, newv);
+                notifyWatches(v, newv);
                 return PersistentVector.createOwning(v, newv);
             }
             v = witness;
@@ -1658,17 +1454,14 @@ public final class Atom implements IRef, IMeta, IReference {
         private final Future<Object> fut;
 
         public FutureObj(Fn fn) {
-            Atom.markMultiThreaded();
-            Map<Var, Object> bindings = Var.cloneThreadBindings();
+            Object capturedFrame = Var.cloneThreadBindingFrame();
             this.fut = VIRTUAL_EXECUTOR.submit(() -> {
-                if (bindings.isEmpty()) {
-                    return fn.invoke();
-                }
-                Var.pushThreadBindings(bindings);
+                Object prev = Var.getThreadBindingFrame();
+                Var.resetThreadBindingFrame(capturedFrame);
                 try {
                     return fn.invoke();
                 } finally {
-                    Var.popThreadBindings();
+                    Var.resetThreadBindingFrame(prev);
                 }
             });
         }

@@ -42,6 +42,7 @@ public final class Ref extends Fn implements IRef, IReference, Comparable<Ref> {
     }
 
     volatile TVal tvals;
+    volatile LockingTransaction.Info tinfo;
     volatile int minHistory = 0;
     volatile int maxHistory = 10;
     volatile Fn validator;
@@ -95,8 +96,8 @@ public final class Ref extends Fn implements IRef, IReference, Comparable<Ref> {
         return LockingTransaction.getEx().doCommute(this, fn, args);
     }
 
-    public void touch() {
-        LockingTransaction.getEx().doEnsure(this);
+    public Object touch() {
+        return LockingTransaction.getEx().doEnsure(this);
     }
 
     public int getHistoryCount() {
@@ -138,7 +139,9 @@ public final class Ref extends Fn implements IRef, IReference, Comparable<Ref> {
 
     void notifyWatches(Object oldVal, Object newVal) {
         for (Map.Entry<Object, Fn> e : watches.entrySet()) {
-            e.getValue().invoke(e.getKey(), this, oldVal, newVal);
+            try {
+                e.getValue().invoke(e.getKey(), this, oldVal, newVal);
+            } catch (Throwable ignored) {}
         }
     }
 

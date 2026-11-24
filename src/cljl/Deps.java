@@ -412,7 +412,9 @@ public final class Deps {
         // Named tool -Tname from ~/.clojure/tools/<name>.edn
         Map<Object, Object> namedToolData = null;
         if (opts.mode == Mode.TOOL && opts.toolName != null) {
-            Path toolPath = configDir.resolve("tools").resolve(opts.toolName + ".edn");
+            validatePathSegment(opts.toolName, "tool name");
+            Path toolsDir = configDir.resolve("tools");
+            Path toolPath = safeResolveChild(toolsDir, opts.toolName + ".edn", "tool name");
             if (!Files.isRegularFile(toolPath)) {
                 throw new IllegalArgumentException("Tool not installed: " + opts.toolName + " (expected " + toolPath + ")");
             }
@@ -795,7 +797,7 @@ public final class Deps {
 
     private static Object parseEdnArg(String s) {
         try {
-            return Reader.readString(s);
+            return Reader.readEdnString(null, s);
         } catch (Throwable t) {
             throw new IllegalArgumentException("Invalid EDN CLI argument '" + s + "': " + t.getMessage(), t);
         }
@@ -1297,19 +1299,24 @@ public final class Deps {
                 String ver = mvnVerObj.toString();
                 String group = lib.getNamespace() != null ? lib.getNamespace() : lib.getName();
                 String artifact = lib.getName();
+                validateCoordSegment(group, "Maven groupId");
+                validateCoordSegment(artifact, "Maven artifactId");
                 if ("RELEASE".equals(ver) || "LATEST".equals(ver)) {
                     List<String> vers = fetchMavenVersions(group, artifact, repos);
                     if (!vers.isEmpty()) ver = vers.get(vers.size() - 1);
                 }
+                validateCoordSegment(ver, "Maven version");
                 String classifier = coord.get(Keyword.intern("classifier")) != null
                         ? coord.get(Keyword.intern("classifier")).toString() : null;
+                if (classifier != null) validateCoordSegment(classifier, "Maven classifier");
                 String ext = coord.get(Keyword.intern("extension")) != null
                         ? coord.get(Keyword.intern("extension")).toString() : "jar";
+                validateCoordSegment(ext, "Maven extension");
 
                 Path m2 = getM2RepoDir();
                 String relBase = group.replace('.', '/') + "/" + artifact + "/" + ver + "/" + artifact + "-" + ver;
-                Path pomPath = m2.resolve(relBase + ".pom");
-                Path jarPath = m2.resolve(relBase + (classifier != null ? "-" + classifier : "") + "." + ext);
+                Path pomPath = safeResolveChild(m2, relBase + ".pom", "Maven POM");
+                Path jarPath = safeResolveChild(m2, relBase + (classifier != null ? "-" + classifier : "") + "." + ext, "Maven artifact");
 
                 if (!Files.isRegularFile(pomPath)) {
                     downloadFromRepos(relBase + ".pom", pomPath, repos);
@@ -1350,15 +1357,20 @@ public final class Deps {
             if (gitUrlObj != null && gitShaObj != null) {
                 String url = gitUrlObj.toString();
                 String sha = gitShaObj.toString();
+                validateGitUrl(url);
+                validateGitRef(sha, "git/sha");
                 String group = lib.getNamespace() != null ? lib.getNamespace() : lib.getName();
                 String artifact = lib.getName();
-                Path gitDir = getGitLibsDir().resolve("libs").resolve(group).resolve(artifact).resolve(sha);
+                validateCoordSegment(group, "git lib group");
+                validateCoordSegment(artifact, "git lib artifact");
+                Path gitLibsBase = getGitLibsDir().resolve("libs");
+                Path gitDir = safeResolveChild(gitLibsBase, group + "/" + artifact + "/" + sha, "git lib");
                 ensureGitCheckout(url, sha, gitDir);
 
                 Path rootSub = gitDir;
                 Object depsRootObj = coord.get(Keyword.intern("deps/root"));
                 if (depsRootObj != null) {
-                    rootSub = gitDir.resolve(depsRootObj.toString()).normalize();
+                    rootSub = safeResolveChild(gitDir, depsRootObj.toString(), "deps/root");
                 }
 
                 String shortSha = sha.length() > 7 ? sha.substring(0, 7) : sha;
@@ -1443,6 +1455,51 @@ public final class Deps {
     }
 
     // ========================================================================
+    // Security Validation Helpers
+    // ========================================================================
+
+    private static void validatePathSegment(String s, String desc) {
+        if (s == null || s.isEmpty() || s.contains("..") || s.contains("/") || s.contains("\\")
+                || s.indexOf('\0') >= 0 || s.startsWith("-")) {
+            throw new SecurityException("Invalid " + desc + ": " + s);
+        }
+    }
+
+    private static void validateCoordSegment(String s, String desc) {
+        if (s == null || s.isEmpty() || s.contains("..") || s.contains("/") || s.contains("\\")
+                || s.indexOf('\0') >= 0) {
+            throw new SecurityException("Invalid " + desc + ": " + s);
+        }
+    }
+
+    private static Path safeResolveChild(Path baseDir, String relative, String desc) {
+        if (relative == null || relative.indexOf('\0') >= 0) {
+            throw new SecurityException("Invalid path in " + desc);
+        }
+        Path normBase = baseDir.toAbsolutePath().normalize();
+        Path resolved = normBase.resolve(relative).normalize();
+        if (!resolved.startsWith(normBase)) {
+            throw new SecurityException("Path traversal detected in " + desc + ": " + relative);
+        }
+        return resolved;
+    }
+
+    private static void validateGitUrl(String url) {
+        if (url == null || url.isEmpty() || url.startsWith("-")
+                || url.indexOf('\0') >= 0 || url.indexOf('\r') >= 0 || url.indexOf('\n') >= 0) {
+            throw new SecurityException("Invalid git URL: " + url);
+        }
+    }
+
+    private static void validateGitRef(String ref, String desc) {
+        if (ref == null || ref.isEmpty() || ref.startsWith("-")
+                || ref.contains("..") || ref.contains("/") || ref.contains("\\")
+                || ref.indexOf('\0') >= 0 || ref.indexOf('\r') >= 0 || ref.indexOf('\n') >= 0) {
+            throw new SecurityException("Invalid " + desc + ": " + ref);
+        }
+    }
+
+    // ========================================================================
     // Maven HTTP + POM Parsing Helpers
     // ========================================================================
 
@@ -1466,7 +1523,13 @@ public final class Deps {
         PomInfo info = new PomInfo();
         try {
             DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+            dbf.setFeature(javax.xml.XMLConstants.FEATURE_SECURE_PROCESSING, true);
             dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            dbf.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+            dbf.setXIncludeAware(false);
+            dbf.setExpandEntityReferences(false);
             DocumentBuilder db = dbf.newDocumentBuilder();
             Document doc = db.parse(pomPath.toFile());
             Element root = doc.getDocumentElement();
@@ -1484,8 +1547,11 @@ public final class Deps {
                 if (groupId == null) groupId = pg;
                 if (version == null) version = pv;
                 if (pg != null && pa != null && pv != null) {
+                    validateCoordSegment(pg, "parent groupId");
+                    validateCoordSegment(pa, "parent artifactId");
+                    validateCoordSegment(pv, "parent version");
                     String pRel = pg.replace('.', '/') + "/" + pa + "/" + pv + "/" + pa + "-" + pv + ".pom";
-                    Path pPom = m2.resolve(pRel);
+                    Path pPom = safeResolveChild(m2, pRel, "parent POM");
                     if (!Files.isRegularFile(pPom)) {
                         downloadFromRepos(pRel, pPom, repos);
                     }
@@ -1617,27 +1683,113 @@ public final class Deps {
         return el != null ? el.getTextContent().trim() : null;
     }
 
+    private static <T> HttpResponse<T> sendNoDowngrade(
+            HttpClient client, URI uri, Duration timeout, HttpResponse.BodyHandler<T> handler)
+            throws IOException, InterruptedException {
+        URI current = uri;
+        for (int redirects = 0; redirects < 5; redirects++) {
+            HttpRequest req = HttpRequest.newBuilder(current)
+                    .timeout(timeout)
+                    .GET()
+                    .build();
+            HttpResponse<T> resp = client.send(req, handler);
+            int code = resp.statusCode();
+            if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                Optional<String> loc = resp.headers().firstValue("Location");
+                if (loc.isEmpty()) return resp;
+                URI next = current.resolve(loc.get());
+                if ("https".equalsIgnoreCase(current.getScheme())
+                        && "http".equalsIgnoreCase(next.getScheme())) {
+                    throw new SecurityException("Blocked HTTPS to HTTP downgrade redirect: " + current + " -> " + next);
+                }
+                current = next;
+                continue;
+            }
+            return resp;
+        }
+        throw new IOException("Too many redirects fetching " + uri);
+    }
+
+    private static String computeHexDigest(Path file, String alg) throws Exception {
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance(alg);
+        try (InputStream is = Files.newInputStream(file)) {
+            byte[] buf = new byte[8192];
+            int r;
+            while ((r = is.read(buf)) != -1) {
+                md.update(buf, 0, r);
+            }
+        }
+        byte[] digest = md.digest();
+        StringBuilder sb = new StringBuilder(digest.length * 2);
+        for (byte b : digest) {
+            sb.append(Character.forDigit((b >>> 4) & 0xf, 16));
+            sb.append(Character.forDigit(b & 0xf, 16));
+        }
+        return sb.toString();
+    }
+
+    private static boolean verifyDownloadChecksum(HttpClient client, String artifactUrl, Path downloadedFile) {
+        String[][] checks = {
+                {".sha256", "SHA-256"},
+                {".sha1", "SHA-1"}
+        };
+        for (String[] chk : checks) {
+            try {
+                HttpResponse<String> resp = sendNoDowngrade(
+                        client, URI.create(artifactUrl + chk[0]), Duration.ofSeconds(10), HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200 && resp.body() != null) {
+                    String expected = resp.body().trim().split("\\s+")[0].toLowerCase(Locale.ROOT);
+                    if (expected.matches("[0-9a-f]+")) {
+                        String actual = computeHexDigest(downloadedFile, chk[1]);
+                        if (!expected.equals(actual)) {
+                            throw new SecurityException("Checksum mismatch (" + chk[1] + ") for " + artifactUrl
+                                    + ": expected " + expected + ", got " + actual);
+                        }
+                        return true;
+                    }
+                }
+            } catch (SecurityException se) {
+                throw se;
+            } catch (Exception ignored) {
+                // Try next checksum algorithm
+            }
+        }
+        return true;
+    }
+
     private static void downloadFromRepos(String relPath, Path target, Map<String, String> repos) {
         try {
             Files.createDirectories(target.getParent());
         } catch (IOException ignored) {}
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
-                .followRedirects(HttpClient.Redirect.NORMAL)
+                .followRedirects(HttpClient.Redirect.NEVER)
                 .build();
         for (String baseUrl : repos.values()) {
             String url = baseUrl.endsWith("/") ? baseUrl + relPath : baseUrl + "/" + relPath;
+            Path tmp = null;
             try {
-                HttpRequest req = HttpRequest.newBuilder(URI.create(url))
-                        .timeout(Duration.ofSeconds(30))
-                        .GET()
-                        .build();
-                HttpResponse<byte[]> resp = client.send(req, HttpResponse.BodyHandlers.ofByteArray());
+                tmp = Files.createTempFile(target.getParent(), ".cljl-dl-", ".tmp");
+                HttpResponse<Path> resp = sendNoDowngrade(
+                        client, URI.create(url), Duration.ofSeconds(30), HttpResponse.BodyHandlers.ofFile(tmp));
                 if (resp.statusCode() == 200) {
-                    Files.write(target, resp.body());
+                    verifyDownloadChecksum(client, url, tmp);
+                    try {
+                        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                    } catch (AtomicMoveNotSupportedException e) {
+                        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                    tmp = null;
                     return;
                 }
-            } catch (Exception ignored) {}
+            } catch (SecurityException se) {
+                throw se;
+            } catch (Exception ignored) {
+            } finally {
+                if (tmp != null) {
+                    try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+                }
+            }
         }
     }
 
@@ -1646,16 +1798,13 @@ public final class Deps {
         String rel = group.replace('.', '/') + "/" + artifact + "/maven-metadata.xml";
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
-                .followRedirects(HttpClient.Redirect.NORMAL)
+                .followRedirects(HttpClient.Redirect.NEVER)
                 .build();
         for (String baseUrl : repos.values()) {
             String url = baseUrl.endsWith("/") ? baseUrl + rel : baseUrl + "/" + rel;
             try {
-                HttpRequest req = HttpRequest.newBuilder(URI.create(url))
-                        .timeout(Duration.ofSeconds(15))
-                        .GET()
-                        .build();
-                HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+                HttpResponse<String> resp = sendNoDowngrade(
+                        client, URI.create(url), Duration.ofSeconds(15), HttpResponse.BodyHandlers.ofString());
                 if (resp.statusCode() == 200) {
                     Matcher m = Pattern.compile("<version>([^<]+)</version>").matcher(resp.body());
                     while (m.find()) {
@@ -1669,13 +1818,15 @@ public final class Deps {
     }
 
     private static void ensureGitCheckout(String url, String sha, Path targetDir) {
+        validateGitUrl(url);
+        validateGitRef(sha, "git/sha");
         if (Files.isDirectory(targetDir)) return;
         try {
             Files.createDirectories(targetDir.getParent());
-            ProcessBuilder pb = new ProcessBuilder("git", "clone", "--quiet", url, targetDir.toString());
+            ProcessBuilder pb = new ProcessBuilder("git", "clone", "--quiet", "--", url, targetDir.toString());
             Process p = pb.start();
             if (p.waitFor() == 0) {
-                new ProcessBuilder("git", "-C", targetDir.toString(), "checkout", "--quiet", sha).start().waitFor();
+                new ProcessBuilder("git", "-C", targetDir.toString(), "checkout", "--quiet", "--detach", sha).start().waitFor();
             }
         } catch (Exception e) {
             throw new RuntimeException("Failed to fetch git dep " + url + " @ " + sha + ": " + e.getMessage(), e);
@@ -1683,9 +1834,10 @@ public final class Deps {
     }
 
     private static List<String> listGitTags(String url) {
+        validateGitUrl(url);
         List<String> tags = new ArrayList<>();
         try {
-            Process p = new ProcessBuilder("git", "ls-remote", "--tags", "--refs", url).start();
+            Process p = new ProcessBuilder("git", "ls-remote", "--tags", "--refs", "--", url).start();
             try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = br.readLine()) != null) {
@@ -1699,8 +1851,12 @@ public final class Deps {
     }
 
     private static String resolveGitTagSha(String url, String tag) {
+        validateGitUrl(url);
+        if (tag == null || tag.isEmpty() || tag.startsWith("-") || tag.indexOf('\0') >= 0) {
+            throw new SecurityException("Invalid git tag: " + tag);
+        }
         try {
-            Process p = new ProcessBuilder("git", "ls-remote", "--tags", url, "refs/tags/" + tag, "refs/tags/" + tag + "^{}").start();
+            Process p = new ProcessBuilder("git", "ls-remote", "--tags", "--", url, "refs/tags/" + tag, "refs/tags/" + tag + "^{}").start();
             String lastSha = null;
             try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;

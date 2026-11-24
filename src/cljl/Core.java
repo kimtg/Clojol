@@ -29,6 +29,37 @@ public final class Core {
     private static int loadingMask = 0;
     private static final Set<String> LOADED_LIBS = ConcurrentHashMap.newKeySet();
     public static volatile boolean coreRedefined = false;
+    private static final java.util.concurrent.atomic.AtomicInteger CORE_REDEF_COUNT = new java.util.concurrent.atomic.AtomicInteger(0);
+
+    static void adjustCoreRedefined(int delta) {
+        int n = CORE_REDEF_COUNT.addAndGet(delta);
+        if (n < 0) {
+            CORE_REDEF_COUNT.set(0);
+            n = 0;
+        }
+        coreRedefined = n > 0;
+    }
+
+    public static Object callCoreVar(String name, Object a) {
+        Var v = RT.CLOJURE_NS.findInternedVar(Symbol.intern(name));
+        return ((Fn) v.deref()).invoke(a);
+    }
+
+    public static Object callCoreVar(String name, Object a, Object b) {
+        Var v = RT.CLOJURE_NS.findInternedVar(Symbol.intern(name));
+        return ((Fn) v.deref()).invoke(a, b);
+    }
+
+    public static Object callCoreVar(String name, Object a, Object b, Object c) {
+        Var v = RT.CLOJURE_NS.findInternedVar(Symbol.intern(name));
+        return ((Fn) v.deref()).invoke(a, b, c);
+    }
+
+    public static Object callCoreVarApply(String name, Object[] args) {
+        Var v = RT.CLOJURE_NS.findInternedVar(Symbol.intern(name));
+        return ((Fn) v.deref()).applyTo(args);
+    }
+
     public static Fn addFn;
     public static Fn subFn;
     public static Fn mulFn;

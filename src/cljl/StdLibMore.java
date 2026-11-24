@@ -255,17 +255,21 @@ public final class StdLibMore {
     // ========================================================================
 
     private static void openUrlInBrowser(URI uri) throws Exception {
+        String s = uri.toString();
+        if (s.indexOf('\0') >= 0 || s.indexOf('\r') >= 0 || s.indexOf('\n') >= 0) {
+            throw new IllegalArgumentException("Invalid URI: " + s);
+        }
         if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
             Desktop.getDesktop().browse(uri);
             return;
         }
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         if (os.contains("win")) {
-            new ProcessBuilder("cmd", "/c", "start", "", uri.toString()).start();
+            new ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", s).start();
         } else if (os.contains("mac")) {
-            new ProcessBuilder("open", uri.toString()).start();
+            new ProcessBuilder("open", s).start();
         } else {
-            new ProcessBuilder("xdg-open", uri.toString()).start();
+            new ProcessBuilder("xdg-open", s).start();
         }
     }
 
@@ -1020,6 +1024,13 @@ public final class StdLibMore {
             else is = new InputSource(src.toString());
 
             SAXParserFactory spf = SAXParserFactory.newInstance();
+            spf.setFeature(javax.xml.XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            spf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            spf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            spf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            spf.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+            spf.setXIncludeAware(false);
+            spf.setNamespaceAware(false);
             javax.xml.parsers.SAXParser parser = spf.newSAXParser();
             Deque<Keyword> tagStack = new ArrayDeque<>();
             Deque<Object> attrsStack = new ArrayDeque<>();

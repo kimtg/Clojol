@@ -545,6 +545,29 @@
         (is (= 0 (:exit r)) (:err r))
         (is (= "x=42" (:out r)))))))
 
+(deftest cli-security-hardening-test
+  (testing "Security regressions: #= blocked in -X, -Tname traversal blocked, git flag injection blocked"
+    ;; #= eval reader macro must be rejected in -X EDN CLI arguments
+    (let [r (run-proc {:dir repo-root}
+                      [java-bin "-jar" cljl-jar "-Srepro" "-Sdeps" "{}"
+                       "-X" "clojure.core/prn" ":x" "#=(+ 1 2)"])]
+      (is (not= 0 (:exit r)))
+      (is (not (str/includes? (:out r) "3"))))
+    ;; -Tname path traversal must be rejected
+    (let [r (run-proc {:dir repo-root}
+                      [java-bin "-jar" cljl-jar "-Srepro" "-T../../etc/passwd" "clojure.core/prn"])]
+      (is (not= 0 (:exit r))))
+    ;; Git URL flag injection must be rejected
+    (let [r (run-proc {:dir repo-root}
+                      [java-bin "-jar" cljl-jar "-Srepro" "-Sforce" "-Spath"
+                       "-Sdeps" "{:deps {foo/bar {:git/url \"--upload-pack=id\" :git/sha \"deadbeef\"}}}"])]
+      (is (not= 0 (:exit r))))
+    ;; Maven coordinate path traversal must be rejected
+    (let [r (run-proc {:dir repo-root}
+                      [java-bin "-jar" cljl-jar "-Srepro" "-Sforce" "-Spath"
+                       "-Sdeps" "{:deps {foo/bar {:mvn/version \"../../../evil\"}}}"])]
+      (is (not= 0 (:exit r))))))
+
 (let [res (run-tests 'cljl.cli-test)]
   (when (or (pos? (:fail res)) (pos? (:error res)))
     (System/exit 1)))

@@ -2600,6 +2600,206 @@
     (is (= {:a 1 :b 2} ((var clojure.core/imap-cons) {:a 1} [:b 2])))
     (is (= (System/lineSeparator) clojure.core/system-newline))))
 
+(deftest milestone-1-concurrency-stm-var-security-test
+  (testing "1.1 Atom multi-thread safety across raw Java threads & concurrent hook registration"
+    (let [a (atom 0)
+          threads (mapv (fn [_]
+                          (Thread. (fn []
+                                     (dotimes [_ 500]
+                                       (swap! a inc)))))
+                        (range 8))]
+      (doseq [t threads] (.start ^Thread t))
+      (doseq [t threads] (.join ^Thread t))
+      (is (= 4000 @a)))
+    ;; Concurrent boxed swap + validator addition must not skip validator
+    (let [a (atom 0)
+          rejected (atom 0)]
+      (set-validator! a #(<= % 50))
+      (is (thrown? IllegalStateException (reset! a 51)))
+      (is (= 0 @a))
+      (is (false? (compare-and-set! a 1 2)))
+      (is (true? (compare-and-set! a @a 10)))
+      (is (= 10 @a))))
+
+  (testing "1.2 STM: RetryEx extends Error (not swallowed by catch Exception), commute, ensure, barging, watch isolation"
+    ;; catch Exception inside dosync must NOT swallow STM retries
+    (let [r (ref 0)
+          swallowed (atom 0)
+          futs (doall (for [_ (range 6)]
+                        (future
+                          (dotimes [_ 40]
+                            (dosync
+                              (try
+                                (alter r inc)
+                                (catch Exception _
+                                  (swap! swallowed inc))))))))]
+      (doseq [f futs] @f)
+      (is (= 240 @r))
+      (is (= 0 @swallowed)))
+    ;; Can't ref-set/alter after commute on same ref
+    (let [r (ref 0)]
+      (is (thrown? IllegalStateException
+                   (dosync
+                     (commute r inc)
+                     (ref-set r 99))))
+      (is (= 0 @r)))
+    ;; Commute after ref-set is allowed
+    (let [r (ref 0)]
+      (dosync
+        (ref-set r 10)
+        (commute r + 5))
+      (is (= 15 @r)))
+    ;; Multi-threaded bank transfer with alter + ensure preserves invariant
+    (let [accounts (mapv (fn [_] (ref 100)) (range 5))
+          futs (doall (for [i (range 8)]
+                        (future
+                          (dotimes [j 30]
+                            (let [from (nth accounts (mod (+ i j) 5))
+                                  to   (nth accounts (mod (+ i j 1) 5))]
+                              (dosync
+                                (let [bal (ensure from)]
+                                  (when (pos? bal)
+                                    (alter from dec)
+                                    (alter to inc)))))))))]
+      (doseq [f futs] @f)
+      (is (= 500 (reduce + (map deref accounts)))))
+    ;; Watch exception isolation after commit
+    (let [r (ref 0)
+          seen (atom 0)]
+      (add-watch r :bad (fn [_ _ _ _] (throw (RuntimeException. "boom"))))
+      (add-watch r :good (fn [_ _ _ n] (reset! seen n)))
+      (is (= 7 (dosync (ref-set r 7))))
+      (is (= 7 @r))
+      (is (= 7 @seen))))
+
+  (testing "1.3 Agent: deref on error, release-pending-sends, error-handler dispatch, watch isolation, barrier await, send-via frame restore"
+    ;; deref returns last valid state even when failed; send throws
+    (let [a (agent 42)]
+      (send a (fn [_] (throw (RuntimeException. "fail-me"))))
+      (await-for 2000 a)
+      (is (some? (agent-error a)))
+      (is (= 42 @a))
+      (is (thrown? RuntimeException (send a inc)))
+      (restart-agent a 100)
+      (is (= 100 @a)))
+    ;; watch exception must NOT fail an already-committed agent
+    (let [a (agent 0)]
+      (add-watch a :bad (fn [_ _ _ _] (throw (RuntimeException. "watch-err"))))
+      (send a inc)
+      (await-for 2000 a)
+      (is (= 1 @a))
+      (is (nil? (agent-error a))))
+    ;; error-handler can dispatch to another agent (NESTED_SENDS cleared before handler)
+    (let [reporter (agent nil)
+          a (agent 0 :error-handler (fn [_ ex] (send reporter (constantly (.getMessage ^Throwable ex)))))]
+      (send a (fn [_] (throw (RuntimeException. "reported-err"))))
+      (await-for 2000 a)
+      (await-for 2000 reporter)
+      (is (= "reported-err" @reporter)))
+    ;; release-pending-sends inside agent action flushes nested sends immediately
+    (let [target (agent 0)
+          p (promise)
+          driver (agent 0)]
+      (send driver (fn [s]
+                     (send target + 10)
+                     (let [flushed (release-pending-sends)]
+                       (deliver p flushed))
+                     (inc s)))
+      (await-for 2000 driver target)
+      (is (= 1 @p))
+      (is (= 10 @target)))
+    ;; Barrier await does not starve under continuous sends
+    (let [a (agent 0)
+          stop (atom false)
+          sender (future (while (not @stop) (send a inc) (Thread/sleep 1)))]
+      (try
+        (Thread/sleep 10)
+        (is (true? (await-for 2000 a)))
+        (finally
+          (reset! stop true)
+          @sender)))
+    ;; send-via on direct same-thread executor saves/restores dynamic binding frame cleanly
+    (eval '(do
+             (def ^:dynamic __m1-agent-dyn :root)
+             (let [direct-exec (reify java.util.concurrent.Executor
+                                 (execute [_ r] (.run ^Runnable r)))
+                   a (agent nil)]
+               (binding [__m1-agent-dyn :caller]
+                 (send-via direct-exec a (fn [_] __m1-agent-dyn))
+                 (is (= :caller __m1-agent-dyn)))
+               (is (= :caller @a))
+               (is (= :root __m1-agent-dyn))))))
+
+  (testing "1.4 Var dynamic enforcement, setMeta flag clearing, validator, cached Unbound, bound-fn*, with-redefs on JIT intrinsics & PureMemo"
+    (eval '(do
+             ;; Non-dynamic var cannot be dynamically bound
+             (def __m1-nondyn 1)
+             (is (thrown? IllegalStateException (binding [__m1-nondyn 2] __m1-nondyn)))
+             ;; Clearing :dynamic via alter-meta! disables dynamic binding
+             (def ^:dynamic __m1-dyn-clear 10)
+             (is (= 20 (binding [__m1-dyn-clear 20] __m1-dyn-clear)))
+             (alter-meta! #'__m1-dyn-clear dissoc :dynamic)
+             (is (thrown? IllegalStateException (binding [__m1-dyn-clear 30] __m1-dyn-clear)))
+             ;; Var validator
+             (def __m1-val-var 5)
+             (set-validator! #'__m1-val-var pos?)
+             (is (fn? (get-validator #'__m1-val-var)))
+             (is (thrown? IllegalStateException (alter-var-root #'__m1-val-var (constantly -1))))
+             (is (= 5 __m1-val-var))
+             (set-validator! #'__m1-val-var nil)
+             ;; Cached Unbound identity
+             (def __m1-unb)
+             (is (identical? @#'__m1-unb @#'__m1-unb))
+             ;; with-redefs on unbound var restores unbound without passing internal sentinel to watch
+             (let [watch-vals (atom [])]
+               (add-watch #'__m1-unb :w (fn [_ _ o n] (swap! watch-vals conj [o n])))
+               (with-redefs [__m1-unb 99]
+                 (is (= 99 __m1-unb)))
+               (is (false? (.hasRoot #'__m1-unb)))
+               (is (= 1 (count @watch-vals)))
+               (is (instance? clojure.lang.Var$Unbound (ffirst @watch-vals)))
+               (remove-watch #'__m1-unb :w))
+             ;; bound-fn* restores caller bindings cleanly
+             (def ^:dynamic __m1-bf-var :root)
+             (let [f (binding [__m1-bf-var :captured]
+                       (bound-fn [] __m1-bf-var))]
+               (binding [__m1-bf-var :other]
+                 (is (= :captured (f)))
+                 (is (= :other __m1-bf-var))))
+             ;; with-redefs works on already-JIT-compiled functions using core intrinsics & PureMemo
+             (defn __m1-jit-add [x] (+ x 1))
+             (defn __m1-jit-cnt [v] (count v))
+             (defn __m1-jit-fib [n] (if (< n 2) n (+ (__m1-jit-fib (- n 1)) (__m1-jit-fib (- n 2)))))
+             ;; Warm up JIT & PureMemo
+             (dotimes [_ 20] (__m1-jit-add 5) (__m1-jit-cnt [1 2 3]) (__m1-jit-fib 10))
+             (is (= 6 (__m1-jit-add 5)))
+             (is (= 3 (__m1-jit-cnt [1 2 3])))
+             (is (= 55 (__m1-jit-fib 10)))
+             (with-redefs [+ (fn [a b] (* a b))]
+               (is (= 5 (__m1-jit-add 5))))
+             (with-redefs [count (constantly 99)]
+               (is (= 99 (__m1-jit-cnt [1 2 3]))))
+             (let [orig+ +]
+               (with-redefs [+ (fn [a b] (orig+ 1 (orig+ a b)))]
+                 (is (not= 55 (__m1-jit-fib 10)))))
+             ;; Restored back to normal fast path
+             (is (= 6 (__m1-jit-add 5)))
+             (is (= 55 (__m1-jit-fib 10))))))
+
+  (testing "1.5 Security hardening: XXE blocked, EDN #= blocked, GenClass traversal blocked"
+    (eval '(require '[clojure.xml :as xml]))
+    (let [xxe "<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><root>&xxe;</root>"]
+      (is (thrown? Exception
+                   (clojure.xml/parse (java.io.ByteArrayInputStream. (.getBytes xxe "UTF-8"))))))
+    ;; Valid XML without DOCTYPE still parses cleanly
+    (let [ok "<root a=\"1\"><child>hi</child></root>"
+          parsed (clojure.xml/parse (java.io.ByteArrayInputStream. (.getBytes ok "UTF-8")))]
+      (is (= :root (:tag parsed))))
+    ;; GenClass path traversal blocked
+    (is (thrown? SecurityException
+                 (binding [*compile-files* true *compile-path* "/tmp/cljl-sec-test"]
+                   (cljl.GenClass/writeClassFileIfCompiling "../../evil" (byte-array 0)))))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

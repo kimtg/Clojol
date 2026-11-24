@@ -41,6 +41,11 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
 
     private static final ThreadLocal<Deque<Map<Var, Object>>> BINDING_STACK = new ThreadLocal<>();
 
+    private static final Keyword NS_KW = Keyword.intern("ns");
+    private static final Keyword NAME_KW = Keyword.intern("name");
+    private static final Keyword DYNAMIC_KW = Keyword.intern("dynamic");
+    private static final Keyword MACRO_KW = Keyword.intern("macro");
+
     public final Namespace ns;
     public final Symbol sym;
     private volatile Object root;
@@ -49,7 +54,11 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
     private volatile boolean dynamic;
     private volatile boolean macro;
     private volatile PersistentHashMap meta;
+    private volatile Fn validator;
     private volatile ConcurrentHashMap<Object, Fn> watches;
+    private volatile Unbound unbound;
+    private volatile Object initialCoreRoot = UNBOUND;
+    private volatile boolean redefinedCore = false;
 
     public Var(Namespace ns, Symbol sym) {
         this.ns = ns;
@@ -71,8 +80,20 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
         this.ns = ns;
         this.sym = sym;
         this.root = root;
+        if (root != UNBOUND && isIntrinsicCoreVar()) {
+            this.initialCoreRoot = root;
+        }
         this.fastRoot = (root == UNBOUND) ? SLOW_SENTINEL : root;
         this.meta = PersistentHashMap.EMPTY;
+    }
+
+    private Unbound getUnbound() {
+        Unbound u = this.unbound;
+        if (u == null) {
+            u = new Unbound(this);
+            this.unbound = u;
+        }
+        return u;
     }
 
     private void refreshFastRoot() {
@@ -80,17 +101,43 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
         this.fastRoot = (this.dynamic || r == UNBOUND) ? SLOW_SENTINEL : r;
     }
 
+    private void validate(Object val) {
+        Fn v = this.validator;
+        if (v != null && !RT.truthy(v.invoke(val))) {
+            throw new IllegalStateException("Invalid reference state");
+        }
+    }
+
+    @Override
+    public Fn getValidator() {
+        return validator;
+    }
+
+    @Override
+    public void setValidator(Fn vf) {
+        if (vf != null && this.root != UNBOUND) {
+            if (!RT.truthy(vf.invoke(this.root))) {
+                throw new IllegalStateException("Invalid reference state");
+            }
+        }
+        this.validator = vf;
+    }
+
     public static void pushThreadBindings(Map<Var, Object> bindings) {
+        for (Map.Entry<Var, Object> e : bindings.entrySet()) {
+            Var v = e.getKey();
+            if (!v.isDynamic()) {
+                throw new IllegalStateException("Can't dynamically bind non-dynamic var: " + v);
+            }
+            v.validate(e.getValue());
+        }
         Deque<Map<Var, Object>> stack = BINDING_STACK.get();
         if (stack == null) {
             stack = new ArrayDeque<>();
             BINDING_STACK.set(stack);
         }
         Map<Var, Object> merged = stack.isEmpty() ? new HashMap<>() : new HashMap<>(stack.peek());
-        for (Map.Entry<Var, Object> e : bindings.entrySet()) {
-            e.getKey().setDynamic(true);
-            merged.put(e.getKey(), e.getValue());
-        }
+        merged.putAll(bindings);
         stack.push(merged);
     }
 
@@ -181,7 +228,7 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
                 }
             }
         }
-        return root == UNBOUND ? new Unbound(this) : root;
+        return root == UNBOUND ? getUnbound() : root;
     }
 
     public Object getRawRoot() {
@@ -220,31 +267,46 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
         return false;
     }
 
-    private boolean isCoreArithVar() {
-        if (ns != RT.CLOJURE_NS || sym == null) return false;
-        return switch (sym.name) {
-            case "+", "-", "*", "inc", "dec",
-                 "unchecked-add", "unchecked-subtract", "unchecked-multiply",
-                 "unchecked-inc", "unchecked-dec" -> true;
-            default -> false;
-        };
+    private boolean isIntrinsicCoreVar() {
+        return ns == RT.CLOJURE_NS && sym != null && CompilerIntrinsics.isIntrinsicName(sym.name);
+    }
+
+    private synchronized void updateCoreRedefStatus() {
+        if (!isIntrinsicCoreVar()) return;
+        if (this.initialCoreRoot == UNBOUND) {
+            if (this.root != UNBOUND) {
+                this.initialCoreRoot = this.root;
+            }
+            return;
+        }
+        boolean nowRedefined = this.dynamic || this.root != this.initialCoreRoot;
+        if (nowRedefined != this.redefinedCore) {
+            this.redefinedCore = nowRedefined;
+            Core.adjustCoreRedefined(nowRedefined ? 1 : -1);
+        }
     }
 
     public Var bindRoot(Object val) {
+        validate(val);
         Object old = this.root;
-        if (old != UNBOUND && isCoreArithVar()) {
-            Core.coreRedefined = true;
-        }
         this.root = val;
         refreshFastRoot();
-        notifyWatches(old, val);
+        updateCoreRedefStatus();
+        notifyWatches(old == UNBOUND ? getUnbound() : old, val);
         return this;
+    }
+
+    public synchronized void unbindRoot() {
+        this.root = UNBOUND;
+        refreshFastRoot();
+        updateCoreRedefStatus();
     }
 
     public Object set(Object val) {
         if (dynamic) {
             Deque<Map<Var, Object>> stack = BINDING_STACK.get();
             if (stack != null && !stack.isEmpty() && stack.peek().containsKey(this)) {
+                validate(val);
                 stack.peek().put(this, val);
                 return val;
             }
@@ -254,30 +316,35 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
 
     public synchronized Object alterRoot(Fn fn, Object[] args) {
         Object old = this.root;
+        Object oldExposed = old == UNBOUND ? getUnbound() : old;
         Object[] allArgs = new Object[(args == null ? 0 : args.length) + 1];
-        allArgs[0] = old;
+        allArgs[0] = oldExposed;
         if (args != null && args.length > 0) {
             System.arraycopy(args, 0, allArgs, 1, args.length);
         }
         Object newVal = fn.applyTo(allArgs);
+        validate(newVal);
         this.root = newVal;
         refreshFastRoot();
-        notifyWatches(old, newVal);
+        updateCoreRedefStatus();
+        notifyWatches(oldExposed, newVal);
         return newVal;
     }
 
     public Var setDynamic() {
-        this.dynamic = true;
-        this.fastRoot = SLOW_SENTINEL;
-        return this;
+        return setDynamic(true);
     }
 
     public Var setDynamic(boolean b) {
-        if (b && !this.dynamic && isCoreArithVar()) {
-            Core.coreRedefined = true;
-        }
         this.dynamic = b;
+        PersistentHashMap m = this.meta;
+        if (b) {
+            this.meta = (m != null ? m : PersistentHashMap.EMPTY).assoc(DYNAMIC_KW, Boolean.TRUE);
+        } else if (m != null && m.containsKey(DYNAMIC_KW)) {
+            this.meta = m.without(DYNAMIC_KW);
+        }
         refreshFastRoot();
+        updateCoreRedefStatus();
         return this;
     }
 
@@ -287,16 +354,13 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
 
     public Var setMacro() {
         this.macro = true;
-        this.meta = this.meta.assoc(Keyword.intern("macro"), Boolean.TRUE);
+        this.meta = this.meta.assoc(MACRO_KW, Boolean.TRUE);
         return this;
     }
 
     public boolean isMacro() {
         return macro;
     }
-
-    private static final Keyword NS_KW = Keyword.intern("ns");
-    private static final Keyword NAME_KW = Keyword.intern("name");
 
     @Override
     public PersistentHashMap meta() {
@@ -322,13 +386,10 @@ public final class Var extends Fn implements IRef, IMeta, IReference {
 
     public Var setMeta(PersistentHashMap m) {
         this.meta = m != null ? m : PersistentHashMap.EMPTY;
-        if (RT.truthy(this.meta.valAt(Keyword.intern("dynamic")))) {
-            this.dynamic = true;
-            this.fastRoot = SLOW_SENTINEL;
-        }
-        if (RT.truthy(this.meta.valAt(Keyword.intern("macro")))) {
-            this.macro = true;
-        }
+        this.dynamic = RT.truthy(this.meta.valAt(DYNAMIC_KW));
+        this.macro = RT.truthy(this.meta.valAt(MACRO_KW));
+        refreshFastRoot();
+        updateCoreRedefStatus();
         return this;
     }
 

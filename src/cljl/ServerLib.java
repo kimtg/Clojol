@@ -36,7 +36,7 @@ public final class ServerLib {
             if (name.startsWith("clojure.server.")) {
                 String serverName = name.substring("clojure.server.".length());
                 String val = props.getProperty(name);
-                Object optsObj = Reader.readString(val);
+                Object optsObj = Reader.readEdnString(null, val);
                 if (optsObj instanceof PersistentHashMap pm) {
                     if (!pm.containsKey(Keyword.intern("name"))) {
                         pm = pm.assoc(Keyword.intern("name"), serverName);
@@ -101,7 +101,6 @@ public final class ServerLib {
         }));
 
         ns.intern("start-server", Fn.of1("start-server", optsObj -> {
-            Atom.markMultiThreaded();
             PersistentHashMap opts = (PersistentHashMap) optsObj;
             String name = String.valueOf(opts.valAt(kName, "server-" + RT.nextID()));
             int port = (int) Numbers.toLong(opts.valAt(kPort, 0L));
@@ -159,7 +158,7 @@ public final class ServerLib {
                     sockOut.println(line);
                     String resp = sockIn.readLine();
                     if (resp == null) break;
-                    outFn.invoke(Reader.readString(resp));
+                    outFn.invoke(Reader.readEdnString(null, resp));
                 }
             } catch (IOException e) {
                 throw RT.sneakyThrow(e);

@@ -1004,7 +1004,7 @@ public final class Compiler {
                     }
                     Node[] argNodes = compileArgs(args, scope);
                     // Emit specialized intrinsic AST nodes for core hot-path operations
-                    if (targetVar.ns == RT.CLOJURE_NS && !targetVar.isDynamic()) {
+                    if (targetVar.ns == RT.CLOJURE_NS && !targetVar.isDynamic() && !Core.coreRedefined) {
                         Node intrinsic = tryCreateIntrinsic(targetVar.sym.name, argNodes);
                         if (intrinsic != null) return intrinsic;
                     }
@@ -2408,14 +2408,11 @@ public final class Compiler {
         @Override
         public Object invoke() {
             Fn j = jitFn;
-            if (j != null) return j.invoke();
+            if (j != null && !Core.coreRedefined) return j.invoke();
             return invokeSlow0();
         }
 
-        private Object invokeSlow0() {
-            maybeCompileJit();
-            Fn j = jitFn;
-            if (j != null) return j.invoke();
+        public Object invokeInterpreted0() {
             FnMethod m = fixedMethods[0];
             if (m != null) {
                 Object[] frame = m.initFrame(this, captured, 0);
@@ -2429,98 +2426,110 @@ public final class Compiler {
             throw arityError(0);
         }
 
+        private Object invokeSlow0() {
+            if (!Core.coreRedefined) {
+                maybeCompileJit();
+                Fn j = jitFn;
+                if (j != null) return j.invoke();
+            }
+            return invokeInterpreted0();
+        }
+
         @Override
         public Object invoke(Object a) {
             Fn j = jitFn;
-            if (j != null) return j.invoke(a);
+            if (j != null && !Core.coreRedefined) return j.invoke(a);
             return invokeSlow1(a);
         }
 
-        private Object invokeSlow1(Object a) {
-            maybeCompileJit();
-            Fn j = jitFn;
-            if (j != null) return j.invoke(a);
+        public Object invokeInterpreted1(Object a) {
             FnMethod m = fixedMethods[1];
             if (m != null) {
                 Object[] frame = m.initFrame(this, captured, 1);
                 frame[m.paramSlots[0]] = a;
                 return m.runBody(frame);
             }
-            return invokeVarargs(new Object[]{a});
+            return invokeInterpretedVarargs(new Object[]{a});
+        }
+
+        private Object invokeSlow1(Object a) {
+            if (!Core.coreRedefined) {
+                maybeCompileJit();
+                Fn j = jitFn;
+                if (j != null) return j.invoke(a);
+            }
+            return invokeInterpreted1(a);
         }
 
         @Override
         public Object invoke(Object a, Object b) {
             Fn j = jitFn;
-            if (j != null) return j.invoke(a, b);
+            if (j != null && !Core.coreRedefined) return j.invoke(a, b);
             return invokeSlow2(a, b);
         }
 
         @Override
         public boolean isUnboxedLong1() {
             Fn j = jitFn;
-            return j != null && j.isUnboxedLong1();
+            return j != null && !Core.coreRedefined && j.isUnboxedLong1();
         }
 
         @Override
         public boolean isUnboxedLong2() {
             Fn j = jitFn;
-            return j != null && j.isUnboxedLong2();
+            return j != null && !Core.coreRedefined && j.isUnboxedLong2();
         }
 
         @Override
         public long invokePrim_J_J(long a) {
             Fn j = jitFn;
-            if (j != null) return j.invokePrim_J_J(a);
+            if (j != null && !Core.coreRedefined) return j.invokePrim_J_J(a);
             return Numbers.longCast(invokeSlow1(Long.valueOf(a)));
         }
 
         @Override
         public double invokePrim_D_D(double a) {
             Fn j = jitFn;
-            if (j != null) return j.invokePrim_D_D(a);
+            if (j != null && !Core.coreRedefined) return j.invokePrim_D_D(a);
             return Numbers.toDouble(invokeSlow1(Double.valueOf(a)));
         }
 
         @Override
         public boolean invokePrim_J_Z(long a) {
             Fn j = jitFn;
-            if (j != null) return j.invokePrim_J_Z(a);
+            if (j != null && !Core.coreRedefined) return j.invokePrim_J_Z(a);
             return RT.truthy(invokeSlow1(Long.valueOf(a)));
         }
 
         @Override
         public long invokePrim_JJ_J(long a, long b) {
             Fn j = jitFn;
-            if (j != null) return j.invokePrim_JJ_J(a, b);
+            if (j != null && !Core.coreRedefined) return j.invokePrim_JJ_J(a, b);
             return Numbers.longCast(invokeSlow2(Long.valueOf(a), Long.valueOf(b)));
         }
 
         @Override
         public double invokePrim_DD_D(double a, double b) {
             Fn j = jitFn;
-            if (j != null) return j.invokePrim_DD_D(a, b);
+            if (j != null && !Core.coreRedefined) return j.invokePrim_DD_D(a, b);
             return Numbers.toDouble(invokeSlow2(Double.valueOf(a), Double.valueOf(b)));
         }
 
         @Override
         public long invokePrim_OJ_J(Object a, long b) {
             Fn j = jitFn;
-            if (j != null) return j.invokePrim_OJ_J(a, b);
+            if (j != null && !Core.coreRedefined) return j.invokePrim_OJ_J(a, b);
             return Numbers.longCast(invokeSlow2(a, Long.valueOf(b)));
         }
 
         @Override
         public Object invokePrim_OJ_O(Object a, long b) {
             Fn j = jitFn;
-            if (j != null) return j.invokePrim_OJ_O(a, b);
+            if (j != null && !Core.coreRedefined) return j.invokePrim_OJ_O(a, b);
             return invokeSlow2(a, Long.valueOf(b));
         }
 
-        private Object invokeSlow2(Object a, Object b) {
-            maybeCompileJit();
-            Fn j = jitFn;
-            if (j != null) return j.invoke(a, b);
+        public Object invokeInterpreted2(Object a, Object b) {
             FnMethod m = fixedMethods[2];
             if (m != null) {
                 Object[] frame = m.initFrame(this, captured, 2);
@@ -2528,20 +2537,26 @@ public final class Compiler {
                 frame[m.paramSlots[1]] = b;
                 return m.runBody(frame);
             }
-            return invokeVarargs(new Object[]{a, b});
+            return invokeInterpretedVarargs(new Object[]{a, b});
+        }
+
+        private Object invokeSlow2(Object a, Object b) {
+            if (!Core.coreRedefined) {
+                maybeCompileJit();
+                Fn j = jitFn;
+                if (j != null) return j.invoke(a, b);
+            }
+            return invokeInterpreted2(a, b);
         }
 
         @Override
         public Object invoke(Object a, Object b, Object c) {
             Fn j = jitFn;
-            if (j != null) return j.invoke(a, b, c);
+            if (j != null && !Core.coreRedefined) return j.invoke(a, b, c);
             return invokeSlow3(a, b, c);
         }
 
-        private Object invokeSlow3(Object a, Object b, Object c) {
-            maybeCompileJit();
-            Fn j = jitFn;
-            if (j != null) return j.invoke(a, b, c);
+        public Object invokeInterpreted3(Object a, Object b, Object c) {
             FnMethod m = fixedMethods[3];
             if (m != null) {
                 Object[] frame = m.initFrame(this, captured, 3);
@@ -2550,20 +2565,26 @@ public final class Compiler {
                 frame[m.paramSlots[2]] = c;
                 return m.runBody(frame);
             }
-            return invokeVarargs(new Object[]{a, b, c});
+            return invokeInterpretedVarargs(new Object[]{a, b, c});
+        }
+
+        private Object invokeSlow3(Object a, Object b, Object c) {
+            if (!Core.coreRedefined) {
+                maybeCompileJit();
+                Fn j = jitFn;
+                if (j != null) return j.invoke(a, b, c);
+            }
+            return invokeInterpreted3(a, b, c);
         }
 
         @Override
         public Object invoke(Object a, Object b, Object c, Object d) {
             Fn j = jitFn;
-            if (j != null) return j.invoke(a, b, c, d);
+            if (j != null && !Core.coreRedefined) return j.invoke(a, b, c, d);
             return invokeSlow4(a, b, c, d);
         }
 
-        private Object invokeSlow4(Object a, Object b, Object c, Object d) {
-            maybeCompileJit();
-            Fn j = jitFn;
-            if (j != null) return j.invoke(a, b, c, d);
+        public Object invokeInterpreted4(Object a, Object b, Object c, Object d) {
             FnMethod m = fixedMethods[4];
             if (m != null) {
                 Object[] frame = m.initFrame(this, captured, 4);
@@ -2573,20 +2594,26 @@ public final class Compiler {
                 frame[m.paramSlots[3]] = d;
                 return m.runBody(frame);
             }
-            return invokeVarargs(new Object[]{a, b, c, d});
+            return invokeInterpretedVarargs(new Object[]{a, b, c, d});
+        }
+
+        private Object invokeSlow4(Object a, Object b, Object c, Object d) {
+            if (!Core.coreRedefined) {
+                maybeCompileJit();
+                Fn j = jitFn;
+                if (j != null) return j.invoke(a, b, c, d);
+            }
+            return invokeInterpreted4(a, b, c, d);
         }
 
         @Override
         public Object invokeVarargs(Object[] args) {
             Fn j = jitFn;
-            if (j != null) return j.invokeVarargs(args);
+            if (j != null && !Core.coreRedefined) return j.invokeVarargs(args);
             return invokeSlowVarargs(args);
         }
 
-        private Object invokeSlowVarargs(Object[] args) {
-            maybeCompileJit();
-            Fn j = jitFn;
-            if (j != null) return j.invokeVarargs(args);
+        public Object invokeInterpretedVarargs(Object[] args) {
             int n = args.length;
             if (n < fixedMethods.length) {
                 FnMethod m = fixedMethods[n];
@@ -2609,6 +2636,15 @@ public final class Compiler {
                 return variadicMethod.runBody(frame);
             }
             throw arityError(n);
+        }
+
+        private Object invokeSlowVarargs(Object[] args) {
+            if (!Core.coreRedefined) {
+                maybeCompileJit();
+                Fn j = jitFn;
+                if (j != null) return j.invokeVarargs(args);
+            }
+            return invokeInterpretedVarargs(args);
         }
 
         @Override public String getName() { return name; }
@@ -2739,6 +2775,7 @@ public final class Compiler {
         public Add2Node(Node a, Node b) { this.a = a; this.b = b; }
         @Override
         public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("+", a.eval(frame), b.eval(frame));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) {
@@ -2748,6 +2785,7 @@ public final class Compiler {
         }
         @Override
         public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("+", a.eval(frame), b.eval(frame)));
             return Math.addExact(a.evalLong(frame), b.evalLong(frame));
         }
     }
@@ -2757,6 +2795,7 @@ public final class Compiler {
         public Sub2Node(Node a, Node b) { this.a = a; this.b = b; }
         @Override
         public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("-", a.eval(frame), b.eval(frame));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) {
@@ -2766,6 +2805,7 @@ public final class Compiler {
         }
         @Override
         public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("-", a.eval(frame), b.eval(frame)));
             return Math.subtractExact(a.evalLong(frame), b.evalLong(frame));
         }
     }
@@ -2775,6 +2815,7 @@ public final class Compiler {
         public Mul2Node(Node a, Node b) { this.a = a; this.b = b; }
         @Override
         public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("*", a.eval(frame), b.eval(frame));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) {
@@ -2784,6 +2825,7 @@ public final class Compiler {
         }
         @Override
         public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("*", a.eval(frame), b.eval(frame)));
             return Math.multiplyExact(a.evalLong(frame), b.evalLong(frame));
         }
     }
@@ -2793,12 +2835,14 @@ public final class Compiler {
         public NegateNode(Node a) { this.a = a; }
         @Override
         public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("-", a.eval(frame));
             Object va = a.eval(frame);
             if (va instanceof Long la) return Math.negateExact(la);
             return Numbers.minus(va);
         }
         @Override
         public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("-", a.eval(frame)));
             return Math.negateExact(a.evalLong(frame));
         }
     }
@@ -2808,12 +2852,14 @@ public final class Compiler {
         public IncNode(Node a) { this.a = a; }
         @Override
         public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("inc", a.eval(frame));
             Object va = a.eval(frame);
             if (va instanceof Long la) return Math.incrementExact(la);
             return Numbers.inc(va);
         }
         @Override
         public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("inc", a.eval(frame)));
             return Math.incrementExact(a.evalLong(frame));
         }
     }
@@ -2823,12 +2869,14 @@ public final class Compiler {
         public DecNode(Node a) { this.a = a; }
         @Override
         public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("dec", a.eval(frame));
             Object va = a.eval(frame);
             if (va instanceof Long la) return Math.decrementExact(la);
             return Numbers.dec(va);
         }
         @Override
         public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("dec", a.eval(frame)));
             return Math.decrementExact(a.evalLong(frame));
         }
     }
@@ -2838,6 +2886,7 @@ public final class Compiler {
         public Rem2Node(Node a, Node b) { this.a = a; this.b = b; }
         @Override
         public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("rem", a.eval(frame), b.eval(frame));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) return la % lb;
@@ -2845,6 +2894,7 @@ public final class Compiler {
         }
         @Override
         public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("rem", a.eval(frame), b.eval(frame)));
             return a.evalLong(frame) % b.evalLong(frame);
         }
     }
@@ -2854,6 +2904,7 @@ public final class Compiler {
         public Mod2Node(Node a, Node b) { this.a = a; this.b = b; }
         @Override
         public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("mod", a.eval(frame), b.eval(frame));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) return Math.floorMod(la.longValue(), lb.longValue());
@@ -2861,6 +2912,7 @@ public final class Compiler {
         }
         @Override
         public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("mod", a.eval(frame), b.eval(frame)));
             return Math.floorMod(a.evalLong(frame), b.evalLong(frame));
         }
     }
@@ -2870,6 +2922,7 @@ public final class Compiler {
         public Quot2Node(Node a, Node b) { this.a = a; this.b = b; }
         @Override
         public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("quot", a.eval(frame), b.eval(frame));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) return la / lb;
@@ -2877,6 +2930,7 @@ public final class Compiler {
         }
         @Override
         public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("quot", a.eval(frame), b.eval(frame)));
             return a.evalLong(frame) / b.evalLong(frame);
         }
     }
@@ -2884,9 +2938,13 @@ public final class Compiler {
     public static final class Lt2Node extends Node {
         public final Node a, b;
         public Lt2Node(Node a, Node b) { this.a = a; this.b = b; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("<", a.eval(frame), b.eval(frame));
+            return evalBoolean(frame);
+        }
         @Override
         public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("<", a.eval(frame), b.eval(frame)));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) return la < lb;
@@ -2897,9 +2955,13 @@ public final class Compiler {
     public static final class Lte2Node extends Node {
         public final Node a, b;
         public Lte2Node(Node a, Node b) { this.a = a; this.b = b; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("<=", a.eval(frame), b.eval(frame));
+            return evalBoolean(frame);
+        }
         @Override
         public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("<=", a.eval(frame), b.eval(frame)));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) return la <= lb;
@@ -2910,9 +2972,13 @@ public final class Compiler {
     public static final class Gt2Node extends Node {
         public final Node a, b;
         public Gt2Node(Node a, Node b) { this.a = a; this.b = b; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar(">", a.eval(frame), b.eval(frame));
+            return evalBoolean(frame);
+        }
         @Override
         public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar(">", a.eval(frame), b.eval(frame)));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) return la > lb;
@@ -2923,9 +2989,13 @@ public final class Compiler {
     public static final class Gte2Node extends Node {
         public final Node a, b;
         public Gte2Node(Node a, Node b) { this.a = a; this.b = b; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar(">=", a.eval(frame), b.eval(frame));
+            return evalBoolean(frame);
+        }
         @Override
         public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar(">=", a.eval(frame), b.eval(frame)));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) return la >= lb;
@@ -2936,23 +3006,39 @@ public final class Compiler {
     public static final class Equiv2Node extends Node {
         public final Node a, b;
         public Equiv2Node(Node a, Node b) { this.a = a; this.b = b; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
-        @Override public boolean evalBoolean(Object[] frame) { return RT.equiv(a.eval(frame), b.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("=", a.eval(frame), b.eval(frame));
+            return evalBoolean(frame);
+        }
+        @Override public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("=", a.eval(frame), b.eval(frame)));
+            return RT.equiv(a.eval(frame), b.eval(frame));
+        }
     }
 
     public static final class NumEq2Node extends Node {
         public final Node a, b;
         public NumEq2Node(Node a, Node b) { this.a = a; this.b = b; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
-        @Override public boolean evalBoolean(Object[] frame) { return Numbers.equal(a.eval(frame), b.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("==", a.eval(frame), b.eval(frame));
+            return evalBoolean(frame);
+        }
+        @Override public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("==", a.eval(frame), b.eval(frame)));
+            return Numbers.equal(a.eval(frame), b.eval(frame));
+        }
     }
 
     public static final class ZeroPNode extends Node {
         public final Node a;
         public ZeroPNode(Node a) { this.a = a; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("zero?", a.eval(frame));
+            return evalBoolean(frame);
+        }
         @Override
         public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("zero?", a.eval(frame)));
             Object va = a.eval(frame);
             if (va instanceof Long la) return la == 0L;
             return Numbers.isZero(va);
@@ -2962,9 +3048,13 @@ public final class Compiler {
     public static final class PosPNode extends Node {
         public final Node a;
         public PosPNode(Node a) { this.a = a; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("pos?", a.eval(frame));
+            return evalBoolean(frame);
+        }
         @Override
         public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("pos?", a.eval(frame)));
             Object va = a.eval(frame);
             if (va instanceof Long la) return la > 0L;
             return Numbers.isPos(va);
@@ -2974,9 +3064,13 @@ public final class Compiler {
     public static final class NegPNode extends Node {
         public final Node a;
         public NegPNode(Node a) { this.a = a; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("neg?", a.eval(frame));
+            return evalBoolean(frame);
+        }
         @Override
         public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("neg?", a.eval(frame)));
             Object va = a.eval(frame);
             if (va instanceof Long la) return la < 0L;
             return Numbers.isNeg(va);
@@ -2986,22 +3080,40 @@ public final class Compiler {
     public static final class NilPNode extends Node {
         public final Node a;
         public NilPNode(Node a) { this.a = a; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
-        @Override public boolean evalBoolean(Object[] frame) { return a.eval(frame) == null; }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("nil?", a.eval(frame));
+            return evalBoolean(frame);
+        }
+        @Override public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("nil?", a.eval(frame)));
+            return a.eval(frame) == null;
+        }
     }
 
     public static final class NotNode extends Node {
         public final Node a;
         public NotNode(Node a) { this.a = a; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
-        @Override public boolean evalBoolean(Object[] frame) { return !a.evalBoolean(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("not", a.eval(frame));
+            return evalBoolean(frame);
+        }
+        @Override public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("not", a.eval(frame)));
+            return !a.evalBoolean(frame);
+        }
     }
 
     public static final class IdenticalNode extends Node {
         public final Node a, b;
         public IdenticalNode(Node a, Node b) { this.a = a; this.b = b; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
-        @Override public boolean evalBoolean(Object[] frame) { return a.eval(frame) == b.eval(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("identical?", a.eval(frame), b.eval(frame));
+            return evalBoolean(frame);
+        }
+        @Override public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("identical?", a.eval(frame), b.eval(frame)));
+            return a.eval(frame) == b.eval(frame);
+        }
     }
 
     // ========================================================================
@@ -3277,6 +3389,7 @@ public final class Compiler {
         public final Node a, b;
         public Div2Node(Node a, Node b) { this.a = a; this.b = b; }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("/", a.eval(frame), b.eval(frame));
             if (isStaticDoubleNode(a)) return Numbers.divide(Numbers.toDouble(a.eval(frame)), b.eval(frame));
             if (isStaticDoubleNode(b)) return Numbers.divide(a.eval(frame), Numbers.toDouble(b.eval(frame)));
             return Numbers.divide(a.eval(frame), b.eval(frame));
@@ -3287,69 +3400,93 @@ public final class Compiler {
         public final Node a, b;
         public UncheckedAdd2Node(Node a, Node b) { this.a = a; this.b = b; }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("unchecked-add", a.eval(frame), b.eval(frame));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) return la + lb;
             return Numbers.uncheckedAdd(va, vb);
         }
-        @Override public long evalLong(Object[] frame) { return a.evalLong(frame) + b.evalLong(frame); }
+        @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("unchecked-add", a.eval(frame), b.eval(frame)));
+            return a.evalLong(frame) + b.evalLong(frame);
+        }
     }
 
     public static final class UncheckedSub2Node extends Node {
         public final Node a, b;
         public UncheckedSub2Node(Node a, Node b) { this.a = a; this.b = b; }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("unchecked-subtract", a.eval(frame), b.eval(frame));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) return la - lb;
             return Numbers.uncheckedSubtract(va, vb);
         }
-        @Override public long evalLong(Object[] frame) { return a.evalLong(frame) - b.evalLong(frame); }
+        @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("unchecked-subtract", a.eval(frame), b.eval(frame)));
+            return a.evalLong(frame) - b.evalLong(frame);
+        }
     }
 
     public static final class UncheckedMul2Node extends Node {
         public final Node a, b;
         public UncheckedMul2Node(Node a, Node b) { this.a = a; this.b = b; }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("unchecked-multiply", a.eval(frame), b.eval(frame));
             Object va = a.eval(frame);
             Object vb = b.eval(frame);
             if (va instanceof Long la && vb instanceof Long lb) return la * lb;
             return Numbers.uncheckedMultiply(va, vb);
         }
-        @Override public long evalLong(Object[] frame) { return a.evalLong(frame) * b.evalLong(frame); }
+        @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("unchecked-multiply", a.eval(frame), b.eval(frame)));
+            return a.evalLong(frame) * b.evalLong(frame);
+        }
     }
 
     public static final class UncheckedIncNode extends Node {
         public final Node a;
         public UncheckedIncNode(Node a) { this.a = a; }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("unchecked-inc", a.eval(frame));
             Object va = a.eval(frame);
             if (va instanceof Long la) return la + 1L;
             return Numbers.uncheckedInc(va);
         }
-        @Override public long evalLong(Object[] frame) { return a.evalLong(frame) + 1L; }
+        @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("unchecked-inc", a.eval(frame)));
+            return a.evalLong(frame) + 1L;
+        }
     }
 
     public static final class UncheckedDecNode extends Node {
         public final Node a;
         public UncheckedDecNode(Node a) { this.a = a; }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("unchecked-dec", a.eval(frame));
             Object va = a.eval(frame);
             if (va instanceof Long la) return la - 1L;
             return Numbers.uncheckedDec(va);
         }
-        @Override public long evalLong(Object[] frame) { return a.evalLong(frame) - 1L; }
+        @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("unchecked-dec", a.eval(frame)));
+            return a.evalLong(frame) - 1L;
+        }
     }
 
     public static final class UncheckedNegateNode extends Node {
         public final Node a;
         public UncheckedNegateNode(Node a) { this.a = a; }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("unchecked-negate", a.eval(frame));
             Object va = a.eval(frame);
             if (va instanceof Long la) return -la;
             return Numbers.uncheckedNegate(va);
         }
-        @Override public long evalLong(Object[] frame) { return -a.evalLong(frame); }
+        @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("unchecked-negate", a.eval(frame)));
+            return -a.evalLong(frame);
+        }
     }
 
     public enum BitOp { AND, OR, XOR, AND_NOT, SHL, SHR, USHR }
@@ -3362,8 +3499,23 @@ public final class Compiler {
             this.a = a;
             this.b = b;
         }
-        @Override public Object eval(Object[] frame) { return evalLong(frame); }
+        private String coreName() {
+            return switch (op) {
+                case AND -> "bit-and";
+                case OR -> "bit-or";
+                case XOR -> "bit-xor";
+                case AND_NOT -> "bit-and-not";
+                case SHL -> "bit-shift-left";
+                case SHR -> "bit-shift-right";
+                case USHR -> "unsigned-bit-shift-right";
+            };
+        }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar(coreName(), a.eval(frame), b.eval(frame));
+            return evalLong(frame);
+        }
         @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar(coreName(), a.eval(frame), b.eval(frame)));
             long la = a.evalLong(frame);
             long lb = b.evalLong(frame);
             return switch (op) {
@@ -3381,8 +3533,14 @@ public final class Compiler {
     public static final class BitNotNode extends Node {
         public final Node a;
         public BitNotNode(Node a) { this.a = a; }
-        @Override public Object eval(Object[] frame) { return evalLong(frame); }
-        @Override public long evalLong(Object[] frame) { return ~a.evalLong(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("bit-not", a.eval(frame));
+            return evalLong(frame);
+        }
+        @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("bit-not", a.eval(frame)));
+            return ~a.evalLong(frame);
+        }
     }
 
     public static final class LongCastNode extends Node {
@@ -3390,8 +3548,12 @@ public final class Compiler {
         public final boolean unchecked;
         public LongCastNode(Node a) { this(a, false); }
         public LongCastNode(Node a, boolean unchecked) { this.a = a; this.unchecked = unchecked; }
-        @Override public Object eval(Object[] frame) { return evalLong(frame); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar(unchecked ? "unchecked-long" : "long", a.eval(frame));
+            return evalLong(frame);
+        }
         @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar(unchecked ? "unchecked-long" : "long", a.eval(frame)));
             Object v = a.eval(frame);
             return unchecked ? Numbers.uncheckedLong(v) : Numbers.longCast(v);
         }
@@ -3400,14 +3562,21 @@ public final class Compiler {
     public static final class AlengthNode extends Node {
         public final Node arr;
         public AlengthNode(Node arr) { this.arr = arr; }
-        @Override public Object eval(Object[] frame) { return evalLong(frame); }
-        @Override public long evalLong(Object[] frame) { return RT.alength(arr.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("alength", arr.eval(frame));
+            return evalLong(frame);
+        }
+        @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("alength", arr.eval(frame)));
+            return RT.alength(arr.eval(frame));
+        }
     }
 
     public static final class AgetNode extends Node {
         public final Node arr, idx;
         public AgetNode(Node arr, Node idx) { this.arr = arr; this.idx = idx; }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("aget", arr.eval(frame), idx.eval(frame));
             return RT.aget(arr.eval(frame), (int) idx.evalLong(frame));
         }
     }
@@ -3416,6 +3585,7 @@ public final class Compiler {
         public final Node arr, idx, val;
         public AsetNode(Node arr, Node idx, Node val) { this.arr = arr; this.idx = idx; this.val = val; }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("aset", arr.eval(frame), idx.eval(frame), val.eval(frame));
             return RT.aset(arr.eval(frame), (int) idx.evalLong(frame), val.eval(frame));
         }
     }
@@ -3423,14 +3593,23 @@ public final class Compiler {
     public static final class DoubleCastNode extends Node {
         public final Node a;
         public DoubleCastNode(Node a) { this.a = a; }
-        @Override public Object eval(Object[] frame) { return Numbers.toDouble(a.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("double", a.eval(frame));
+            return Numbers.toDouble(a.eval(frame));
+        }
     }
 
     public static final class CountNode extends Node {
         public final Node coll;
         public CountNode(Node coll) { this.coll = coll; }
-        @Override public Object eval(Object[] frame) { return evalLong(frame); }
-        @Override public long evalLong(Object[] frame) { return RT.count(coll.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("count", coll.eval(frame));
+            return evalLong(frame);
+        }
+        @Override public long evalLong(Object[] frame) {
+            if (Core.coreRedefined) return Numbers.longCast(Core.callCoreVar("count", coll.eval(frame)));
+            return RT.count(coll.eval(frame));
+        }
     }
 
     public static final class NthNode extends Node {
@@ -3441,6 +3620,11 @@ public final class Compiler {
             this.notFound = notFound;
         }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) {
+                Object c = coll.eval(frame);
+                Object i = idx.eval(frame);
+                return notFound == null ? Core.callCoreVar("nth", c, i) : Core.callCoreVar("nth", c, i, notFound.eval(frame));
+            }
             Object c = coll.eval(frame);
             int i = (int) idx.evalLong(frame);
             return notFound == null ? RT.nth(c, i) : RT.nth(c, i, notFound.eval(frame));
@@ -3455,6 +3639,11 @@ public final class Compiler {
             this.notFound = notFound;
         }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) {
+                Object c = coll.eval(frame);
+                Object k = key.eval(frame);
+                return notFound == null ? Core.callCoreVar("get", c, k) : Core.callCoreVar("get", c, k, notFound.eval(frame));
+            }
             Object c = coll.eval(frame);
             Object k = key.eval(frame);
             return notFound == null ? RT.get(c, k) : RT.get(c, k, notFound.eval(frame));
@@ -3464,19 +3653,28 @@ public final class Compiler {
     public static final class TransientNode extends Node {
         public final Node coll;
         public TransientNode(Node coll) { this.coll = coll; }
-        @Override public Object eval(Object[] frame) { return RT.transientColl(coll.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("transient", coll.eval(frame));
+            return RT.transientColl(coll.eval(frame));
+        }
     }
 
     public static final class PersistentBangNode extends Node {
         public final Node target;
         public PersistentBangNode(Node target) { this.target = target; }
-        @Override public Object eval(Object[] frame) { return RT.persistentBang(target.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("persistent!", target.eval(frame));
+            return RT.persistentBang(target.eval(frame));
+        }
     }
 
     public static final class ConjBangNode extends Node {
         public final Node target, val;
         public ConjBangNode(Node target, Node val) { this.target = target; this.val = val; }
-        @Override public Object eval(Object[] frame) { return RT.conjBang(target.eval(frame), val.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("conj!", target.eval(frame), val.eval(frame));
+            return RT.conjBang(target.eval(frame), val.eval(frame));
+        }
     }
 
     public static final class AssocBangNode extends Node {
@@ -3487,6 +3685,7 @@ public final class Compiler {
             this.val = val;
         }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("assoc!", target.eval(frame), key.eval(frame), val.eval(frame));
             return RT.assocBang(target.eval(frame), key.eval(frame), val.eval(frame));
         }
     }
@@ -3494,7 +3693,10 @@ public final class Compiler {
     public static final class ConjNode extends Node {
         public final Node coll, val;
         public ConjNode(Node coll, Node val) { this.coll = coll; this.val = val; }
-        @Override public Object eval(Object[] frame) { return RT.conj(coll.eval(frame), val.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("conj", coll.eval(frame), val.eval(frame));
+            return RT.conj(coll.eval(frame), val.eval(frame));
+        }
     }
 
     public static final class AssocNode extends Node {
@@ -3505,6 +3707,7 @@ public final class Compiler {
             this.val = val;
         }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("assoc", coll.eval(frame), key.eval(frame), val.eval(frame));
             return RT.assoc(coll.eval(frame), key.eval(frame), val.eval(frame));
         }
     }
@@ -3516,6 +3719,7 @@ public final class Compiler {
             this.key = key;
         }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("dissoc", coll.eval(frame), key.eval(frame));
             return RT.dissoc(coll.eval(frame), key.eval(frame));
         }
     }
@@ -3523,43 +3727,64 @@ public final class Compiler {
     public static final class FirstNode extends Node {
         public final Node coll;
         public FirstNode(Node coll) { this.coll = coll; }
-        @Override public Object eval(Object[] frame) { return RT.first(coll.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("first", coll.eval(frame));
+            return RT.first(coll.eval(frame));
+        }
     }
 
     public static final class NextNode extends Node {
         public final Node coll;
         public NextNode(Node coll) { this.coll = coll; }
-        @Override public Object eval(Object[] frame) { return RT.next(coll.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("next", coll.eval(frame));
+            return RT.next(coll.eval(frame));
+        }
     }
 
     public static final class RestNode extends Node {
         public final Node coll;
         public RestNode(Node coll) { this.coll = coll; }
-        @Override public Object eval(Object[] frame) { return RT.more(coll.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("rest", coll.eval(frame));
+            return RT.more(coll.eval(frame));
+        }
     }
 
     public static final class SeqNode extends Node {
         public final Node coll;
         public SeqNode(Node coll) { this.coll = coll; }
-        @Override public Object eval(Object[] frame) { return RT.seq(coll.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("seq", coll.eval(frame));
+            return RT.seq(coll.eval(frame));
+        }
     }
 
     public static final class PopNode extends Node {
         public final Node coll;
         public PopNode(Node coll) { this.coll = coll; }
-        @Override public Object eval(Object[] frame) { return RT.pop(coll.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("pop", coll.eval(frame));
+            return RT.pop(coll.eval(frame));
+        }
     }
 
     public static final class VolatileNode extends Node {
         public final Node init;
         public VolatileNode(Node init) { this.init = init; }
-        @Override public Object eval(Object[] frame) { return new Atom.Volatile(init.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("volatile!", init.eval(frame));
+            return new Atom.Volatile(init.eval(frame));
+        }
     }
 
     public static final class DerefNode extends Node {
         public final Node target;
         public DerefNode(Node target) { this.target = target; }
-        @Override public Object eval(Object[] frame) { return RT.deref(target.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("deref", target.eval(frame));
+            return RT.deref(target.eval(frame));
+        }
     }
 
     public static final class VresetNode extends Node {
@@ -3569,6 +3794,7 @@ public final class Compiler {
             this.val = val;
         }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("vreset!", target.eval(frame), val.eval(frame));
             return ((Atom.Volatile) target.eval(frame)).reset(val.eval(frame));
         }
     }
@@ -3576,7 +3802,10 @@ public final class Compiler {
     public static final class AtomNode extends Node {
         public final Node init;
         public AtomNode(Node init) { this.init = init; }
-        @Override public Object eval(Object[] frame) { return new Atom(init.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("atom", init.eval(frame));
+            return new Atom(init.eval(frame));
+        }
     }
 
     public static final class ResetBangNode extends Node {
@@ -3586,6 +3815,7 @@ public final class Compiler {
             this.val = val;
         }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("reset!", target.eval(frame), val.eval(frame));
             return ((Atom) target.eval(frame)).reset(val.eval(frame));
         }
     }
@@ -3599,6 +3829,13 @@ public final class Compiler {
             this.extraArgs = extraArgs;
         }
         @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) {
+                Object[] all = new Object[2 + extraArgs.length];
+                all[0] = target.eval(frame);
+                all[1] = fn.eval(frame);
+                for (int i = 0; i < extraArgs.length; i++) all[2 + i] = extraArgs[i].eval(frame);
+                return Core.callCoreVarApply("swap!", all);
+            }
             Atom a = (Atom) target.eval(frame);
             Fn f = (Fn) fn.eval(frame);
             return switch (extraArgs.length) {
@@ -3617,15 +3854,27 @@ public final class Compiler {
     public static final class EvenPNode extends Node {
         public final Node a;
         public EvenPNode(Node a) { this.a = a; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
-        @Override public boolean evalBoolean(Object[] frame) { return Numbers.isEven(a.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("even?", a.eval(frame));
+            return evalBoolean(frame);
+        }
+        @Override public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("even?", a.eval(frame)));
+            return Numbers.isEven(a.eval(frame));
+        }
     }
 
     public static final class OddPNode extends Node {
         public final Node a;
         public OddPNode(Node a) { this.a = a; }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
-        @Override public boolean evalBoolean(Object[] frame) { return Numbers.isOdd(a.eval(frame)); }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar("odd?", a.eval(frame));
+            return evalBoolean(frame);
+        }
+        @Override public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar("odd?", a.eval(frame)));
+            return Numbers.isOdd(a.eval(frame));
+        }
     }
 
     public enum TypePred { STRING, VECTOR, MAP, SET, SEQ, NUMBER, INT, KEYWORD, SYMBOL }
@@ -3637,8 +3886,25 @@ public final class Compiler {
             this.pred = pred;
             this.a = a;
         }
-        @Override public Object eval(Object[] frame) { return evalBoolean(frame); }
+        private String coreName() {
+            return switch (pred) {
+                case STRING -> "string?";
+                case VECTOR -> "vector?";
+                case MAP -> "map?";
+                case SET -> "set?";
+                case SEQ -> "seq?";
+                case NUMBER -> "number?";
+                case INT -> "int?";
+                case KEYWORD -> "keyword?";
+                case SYMBOL -> "symbol?";
+            };
+        }
+        @Override public Object eval(Object[] frame) {
+            if (Core.coreRedefined) return Core.callCoreVar(coreName(), a.eval(frame));
+            return evalBoolean(frame);
+        }
         @Override public boolean evalBoolean(Object[] frame) {
+            if (Core.coreRedefined) return RT.truthy(Core.callCoreVar(coreName(), a.eval(frame)));
             Object x = a.eval(frame);
             return switch (pred) {
                 case STRING -> x instanceof String;

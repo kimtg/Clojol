@@ -45,8 +45,15 @@ public final class GenClass {
 
     public static void writeClassFileIfCompiling(String binaryName, byte[] bytes) {
         if (!RT.truthy(RT.COMPILE_FILES.deref())) return;
+        if (binaryName == null || binaryName.isEmpty() || binaryName.contains("..") || binaryName.indexOf('\0') >= 0) {
+            throw new SecurityException("Invalid class name for compilation: " + binaryName);
+        }
         String compilePath = String.valueOf(RT.COMPILE_PATH.deref());
-        Path outFile = Path.of(compilePath, binaryName.replace('.', '/') + ".class");
+        Path baseDir = Path.of(compilePath).toAbsolutePath().normalize();
+        Path outFile = baseDir.resolve(binaryName.replace('.', '/') + ".class").normalize();
+        if (!outFile.startsWith(baseDir)) {
+            throw new SecurityException("Path traversal detected in compile output: " + binaryName);
+        }
         try {
             if (outFile.getParent() != null) {
                 Files.createDirectories(outFile.getParent());

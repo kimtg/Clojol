@@ -22,7 +22,6 @@ public final class Main {
     private Main() {}
 
     public static void main(String[] args) {
-        Atom.initMainThread();
         CliOptions opts;
         try {
             opts = Deps.parseCli(args);
@@ -71,7 +70,7 @@ public final class Main {
                 mainOptsStr.append(shellQuote(combinedMainArgs.get(i)));
             }
             String cmd = opts.scommand
-                    .replace("{{classpath}}", cp)
+                    .replace("{{classpath}}", shellQuote(cp))
                     .replace("{{main-opts}}", mainOptsStr.toString());
             int code = execShellCommand(cmd);
             System.exit(code);
@@ -566,10 +565,24 @@ public final class Main {
     }
 
     private static String shellQuote(String s) {
+        if (s == null || s.isEmpty()) {
+            boolean win = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+            return win ? "\"\"" : "''";
+        }
         if (s.matches("[a-zA-Z0-9_./:-]+")) return s;
         boolean win = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
         if (win) {
-            return "\"" + s.replace("\"", "\\\"") + "\"";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+                switch (c) {
+                    case '^', '&', '|', '<', '>', '(', ')', '"', '!' -> sb.append('^').append(c);
+                    case '%' -> sb.append("%%");
+                    case '\r', '\n' -> sb.append(' ');
+                    default -> sb.append(c);
+                }
+            }
+            return sb.toString();
         }
         return "'" + s.replace("'", "'\\''") + "'";
     }

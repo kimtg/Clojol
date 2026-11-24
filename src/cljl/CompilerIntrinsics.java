@@ -11,6 +11,27 @@ final class CompilerIntrinsics {
 
     private CompilerIntrinsics() {}
 
+    static boolean isIntrinsicName(String name) {
+        return switch (name) {
+            case "+", "-", "*", "/", "inc", "dec", "rem", "mod", "quot",
+                 "unchecked-add", "unchecked-subtract", "unchecked-multiply",
+                 "unchecked-inc", "unchecked-inc-long", "unchecked-dec", "unchecked-negate",
+                 "bit-and", "bit-or", "bit-xor", "bit-and-not",
+                 "bit-shift-left", "bit-shift-right", "unsigned-bit-shift-right", "bit-not",
+                 "long", "unchecked-long", "double",
+                 "<", "<=", ">", ">=", "=", "==", "not=", "identical?",
+                 "zero?", "pos?", "neg?", "nil?", "some?", "not",
+                 "even?", "odd?", "string?", "vector?", "map?", "set?",
+                 "seq?", "number?", "int?", "keyword?", "symbol?",
+                 "alength", "aget", "aset", "count", "nth", "get",
+                 "transient", "persistent!", "conj!", "assoc!",
+                 "conj", "pop", "assoc", "dissoc",
+                 "first", "next", "rest", "seq",
+                 "volatile!", "deref", "vreset!", "atom", "reset!", "swap!" -> true;
+            default -> false;
+        };
+    }
+
     static Node tryCreate(String name, Node[] args) {
         int arity = args.length;
         return switch (name) {

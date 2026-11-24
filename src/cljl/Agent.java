@@ -11,27 +11,28 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class Agent extends Fn implements IRef, IReference {
 
+    private static final boolean NON_DAEMON_POOLS = Boolean.getBoolean("cljl.agent.non-daemon");
+
     public static volatile ExecutorService pooledExecutor =
             Executors.newFixedThreadPool(Math.max(2, Runtime.getRuntime().availableProcessors() + 2),
                     r -> {
                         Thread t = new Thread(r, "cljl-agent-pool");
-                        t.setDaemon(true);
+                        t.setDaemon(!NON_DAEMON_POOLS);
                         return t;
                     });
 
     public static volatile ExecutorService soloExecutor =
             Executors.newCachedThreadPool(r -> {
                 Thread t = new Thread(r, "cljl-agent-solo");
-                t.setDaemon(true);
+                t.setDaemon(!NON_DAEMON_POOLS);
                 return t;
             });
 
     public static final Var CURRENT_AGENT = RT.AGENT;
 
-    private static final ConcurrentHashMap<Agent, Boolean> ACTIVE_AGENTS = new ConcurrentHashMap<>();
     private static final ThreadLocal<List<Action>> NESTED_SENDS = new ThreadLocal<>();
 
-    private record Action(Agent agent, Fn fn, Object[] args, Executor exec, Map<Var, Object> bindings) {}
+    private record Action(Agent agent, Fn fn, Object[] args, Executor exec, Object bindingFrame, CountDownLatch barrier) {}
 
     private final Queue<Action> queue = new ArrayDeque<>();
     private boolean running = false;
@@ -64,10 +65,6 @@ public final class Agent extends Fn implements IRef, IReference {
 
     @Override
     public Object deref() {
-        Throwable e = this.error;
-        if (e != null) {
-            throw new RuntimeException("Agent is failed, needs restart", e);
-        }
         return state;
     }
 
@@ -119,7 +116,9 @@ public final class Agent extends Fn implements IRef, IReference {
 
     private void notifyWatches(Object oldVal, Object newVal) {
         for (Map.Entry<Object, Fn> e : watches.entrySet()) {
-            e.getValue().invoke(e.getKey(), this, oldVal, newVal);
+            try {
+                e.getValue().invoke(e.getKey(), this, oldVal, newVal);
+            } catch (Throwable ignored) {}
         }
     }
 
@@ -128,7 +127,7 @@ public final class Agent extends Fn implements IRef, IReference {
         if (curErr != null) {
             throw new RuntimeException("Agent is failed, needs restart", curErr);
         }
-        Action action = new Action(this, fn, args != null ? args : Fn.EMPTY_ARGS, exec, Var.cloneThreadBindings());
+        Action action = new Action(this, fn, args != null ? args : Fn.EMPTY_ARGS, exec, Var.cloneThreadBindingFrame(), null);
         if (LockingTransaction.isRunning()) {
             LockingTransaction.getEx().enqueue(action);
             return this;
@@ -152,21 +151,58 @@ public final class Agent extends Fn implements IRef, IReference {
             if (!running) {
                 running = true;
                 schedule = true;
-                ACTIVE_AGENTS.put(this, Boolean.TRUE);
             }
         }
         if (schedule) {
-            Atom.markMultiThreaded();
             try {
                 action.exec.execute(() -> processQueue(action.exec));
             } catch (Throwable t) {
                 synchronized (lock) {
                     queue.remove(action);
                     running = false;
-                    ACTIVE_AGENTS.remove(this);
                     lock.notifyAll();
                 }
                 throw t;
+            }
+        }
+    }
+
+    private void enqueueBarrier(CountDownLatch latch) {
+        boolean schedule = false;
+        Executor exec = pooledExecutor;
+        synchronized (lock) {
+            if (this.error != null || (!running && queue.isEmpty())) {
+                latch.countDown();
+                return;
+            }
+            Action barrier = new Action(this, null, Fn.EMPTY_ARGS, exec, null, latch);
+            queue.add(barrier);
+            if (!running) {
+                running = true;
+                schedule = true;
+            }
+        }
+        if (schedule) {
+            try {
+                exec.execute(() -> processQueue(exec));
+            } catch (Throwable t) {
+                synchronized (lock) {
+                    running = false;
+                    releaseBarriersLocked();
+                    lock.notifyAll();
+                }
+                throw t;
+            }
+        }
+    }
+
+    private void releaseBarriersLocked() {
+        Iterator<Action> it = queue.iterator();
+        while (it.hasNext()) {
+            Action a = it.next();
+            if (a.barrier != null) {
+                a.barrier.countDown();
+                it.remove();
             }
         }
     }
@@ -182,19 +218,20 @@ public final class Agent extends Fn implements IRef, IReference {
             Executor handoffExec = null;
             synchronized (lock) {
                 if (this.error != null) {
+                    releaseBarriersLocked();
                     running = false;
-                    ACTIVE_AGENTS.remove(this);
                     lock.notifyAll();
                     return;
                 }
                 Action peeked = queue.peek();
                 if (peeked == null) {
                     running = false;
-                    ACTIVE_AGENTS.remove(this);
                     lock.notifyAll();
                     return;
                 }
-                if (peeked.exec != currentExec) {
+                if (peeked.barrier != null) {
+                    act = queue.poll();
+                } else if (peeked.exec != currentExec) {
                     handoffExec = peeked.exec;
                     act = null;
                 } else {
@@ -209,53 +246,73 @@ public final class Agent extends Fn implements IRef, IReference {
                 } catch (Throwable t) {
                     synchronized (lock) {
                         running = false;
-                        ACTIVE_AGENTS.remove(this);
+                        releaseBarriersLocked();
                         lock.notifyAll();
                     }
                     throw t;
                 }
             }
-            executeAction(act);
+            if (act.barrier != null) {
+                act.barrier.countDown();
+            } else {
+                executeAction(act);
+            }
         }
     }
 
     private void executeAction(Action act) {
-        Map<Var, Object> frame = act.bindings != null ? new HashMap<>(act.bindings) : new HashMap<>();
-        frame.put(CURRENT_AGENT, this);
-        Var.pushThreadBindings(frame);
+        Object savedFrame = Var.getThreadBindingFrame();
+        Var.resetThreadBindingFrame(act.bindingFrame);
+        Var.pushThreadBindings(Collections.singletonMap(CURRENT_AGENT, this));
         List<Action> nested = new ArrayList<>();
         NESTED_SENDS.set(nested);
+        boolean succeeded = false;
+        Object oldVal = null;
+        Object newVal = null;
+        Throwable err = null;
         try {
-            Object oldVal = this.state;
+            oldVal = this.state;
             Object[] full = new Object[act.args.length + 1];
             full[0] = oldVal;
             System.arraycopy(act.args, 0, full, 1, act.args.length);
-            Object newVal = act.fn.applyTo(full);
+            newVal = act.fn.applyTo(full);
             Fn v = this.validator;
             if (v != null) {
                 validateState(v, newVal);
             }
             this.state = newVal;
-            notifyWatches(oldVal, newVal);
-            for (Action a : nested) {
-                a.agent.enqueueAction(a);
-            }
+            succeeded = true;
         } catch (Throwable t) {
+            err = t;
             if (!Keyword.intern("continue").equals(this.errorMode)) {
                 synchronized (lock) {
                     this.error = t;
+                    releaseBarriersLocked();
                     lock.notifyAll();
                 }
             }
-            Fn handler = this.errorHandler;
-            if (handler != null) {
-                try {
-                    handler.invoke(this, t);
-                } catch (Throwable ignored) {}
+        } finally {
+            // Clear NESTED_SENDS before watches, nested sends, or error handler execute
+            NESTED_SENDS.remove();
+        }
+        try {
+            if (succeeded) {
+                notifyWatches(oldVal, newVal);
+                for (Action a : nested) {
+                    try {
+                        a.agent.enqueueAction(a);
+                    } catch (Throwable ignored) {}
+                }
+            } else if (err != null) {
+                Fn handler = this.errorHandler;
+                if (handler != null) {
+                    try {
+                        handler.invoke(this, err);
+                    } catch (Throwable ignored) {}
+                }
             }
         } finally {
-            NESTED_SENDS.remove();
-            Var.popThreadBindings();
+            Var.resetThreadBindingFrame(savedFrame);
         }
     }
 
@@ -271,10 +328,10 @@ public final class Agent extends Fn implements IRef, IReference {
             this.state = newState;
             this.error = null;
             if (clearActions) {
+                releaseBarriersLocked();
                 queue.clear();
             } else if (!queue.isEmpty() && !running) {
                 running = true;
-                ACTIVE_AGENTS.put(this, Boolean.TRUE);
                 nextToRun = queue.peek();
             }
             lock.notifyAll();
@@ -286,7 +343,7 @@ public final class Agent extends Fn implements IRef, IReference {
             } catch (Throwable t) {
                 synchronized (lock) {
                     running = false;
-                    ACTIVE_AGENTS.remove(this);
+                    releaseBarriersLocked();
                     lock.notifyAll();
                 }
                 throw t;
@@ -296,46 +353,69 @@ public final class Agent extends Fn implements IRef, IReference {
     }
 
     public boolean await(long timeoutMs) throws InterruptedException {
+        if (LockingTransaction.isRunning()) {
+            throw new IllegalStateException("I/O in transaction");
+        }
         if (NESTED_SENDS.get() != null) {
             throw new IllegalStateException("Can't await in agent action");
         }
-        long deadlineNanos = timeoutMs > 0 ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs) : 0L;
-        synchronized (lock) {
-            while (running || (!queue.isEmpty() && this.error == null)) {
-                if (timeoutMs == 0) return false;
-                if (timeoutMs < 0) {
-                    lock.wait();
-                } else {
-                    long remNanos = deadlineNanos - System.nanoTime();
-                    if (remNanos <= 0) return false;
-                    long millis = remNanos / 1_000_000L;
-                    int nanos = (int) (remNanos % 1_000_000L);
-                    lock.wait(millis, nanos);
-                }
-            }
+        CountDownLatch latch = new CountDownLatch(1);
+        enqueueBarrier(latch);
+        if (timeoutMs < 0) {
+            latch.await();
             return true;
         }
+        return latch.await(timeoutMs, TimeUnit.MILLISECONDS);
     }
 
     public static void awaitAll(Agent[] agents) throws InterruptedException {
-        for (Agent a : agents) {
-            a.await(-1);
+        if (LockingTransaction.isRunning()) {
+            throw new IllegalStateException("I/O in transaction");
         }
+        if (NESTED_SENDS.get() != null) {
+            throw new IllegalStateException("Can't await in agent action");
+        }
+        if (agents == null || agents.length == 0) return;
+        CountDownLatch latch = new CountDownLatch(agents.length);
+        for (Agent a : agents) {
+            a.enqueueBarrier(latch);
+        }
+        latch.await();
     }
 
     public static boolean awaitForAll(long ms, Agent[] agents) throws InterruptedException {
-        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, ms));
-        for (Agent a : agents) {
-            long remMs = ms <= 0 ? 0L : Math.max(0L, TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
-            if (!a.await(remMs)) return false;
+        if (LockingTransaction.isRunning()) {
+            throw new IllegalStateException("I/O in transaction");
         }
-        return true;
+        if (NESTED_SENDS.get() != null) {
+            throw new IllegalStateException("Can't await in agent action");
+        }
+        if (agents == null || agents.length == 0) return true;
+        CountDownLatch latch = new CountDownLatch(agents.length);
+        for (Agent a : agents) {
+            a.enqueueBarrier(latch);
+        }
+        return latch.await(Math.max(0L, ms), TimeUnit.MILLISECONDS);
     }
 
     public static int releasePendingSends() {
         LockingTransaction tx = LockingTransaction.get();
-        if (tx == null) return 0;
-        return tx.releasePendingSends();
+        if (tx != null) {
+            return tx.releasePendingSends();
+        }
+        List<Action> nested = NESTED_SENDS.get();
+        if (nested != null && !nested.isEmpty()) {
+            int n = nested.size();
+            List<Action> toSend = new ArrayList<>(nested);
+            nested.clear();
+            for (Action a : toSend) {
+                try {
+                    a.agent.enqueueAction(a);
+                } catch (Throwable ignored) {}
+            }
+            return n;
+        }
+        return 0;
     }
 
     public static void shutdown() {
