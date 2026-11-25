@@ -13,6 +13,7 @@ public final class RT {
     public static final Boolean T = Boolean.TRUE;
     public static final Boolean F = Boolean.FALSE;
     public static final Object[] EMPTY_ARRAY = new Object[0];
+    public static final java.util.Comparator<Object> DEFAULT_COMPARATOR = cljl.RT::compare;
     public static final cljl.Namespace CLOJURE_NS = cljl.RT.CLOJURE_NS;
     public static final cljl.Var CURRENT_NS = cljl.RT.CURRENT_NS;
     public static final cljl.Var OUT = cljl.RT.OUT;

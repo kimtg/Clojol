@@ -234,7 +234,7 @@ public final class ProcessLib {
         @Override public boolean cancel(boolean mayInterruptIfRunning) { return cf.cancel(mayInterruptIfRunning); }
         @Override public boolean isCancelled() { return cf.isCancelled(); }
         @Override public boolean isDone() { return cf.isDone(); }
-        @Override public Object get() throws InterruptedException, ExecutionException { return cf.get(); }
+        @Override public Object get() { return deref(); }
         @Override public Object get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException { return cf.get(timeout, unit); }
     }
 }

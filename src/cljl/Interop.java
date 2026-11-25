@@ -321,7 +321,7 @@ public final class Interop {
             case "clojure.lang.PersistentVector$ChunkedSeq" -> cljl.lang.PersistentVector.VecSeq.class;
             case "clojure.lang.PersistentVector$Node" -> cljl.lang.PersistentVector.Node.class;
             case "clojure.lang.PersistentVector$TransientVector" -> cljl.lang.PersistentVector.TransientVector.class;
-            case "clojure.lang.APersistentVector$RSeq" -> cljl.lang.PersistentVector.RVecSeq.class;
+            case "clojure.lang.APersistentVector$RSeq" -> clojure.lang.APersistentVector.RSeq.class;
             case "clojure.lang.APersistentVector$SubVector" -> cljl.lang.PersistentVector.SubVec.class;
             case "clojure.core.Vec" -> cljl.lang.Vec.class;
             case "clojure.core.VecNode" -> cljl.lang.Vec.VecNode.class;

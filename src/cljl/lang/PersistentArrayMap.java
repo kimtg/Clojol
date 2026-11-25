@@ -382,7 +382,6 @@ public final class PersistentArrayMap extends clojure.lang.PersistentArrayMap
 
         private void ensureEditable() {
             if (owner == null) throw new IllegalAccessError("Transient used after persistent! call");
-            if (owner != Thread.currentThread()) throw new IllegalAccessError("Transient used by non-owner thread");
         }
 
         private int indexOf(Object key) {

@@ -77,7 +77,7 @@ public final class PersistentHashSet extends clojure.lang.PersistentHashSet
 
     @Override
     public PersistentHashSet empty() {
-        return EMPTY;
+        return meta == null ? EMPTY : EMPTY.withMeta(meta);
     }
 
     public PersistentHashSet conj(Object key) {

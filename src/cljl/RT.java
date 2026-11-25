@@ -700,12 +700,30 @@ public final class RT {
         return notFound;
     }
 
+    private static final Object NOT_FOUND = new Object();
+
     public static boolean contains(Object coll, Object key) {
         if (coll == null) return false;
         if (coll instanceof clojure.lang.Associative a) return a.containsKey(key);
         if (coll instanceof PersistentHashSet s) return s.contains(key);
         if (coll instanceof PersistentTreeSet s) return s.contains(key);
         if (coll instanceof clojure.lang.IPersistentSet s) return s.contains(key);
+        if (coll instanceof PersistentVector.TransientVector tv) {
+            if (key instanceof Number n) {
+                int i = n.intValue();
+                return i >= 0 && i < tv.count();
+            }
+            return false;
+        }
+        if (coll instanceof PersistentHashSet.TransientHashSet ts) {
+            return ts.contains(key);
+        }
+        if (coll instanceof clojure.lang.ITransientSet ts) {
+            return ts.get(key) != null;
+        }
+        if (coll instanceof clojure.lang.ITransientAssociative ta) {
+            return ta.valAt(key, NOT_FOUND) != NOT_FOUND;
+        }
         if (coll instanceof Map<?, ?> m) return m.containsKey(key);
         if (coll instanceof Set<?> s) return s.contains(key);
         if (coll instanceof CharSequence cs && key instanceof Number n) {
@@ -729,6 +747,20 @@ public final class RT {
             return null;
         }
         if (coll instanceof clojure.lang.Associative a) return a.entryAt(key);
+        if (coll instanceof PersistentVector.TransientVector tv) {
+            if (key instanceof Number n) {
+                int i = n.intValue();
+                if (i >= 0 && i < tv.count()) return new PersistentHashMap.MapEntry(i, tv.nth(i));
+            }
+            return null;
+        }
+        if (coll instanceof clojure.lang.ITransientAssociative2 ta2) {
+            return ta2.entryAt(key);
+        }
+        if (coll instanceof clojure.lang.ITransientAssociative ta) {
+            Object v = ta.valAt(key, NOT_FOUND);
+            return v != NOT_FOUND ? new PersistentHashMap.MapEntry(key, v) : null;
+        }
         if (coll instanceof Map<?, ?> m) {
             if (m.containsKey(key)) return new PersistentHashMap.MapEntry(key, m.get(key));
         }
@@ -754,9 +786,14 @@ public final class RT {
         if (coll == null) return null;
         if (coll instanceof PersistentVector v) return v.nth(n);
         if (coll instanceof PersistentVector.SubVec sv) return sv.nth(n);
+        if (coll instanceof clojure.lang.IPersistentVector v) return v.nth(n);
         if (coll instanceof CharSequence cs) return cs.charAt(n);
         if (coll.getClass().isArray()) return Array.get(coll, n);
         if (coll instanceof RandomAccess && coll instanceof List<?> l) return l.get(n);
+        if (coll instanceof java.util.regex.Matcher m) {
+            if (n < 0 || n > m.groupCount()) throw new IndexOutOfBoundsException("Index " + n + " out of bounds for matcher");
+            return m.group(n);
+        }
         if (coll instanceof Map.Entry<?, ?> e) {
             if (n == 0) return e.getKey();
             if (n == 1) return e.getValue();
@@ -793,9 +830,13 @@ public final class RT {
         if (n < 0) return notFound;
         if (coll instanceof PersistentVector v) return v.nth(n, notFound);
         if (coll instanceof PersistentVector.SubVec sv) return sv.nth(n, notFound);
+        if (coll instanceof clojure.lang.IPersistentVector v) return v.nth(n, notFound);
         if (coll instanceof CharSequence cs) return n < cs.length() ? cs.charAt(n) : notFound;
         if (coll.getClass().isArray()) return n < Array.getLength(coll) ? Array.get(coll, n) : notFound;
         if (coll instanceof RandomAccess && coll instanceof List<?> l) return n < l.size() ? l.get(n) : notFound;
+        if (coll instanceof java.util.regex.Matcher m) {
+            return n <= m.groupCount() ? m.group(n) : notFound;
+        }
         if (coll instanceof Map.Entry<?, ?> e) {
             if (n == 0) return e.getKey();
             if (n == 1) return e.getValue();
@@ -1212,6 +1253,15 @@ public final class RT {
             return;
         }
         if (x instanceof Class<?> c) {
+            if (c.isArray()) {
+                int dims = 0;
+                Class<?> comp = c;
+                while (comp.isArray()) { dims++; comp = comp.getComponentType(); }
+                if (dims >= 1 && dims <= 9) {
+                    sb.append(comp.getName()).append('/').append(dims);
+                    return;
+                }
+            }
             sb.append(c.getName());
             return;
         }

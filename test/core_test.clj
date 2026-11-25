@@ -454,9 +454,9 @@
     (let [tm (conj! (conj! (transient {:a 1}) (subvec [:b 2] 0 2)) nil)]
       (is (= {:a 1 :b 2} (persistent! tm))))
     (let [tm (transient {:a 1})
-          res (deref (future (try (assoc! tm :b 2) :no-err (catch IllegalAccessError _ :thread-err))))]
-      (is (= :thread-err res))
-      (is (= {:a 1} (persistent! tm)))))
+          tm2 (deref (future (assoc! tm :b 2)))]
+      (is (= {:a 1 :b 2} (persistent! tm2)))
+      (is (= :post-persist-err (try (assoc! tm2 :c 3) :no-err (catch IllegalAccessError _ :post-persist-err))))))
 
   (testing "Equivalence and hashing"
     (is (= (hash {:a 1 :b 2}) (hash (P2Rec. 1 2))))
@@ -3579,6 +3579,146 @@
     (let [out (m5-async/chan 10)]
       (m5-async/pipeline 2 out (map #(* % 10)) (m5-async/to-chan!! [1 2 3 4]))
       (is (= [10 20 30 40] (m5-async/<!! (m5-async/into [] out)))))))
+
+(defrecord M7Rec [a b])
+
+(require '[clojure.walk :as m7-walk]
+         '[clojure.data :as m7-data]
+         '[clojure.set :as m7-set]
+         '[clojure.string :as m7-str])
+
+(deftest milestone-7-conformance-test
+  (testing "IDeref implements Java Supplier functional interfaces (Clojure 1.12)"
+    (let [a (atom 42)
+          b (atom true)
+          d (delay 3.5)]
+      (is (instance? java.util.function.Supplier a))
+      (is (instance? java.util.function.LongSupplier a))
+      (is (instance? java.util.function.IntSupplier a))
+      (is (instance? java.util.function.BooleanSupplier b))
+      (is (instance? java.util.function.DoubleSupplier d))
+      (is (= 42 (.get ^java.util.function.Supplier a)))
+      (is (= 42 (.getAsLong ^java.util.function.LongSupplier a)))
+      (is (= 42 (.getAsInt ^java.util.function.IntSupplier a)))
+      (is (true? (.getAsBoolean ^java.util.function.BooleanSupplier b)))
+      (is (= 3.5 (.getAsDouble ^java.util.function.DoubleSupplier d)))))
+
+  (testing "vector-of / clojure.core.Vec & APersistentVector$RSeq"
+    (doseq [t [:boolean :byte :short :int :long :float :double :char]]
+      (let [v (vector-of t)]
+        (is (empty? v))
+        (is (instance? clojure.core.Vec v))
+        (is (instance? clojure.lang.IPersistentVector v))))
+    (is (thrown? IllegalArgumentException (vector-of nil)))
+    (is (thrown? IllegalArgumentException (vector-of :integer)))
+    (is (thrown? NullPointerException (vector-of :int 1 nil)))
+    (is (thrown? ClassCastException (vector-of :int "bad")))
+    (let [v (vector-of :int 1M 2.0 3.1)
+          cv (vector-of :int \a \b \c)
+          big (into (vector-of :long) (range 100))
+          rev (.rseq (into (vector-of :int) (range 6)))]
+      (is (= [1 2 3] v))
+      (is (= 3 (.length v)))
+      (is (= [97 98 99] cv))
+      (is (= 100 (count big)))
+      (is (= 60 (reduce + (subvec (into (vector-of :long) (range 1000)) 10 15))))
+      (is (= clojure.lang.APersistentVector$RSeq (class rev)))
+      (is (= 5 (.index rev)))
+      (is (= [5 4 3 2 1 0] rev))
+      (is (true? (contains? v 2)))
+      (is (false? (contains? v 3)))
+      (is (= (clojure.lang.MapEntry. 1 2) (.entryAt v 1)))))
+
+  (testing "clojure.walk metadata, sorted comparator, and record retention"
+    (let [m {:foo true}]
+      (is (= m (meta (m7-walk/postwalk identity (with-meta '(1 2) m)))))
+      (is (= m (meta (m7-walk/postwalk identity (with-meta [1 2] m)))))
+      (is (= m (meta (m7-walk/postwalk identity (with-meta #{1 2} m)))))
+      (is (= m (meta (m7-walk/postwalk identity (with-meta {1 2} m)))))
+      (is (= m (meta (m7-walk/postwalk identity (with-meta (->M7Rec 1 2) m))))))
+    (let [sm (sorted-map-by #(compare %2 %1) :a 1 :b 2 :c 3)
+          walked (m7-walk/walk identity identity sm)]
+      (is (= (.comparator sm) (.comparator walked)))
+      (is (= (seq sm) (seq walked)))))
+
+  (testing "doseq :while and :when modifiers"
+    (let [acc (atom [])]
+      (doseq [x (range 10) :while (< x 4)]
+        (swap! acc conj x))
+      (is (= [0 1 2 3] @acc)))
+    (let [acc (atom [])]
+      (doseq [x (range 10) :when (odd? x) :while (< x 6)]
+        (swap! acc conj x))
+      (is (= [1 3 5] @acc)))
+    (let [acc (atom [])]
+      (doseq [x (range 10) :while (< x 6) :when (even? x)]
+        (swap! acc conj x))
+      (is (= [0 2 4] @acc))))
+
+  (testing "clojure.data/diff arrays, nil map values, and vector trailing-nil trimming"
+    (is (= [nil [nil 2] [1]] (m7-data/diff [1] [1 2])))
+    (is (= [nil nil [1 2]] (m7-data/diff [1 2] (into-array [1 2]))))
+    (is (= [nil nil [1 2]] (m7-data/diff (into-array [1 2]) [1 2])))
+    (is (= [{:a nil} {:a false} {:b nil :c false}]
+           (m7-data/diff {:a nil :b nil :c false} {:a false :b nil :c false}))))
+
+  (testing "Clojure 1.12 array-symbol printing, validation, and resolution"
+    (is (= "long/1" (print-str long/1)))
+    (is (= "java.lang.String/2" (print-str String/2)))
+    (is (thrown? Exception (read-string "String/0")))
+    (is (thrown? Exception (read-string "String/42")))
+    (is (thrown? Exception (read-string "String/1:")))
+    (is (thrown? ClassNotFoundException (resolve 'NoSuchClassEverExists123/1))))
+
+  (testing "nth on java.util.regex.Matcher"
+    (let [m (re-matcher #"(\d+)/(\d+)/(\d+)" "12/02/1975")]
+      (is (some? (re-find m)))
+      (is (= "12/02/1975" (nth m 0) (nth m 0 :nf)))
+      (is (= "12" (nth m 1)))
+      (is (= "1975" (nth m 3)))
+      (is (thrown? IndexOutOfBoundsException (nth m 4)))
+      (is (= :nf (nth m 4 :nf)))))
+
+  (testing "Metadata preservation across core, threading macros, and clojure.set"
+    (let [xm {:m 1}
+          mx (with-meta {:a 1 :b 2} xm)
+          vx (with-meta [1 2 3] xm)
+          sx (with-meta #{1 2 3} xm)]
+      (is (= xm (meta (into mx {:c 3}))))
+      (is (= xm (meta (into vx [4]))))
+      (is (= xm (meta (into sx [4]))))
+      (is (= xm (meta (merge mx {:c 3}))))
+      (is (= xm (meta (merge-with + mx {:a 10}))))
+      (is (= xm (meta (select-keys mx [:a]))))
+      (is (= xm (meta (replace {2 :two} vx))))
+      (is (= xm (meta (update-keys mx name))))
+      (is (= xm (meta (update-vals mx inc))))
+      (is (= xm (meta (m7-set/select odd? sx))))
+      (is (= xm (meta (m7-set/rename-keys mx {:a :x}))))
+      (is (= {:b 1 :a 2} (m7-set/rename-keys {:a 1 :b 2} {:a :b :b :a})))
+      (is (thrown? clojure.lang.ArityException (m7-set/intersection)))
+      (is (= 'String (:tag (meta (macroexpand-1 '(-> x ^String (str "a")))))))
+      (is (= 'String (:tag (meta (macroexpand-1 '(->> x ^String (str "a")))))))))
+
+  (testing "Core predicates, empty seq, transients, Unicode trim, vec on IReduceInit, Keyword ArityException"
+    (is (false? (fn? #'inc)))
+    (is (true? (fn? inc)))
+    (is (= "hi" (m7-str/trim "\u2002  hi \u2002")))
+    (is (boolean (map inc [])))
+    (is (= [0 1 2 3] (vec (reify clojure.lang.IReduceInit
+                            (reduce [_ f init] (reduce f init (range 4)))))))
+    (let [tm (transient {:a 1 :b nil})
+          tv (transient [10 20])
+          ts (transient #{:x})]
+      (is (true? (contains? tm :a)))
+      (is (true? (contains? tm :b)))
+      (is (false? (contains? tm :c)))
+      (is (= [:a 1] (find tm :a)))
+      (is (true? (contains? tv 1)))
+      (is (= [1 20] (find tv 1)))
+      (is (true? (contains? ts :x))))
+    (is (thrown-with-msg? clojure.lang.ArityException #":kw" (:kw)))
+    (is (thrown-with-msg? clojure.lang.ArityException #"> 20" (apply :kw (range 25))))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

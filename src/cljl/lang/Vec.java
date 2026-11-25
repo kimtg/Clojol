@@ -138,6 +138,162 @@ public final class Vec extends clojure.lang.APersistentVector
         throw new IndexOutOfBoundsException("Index " + i + " out of bounds for length " + cnt);
     }
 
+    public static final cljl.Keyword KW_BOOLEAN = cljl.Keyword.intern("boolean");
+    public static final cljl.Keyword KW_BYTE = cljl.Keyword.intern("byte");
+    public static final cljl.Keyword KW_SHORT = cljl.Keyword.intern("short");
+    public static final cljl.Keyword KW_INT = cljl.Keyword.intern("int");
+    public static final cljl.Keyword KW_LONG = cljl.Keyword.intern("long");
+    public static final cljl.Keyword KW_FLOAT = cljl.Keyword.intern("float");
+    public static final cljl.Keyword KW_DOUBLE = cljl.Keyword.intern("double");
+    public static final cljl.Keyword KW_CHAR = cljl.Keyword.intern("char");
+
+    private static boolean isValidPrimType(Object typeKw) {
+        return typeKw == KW_BOOLEAN || typeKw == KW_BYTE || typeKw == KW_SHORT
+                || typeKw == KW_INT || typeKw == KW_LONG || typeKw == KW_FLOAT
+                || typeKw == KW_DOUBLE || typeKw == KW_CHAR;
+    }
+
+    private static Object newPrimArray(Object typeKw, int len) {
+        if (typeKw == KW_BOOLEAN) return new boolean[len];
+        if (typeKw == KW_BYTE) return new byte[len];
+        if (typeKw == KW_SHORT) return new short[len];
+        if (typeKw == KW_INT) return new int[len];
+        if (typeKw == KW_LONG) return new long[len];
+        if (typeKw == KW_FLOAT) return new float[len];
+        if (typeKw == KW_DOUBLE) return new double[len];
+        if (typeKw == KW_CHAR) return new char[len];
+        return new Object[len];
+    }
+
+    private static void setPrim(Object typeKw, Object arr, int idx, Object val) {
+        if (val == null) throw new NullPointerException();
+        if (typeKw == KW_BOOLEAN) {
+            if (!(val instanceof Boolean b)) throw new ClassCastException("Cannot cast " + val.getClass().getName() + " to boolean");
+            ((boolean[]) arr)[idx] = b;
+            return;
+        }
+        if (typeKw == KW_CHAR) {
+            char c;
+            if (val instanceof Character ch) c = ch;
+            else if (val instanceof Number n) c = (char) n.intValue();
+            else throw new ClassCastException("Cannot cast " + val.getClass().getName() + " to char");
+            ((char[]) arr)[idx] = c;
+            return;
+        }
+        if (typeKw == KW_BYTE || typeKw == KW_SHORT || typeKw == KW_INT || typeKw == KW_LONG
+                || typeKw == KW_FLOAT || typeKw == KW_DOUBLE) {
+            if (val instanceof Character ch) {
+                int cv = ch;
+                if (typeKw == KW_BYTE) ((byte[]) arr)[idx] = (byte) cv;
+                else if (typeKw == KW_SHORT) ((short[]) arr)[idx] = (short) cv;
+                else if (typeKw == KW_INT) ((int[]) arr)[idx] = cv;
+                else if (typeKw == KW_LONG) ((long[]) arr)[idx] = cv;
+                else if (typeKw == KW_FLOAT) ((float[]) arr)[idx] = cv;
+                else ((double[]) arr)[idx] = cv;
+                return;
+            }
+            if (!(val instanceof Number n)) {
+                throw new ClassCastException("Cannot cast " + val.getClass().getName() + " to " + typeKw);
+            }
+            if (typeKw == KW_BYTE) ((byte[]) arr)[idx] = n.byteValue();
+            else if (typeKw == KW_SHORT) ((short[]) arr)[idx] = n.shortValue();
+            else if (typeKw == KW_INT) ((int[]) arr)[idx] = n.intValue();
+            else if (typeKw == KW_LONG) ((long[]) arr)[idx] = n.longValue();
+            else if (typeKw == KW_FLOAT) ((float[]) arr)[idx] = n.floatValue();
+            else ((double[]) arr)[idx] = n.doubleValue();
+            return;
+        }
+        ((Object[]) arr)[idx] = val;
+    }
+
+    private static Object clonePrimArray(Object arr, int newLen) {
+        if (arr instanceof boolean[] a) return Arrays.copyOf(a, newLen);
+        if (arr instanceof byte[] a) return Arrays.copyOf(a, newLen);
+        if (arr instanceof short[] a) return Arrays.copyOf(a, newLen);
+        if (arr instanceof int[] a) return Arrays.copyOf(a, newLen);
+        if (arr instanceof long[] a) return Arrays.copyOf(a, newLen);
+        if (arr instanceof float[] a) return Arrays.copyOf(a, newLen);
+        if (arr instanceof double[] a) return Arrays.copyOf(a, newLen);
+        if (arr instanceof char[] a) return Arrays.copyOf(a, newLen);
+        return Arrays.copyOf((Object[]) arr, newLen);
+    }
+
+    public static Vec createOf(Object typeKw, Object[] args, int offset) {
+        if (!isValidPrimType(typeKw)) {
+            throw new IllegalArgumentException("Unsupported type: " + typeKw);
+        }
+        Vec v = new Vec(typeKw, 0, 5, new VecNode(null, new Object[32]), newPrimArray(typeKw, 0), null);
+        for (int i = offset; i < args.length; i++) {
+            v = v.conj(args[i]);
+        }
+        return v;
+    }
+
+    private static VecNode pushTail(int level, VecNode parent, VecNode tailnode, int cnt) {
+        int subidx = ((cnt - 1) >>> level) & 0x01f;
+        Object[] newArr = parent != null ? ((Object[]) parent.arr).clone() : new Object[32];
+        VecNode nodeToInsert;
+        if (level == 5) {
+            nodeToInsert = tailnode;
+        } else {
+            VecNode child = parent != null ? (VecNode) newArr[subidx] : null;
+            nodeToInsert = child != null
+                    ? pushTail(level - 5, child, tailnode, cnt)
+                    : newPath(level - 5, tailnode);
+        }
+        newArr[subidx] = nodeToInsert;
+        return new VecNode(null, newArr);
+    }
+
+    private static VecNode newPath(int level, VecNode node) {
+        if (level == 0) return node;
+        Object[] arr = new Object[32];
+        arr[0] = newPath(level - 5, node);
+        return new VecNode(null, arr);
+    }
+
+    public Vec conj(Object val) {
+        if (!isValidPrimType(am)) {
+            throw new UnsupportedOperationException("conj on custom ArrayManager Vec not supported");
+        }
+        int tailLen = cnt - tailoff();
+        Object tailArr = tail instanceof VecNode vn ? vn.arr : tail;
+        if (tailLen < 32) {
+            Object newTail = clonePrimArray(tailArr, tailLen + 1);
+            setPrim(am, newTail, tailLen, val);
+            return new Vec(am, cnt + 1, shift, root, newTail, meta);
+        }
+        VecNode tailnode = new VecNode(null, tailArr);
+        VecNode newRoot;
+        int newShift = shift;
+        if ((cnt >>> 5) > (1 << shift)) {
+            Object[] nrArr = new Object[32];
+            nrArr[0] = root;
+            nrArr[1] = newPath(shift, tailnode);
+            newRoot = new VecNode(null, nrArr);
+            newShift += 5;
+        } else {
+            newRoot = pushTail(shift, root, tailnode, cnt);
+        }
+        Object newTail = newPrimArray(am, 1);
+        setPrim(am, newTail, 0, val);
+        return new Vec(am, cnt + 1, newShift, newRoot, newTail, meta);
+    }
+
+    public Vec subVec(int start, int end) {
+        if (start < 0 || end < start || end > cnt) {
+            throw new IndexOutOfBoundsException("subvec out of range: " + start + ".." + end + " (count=" + cnt + ")");
+        }
+        if (isValidPrimType(am)) {
+            Vec v = new Vec(am, 0, 5, new VecNode(null, new Object[32]), newPrimArray(am, 0), null);
+            for (int i = start; i < end; i++) v = v.conj(nth(i));
+            return v;
+        }
+        Object[] slice = new Object[end - start];
+        for (int i = start; i < end; i++) slice[i - start] = nth(i);
+        return new Vec(am, slice.length, 5, new VecNode(null, new Object[32]), slice, null);
+    }
+
     public Object nth(int i) {
         Object arr = arrayFor(i);
         if (arr instanceof Object[] oa) return oa[i & 0x01f];
@@ -150,6 +306,7 @@ public final class Vec extends clojure.lang.APersistentVector
     }
 
     @Override public int count() { return cnt; }
+    @Override public int length() { return cnt; }
     @Override public PersistentHashMap meta() { return meta; }
     @Override public Vec withMeta(PersistentHashMap m) {
         return this.meta == m ? this : new Vec(am, cnt, shift, root, tail, m);
@@ -161,14 +318,46 @@ public final class Vec extends clojure.lang.APersistentVector
         }
         return false;
     }
+    @Override public IMapEntry entryAt(Object key) {
+        if (key instanceof Number n) {
+            int i = n.intValue();
+            if (i >= 0 && i < cnt) return new PersistentHashMap.MapEntry(i, nth(i));
+        }
+        return null;
+    }
     @Override public Object valAt(Object key) { return valAt(key, null); }
     @Override public Object valAt(Object key, Object notFound) {
         if (key instanceof Number n) return nth(n.intValue(), notFound);
         return notFound;
     }
     @Override public Associative assoc(Object key, Object val) {
-        if (key instanceof Number n) return toPersistentVector().assocN(n.intValue(), val);
+        if (key instanceof Number n) return assocN(n.intValue(), val);
         throw new IllegalArgumentException("Key must be integer");
+    }
+    @Override public IPersistentVector assocN(int i, Object val) {
+        if (!isValidPrimType(am)) return toPersistentVector().assocN(i, val);
+        if (i >= 0 && i < cnt) {
+            if (i >= tailoff()) {
+                Object tailArr = tail instanceof VecNode vn ? vn.arr : tail;
+                Object newTail = clonePrimArray(tailArr, Array.getLength(tailArr));
+                setPrim(am, newTail, i & 0x01f, val);
+                return new Vec(am, cnt, shift, root, newTail, meta);
+            }
+            return new Vec(am, cnt, shift, doAssoc(shift, root, i, val), tail, meta);
+        }
+        if (i == cnt) return conj(val);
+        throw new IndexOutOfBoundsException("Index " + i + " out of bounds for length " + cnt);
+    }
+    private VecNode doAssoc(int level, VecNode node, int i, Object val) {
+        if (level == 0) {
+            Object newArr = clonePrimArray(node.arr, Array.getLength(node.arr));
+            setPrim(am, newArr, i & 0x01f, val);
+            return new VecNode(null, newArr);
+        }
+        Object[] arr = ((Object[]) node.arr).clone();
+        int subidx = (i >>> level) & 0x01f;
+        arr[subidx] = doAssoc(level - 5, (VecNode) arr[subidx], i, val);
+        return new VecNode(null, arr);
     }
     public PersistentVector toPersistentVector() {
         PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
@@ -181,9 +370,7 @@ public final class Vec extends clojure.lang.APersistentVector
     }
     @Override public ISeq rseq() {
         if (cnt == 0) return null;
-        List<Object> rev = new ArrayList<>(cnt);
-        for (int i = cnt - 1; i >= 0; i--) rev.add(nth(i));
-        return PersistentList.create(rev);
+        return new clojure.lang.APersistentVector.RSeq(this, cnt - 1);
     }
     @Override public Object invoke(Object a) { return nth((int) Numbers.toLong(a)); }
     @Override public Object invoke(Object a, Object nf) {
@@ -224,7 +411,7 @@ public final class Vec extends clojure.lang.APersistentVector
         return Arrays.asList(toArray()).listIterator(index);
     }
     @Override public List<Object> subList(int fromIndex, int toIndex) {
-        return toPersistentVector().subList(fromIndex, toIndex);
+        return subVec(fromIndex, toIndex);
     }
     @Override public boolean containsAll(Collection<?> c) {
         for (Object x : c) if (!contains(x)) return false;
@@ -241,10 +428,22 @@ public final class Vec extends clojure.lang.APersistentVector
     @Override public void add(int index, Object element) { throw new UnsupportedOperationException(); }
     @Override public Object remove(int index) { throw new UnsupportedOperationException(); }
 
-    @Override public PersistentVector cons(Object o) { return toPersistentVector().conj(o); }
-    @Override public IPersistentCollection empty() { return PersistentVector.EMPTY; }
+    @Override public IPersistentVector cons(Object o) {
+        return isValidPrimType(am) ? conj(o) : toPersistentVector().conj(o);
+    }
+    @Override public IPersistentCollection empty() {
+        if (isValidPrimType(am)) {
+            return new Vec(am, 0, 5, new VecNode(null, new Object[32]), newPrimArray(am, 0), meta);
+        }
+        return meta == null ? PersistentVector.EMPTY : PersistentVector.EMPTY.withMeta(meta);
+    }
     @Override public Object peek() { return cnt > 0 ? nth(cnt - 1) : null; }
-    @Override public IPersistentStack pop() { return toPersistentVector().pop(); }
+    @Override public IPersistentStack pop() {
+        if (cnt == 0) throw new IllegalStateException("Can't pop empty vector");
+        if (!isValidPrimType(am)) return toPersistentVector().pop();
+        if (cnt == 1) return (IPersistentStack) empty();
+        return subVec(0, cnt - 1).withMeta(meta);
+    }
 
     @Override
     public int compareTo(Object o) {

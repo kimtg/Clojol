@@ -81,6 +81,16 @@ public final class Keyword extends clojure.lang.Keyword implements cljl.lang.Nam
     }
 
     @Override
+    public Object throwArity(int n) {
+        throw new clojure.lang.ArityException(n, toString());
+    }
+
+    @Override
+    protected RuntimeException arityError(int n) {
+        return new clojure.lang.ArityException(n, toString());
+    }
+
+    @Override
     public Object invoke(Object coll, Object notFound) {
         if (coll instanceof PersistentHashMap phm) {
             return phm.valAtKeyword(this, notFound);

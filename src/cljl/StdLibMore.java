@@ -179,6 +179,28 @@ public final class StdLibMore {
         Keyword kDir = Keyword.intern("dir");
         Keyword kBytes = Keyword.intern("bytes");
 
+        ns.intern("parse-args", Fn.of1("parse-args", argsObj -> {
+            List<Object> cmd = new ArrayList<>();
+            PersistentHashMap opts = PersistentHashMap.create(
+                    kInEnc, StandardCharsets.UTF_8.name(),
+                    kOutEnc, StandardCharsets.UTF_8.name(),
+                    kDir, shDir.deref(),
+                    kEnv, shEnv.deref());
+            List<Object> items = toList(argsObj);
+            int i = 0;
+            while (i < items.size()) {
+                Object a = items.get(i);
+                if (a instanceof Keyword kw && i + 1 < items.size()) {
+                    opts = opts.assoc(kw, items.get(i + 1));
+                    i += 2;
+                } else {
+                    cmd.add(String.valueOf(a));
+                    i++;
+                }
+            }
+            return PersistentVector.createOwning(PersistentVector.create(cmd), opts);
+        }));
+
         ns.intern("sh", Fn.ofVarargs("sh", args -> {
             List<String> cmd = new ArrayList<>();
             Map<Keyword, Object> opts = new HashMap<>();
@@ -296,6 +318,8 @@ public final class StdLibMore {
         Atom remoteDocs = new Atom(PersistentHashMap.create("java.", coreApi, "javax.", coreApi));
         ns.intern(Symbol.intern("*local-javadocs*")).bindRoot(localDocs).setDynamic();
         ns.intern(Symbol.intern("*remote-javadocs*")).bindRoot(remoteDocs).setDynamic();
+        ns.intern(Symbol.intern("*feeling-lucky*")).bindRoot(Boolean.TRUE).setDynamic();
+        ns.intern(Symbol.intern("*feeling-lucky-url*")).bindRoot("http://www.google.com/search?btnI=I%27m%20Feeling%20Lucky&q=allinurl:").setDynamic();
         ns.intern("add-local-javadoc", Fn.of1("add-local-javadoc", path ->
                 localDocs.swap(Fn.of1("add-local", l -> RT.conj(l, path)))));
         ns.intern("add-remote-javadoc", Fn.of2("add-remote-javadoc", (prefix, url) ->
@@ -623,7 +647,7 @@ public final class StdLibMore {
                   nil
                   (equality-partition [_] :atom)
                   Object
-                  (equality-partition [_] :atom)
+                  (equality-partition [x] (if (.isArray (class x)) :sequential :atom))
                   java.util.Set
                   (equality-partition [_] :set)
                   clojure.lang.IPersistentSet
@@ -640,7 +664,7 @@ public final class StdLibMore {
                   nil
                   (diff-similar [a b] (atom-diff a b))
                   Object
-                  (diff-similar [a b] (atom-diff a b))
+                  (diff-similar [a b] (if (or (.isArray (class a)) (.isArray (class b))) (__diff-impl a b) (atom-diff a b)))
                   java.util.Set
                   (diff-similar [a b] (__diff-impl a b))
                   clojure.lang.IPersistentSet
@@ -698,10 +722,19 @@ public final class StdLibMore {
                 boolean hasA = ma.containsKey(k);
                 boolean hasB = mb.containsKey(k);
                 if (hasA && hasB) {
-                    PersistentVector sub = diffImpl(ma.get(k), mb.get(k));
-                    if (sub.nth(0) != null) onlyA = onlyA.assoc(k, sub.nth(0));
-                    if (sub.nth(1) != null) onlyB = onlyB.assoc(k, sub.nth(1));
-                    if (sub.nth(2) != null || (ma.get(k) == null && mb.get(k) == null)) both = both.assoc(k, sub.nth(2));
+                    Object va = ma.get(k);
+                    Object vb = mb.get(k);
+                    if (RT.equiv(va, vb)) {
+                        both = both.assoc(k, va);
+                    } else if (va == null || vb == null) {
+                        onlyA = onlyA.assoc(k, va);
+                        onlyB = onlyB.assoc(k, vb);
+                    } else {
+                        PersistentVector sub = diffImpl(va, vb);
+                        if (sub.nth(0) != null) onlyA = onlyA.assoc(k, sub.nth(0));
+                        if (sub.nth(1) != null) onlyB = onlyB.assoc(k, sub.nth(1));
+                        if (sub.nth(2) != null) both = both.assoc(k, sub.nth(2));
+                    }
                 } else if (hasA) {
                     onlyA = onlyA.assoc(k, ma.get(k));
                 } else {
@@ -723,33 +756,43 @@ public final class StdLibMore {
             Object[] oa = new Object[max];
             Object[] ob = new Object[max];
             Object[] oc = new Object[max];
-            boolean hasA = false, hasB = false, hasC = false;
+            int lastA = -1, lastB = -1, lastC = -1;
             for (int i = 0; i < max; i++) {
                 boolean inA = i < la.size();
                 boolean inB = i < lb.size();
                 if (inA && inB) {
-                    PersistentVector sub = diffImpl(la.get(i), lb.get(i));
-                    oa[i] = sub.nth(0); if (oa[i] != null) hasA = true;
-                    ob[i] = sub.nth(1); if (ob[i] != null) hasB = true;
-                    oc[i] = sub.nth(2); if (oc[i] != null || (la.get(i) == null && lb.get(i) == null)) hasC = true;
+                    Object va = la.get(i);
+                    Object vb = lb.get(i);
+                    if (RT.equiv(va, vb)) {
+                        oc[i] = va;
+                        lastC = i;
+                    } else if (va == null || vb == null) {
+                        oa[i] = va; lastA = i;
+                        ob[i] = vb; lastB = i;
+                    } else {
+                        PersistentVector sub = diffImpl(va, vb);
+                        if (sub.nth(0) != null) { oa[i] = sub.nth(0); lastA = i; }
+                        if (sub.nth(1) != null) { ob[i] = sub.nth(1); lastB = i; }
+                        if (sub.nth(2) != null) { oc[i] = sub.nth(2); lastC = i; }
+                    }
                 } else if (inA) {
                     oa[i] = la.get(i);
-                    hasA = true;
+                    lastA = i;
                 } else {
                     ob[i] = lb.get(i);
-                    hasB = true;
+                    lastB = i;
                 }
             }
             return PersistentVector.createOwning(
-                    hasA ? PersistentVector.createOwning(oa) : null,
-                    hasB ? PersistentVector.createOwning(ob) : null,
-                    hasC ? PersistentVector.createOwning(oc) : null);
+                    lastA >= 0 ? PersistentVector.createOwning(Arrays.copyOf(oa, lastA + 1)) : null,
+                    lastB >= 0 ? PersistentVector.createOwning(Arrays.copyOf(ob, lastB + 1)) : null,
+                    lastC >= 0 ? PersistentVector.createOwning(Arrays.copyOf(oc, lastC + 1)) : null);
         }
         return PersistentVector.createOwning(a, b, null);
     }
 
     private static boolean isSequentialColl(Object x) {
-        return x instanceof PersistentVector || x instanceof ISeq || x instanceof List<?>;
+        return x != null && (x instanceof PersistentVector || x instanceof ISeq || x instanceof List<?> || x.getClass().isArray());
     }
 
     private static List<Object> toList(Object coll) {

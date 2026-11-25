@@ -13,7 +13,7 @@ public class ArityException extends IllegalArgumentException {
     }
 
     public ArityException(int actual, String name, Throwable cause) {
-        super("Wrong number of args (" + actual + ") passed to: " + name, cause);
+        super("Wrong number of args (" + (actual > 20 ? "> 20" : actual) + ") passed to: " + name, cause);
         this.actual = actual;
         this.name = name;
     }

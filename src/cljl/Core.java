@@ -923,7 +923,7 @@ public final class Core {
     }
 
     private static ISeq map1Seq(Fn f, ISeq s) {
-        if (s == null) return null;
+        if (s == null) return PersistentList.EMPTY;
         return new Map1LazySeq(f, s);
     }
 
@@ -942,7 +942,7 @@ public final class Core {
     }
 
     private static ISeq mapIndexedSeq(Fn f, long idx, ISeq s) {
-        if (s == null) return null;
+        if (s == null) return PersistentList.EMPTY;
         return new LazySeq(Fn.of0("map-indexed", () -> {
             ISeq sq = s.seq();
             if (sq == null) return null;
@@ -1660,6 +1660,16 @@ public final class Core {
         @Override public Object invoke(Object a, Object b) { return RT.conjBang(a, b); }
     };
 
+    private static Object restoreMeta(Object target, Object result) {
+        if (target instanceof IMeta im) {
+            PersistentHashMap m = im.meta();
+            if (m != null && result instanceof IObj iobj) {
+                return iobj.withMeta(m);
+            }
+        }
+        return result;
+    }
+
     private static Object intoImpl(Object to, Fn xform, Object from) {
         if (to == null) to = PersistentList.EMPTY;
         if (xform == null) {
@@ -1673,7 +1683,7 @@ public final class Core {
                         for (int j = 0; j < limit; j++) tv = tv.conj(chunk[j]);
                         i += limit;
                     }
-                    return tv.persistent();
+                    return restoreMeta(pv, tv.persistent());
                 }
                 if (from instanceof LongRange lr) {
                     long v = lr.start;
@@ -1683,61 +1693,61 @@ public final class Core {
                         tv = tv.conj(Long.valueOf(v));
                         v += step;
                     }
-                    return tv.persistent();
+                    return restoreMeta(pv, tv.persistent());
                 }
                 if (from instanceof IReduceInit ri) {
                     tv = (PersistentVector.TransientVector) ri.reduce(CONJ_BANG_RF, tv);
-                    return tv.persistent();
+                    return restoreMeta(pv, tv.persistent());
                 }
                 ISeq s = RT.seq(from);
                 if (s instanceof IReduceInit ri) {
                     tv = (PersistentVector.TransientVector) ri.reduce(CONJ_BANG_RF, tv);
-                    return tv.persistent();
+                    return restoreMeta(pv, tv.persistent());
                 }
                 for (; s != null; s = s.next()) tv = tv.conj(s.first());
-                return tv.persistent();
+                return restoreMeta(pv, tv.persistent());
             }
             if (to instanceof PersistentHashMap pm) {
                 PersistentHashMap.TransientHashMap tm = pm.asTransient();
                 if (from instanceof IReduceInit ri) {
                     tm = (PersistentHashMap.TransientHashMap) ri.reduce(CONJ_BANG_RF, tm);
-                    return tm.persistent();
+                    return restoreMeta(pm, tm.persistent());
                 }
                 ISeq s = RT.seq(from);
                 if (s instanceof IReduceInit ri) {
                     tm = (PersistentHashMap.TransientHashMap) ri.reduce(CONJ_BANG_RF, tm);
-                    return tm.persistent();
+                    return restoreMeta(pm, tm.persistent());
                 }
                 for (; s != null; s = s.next()) tm = (PersistentHashMap.TransientHashMap) RT.conjBang(tm, s.first());
-                return tm.persistent();
+                return restoreMeta(pm, tm.persistent());
             }
             if (to instanceof PersistentArrayMap am) {
                 ITransientCollection tc = am.asTransient();
                 if (from instanceof IReduceInit ri) {
                     tc = (ITransientCollection) ri.reduce(CONJ_BANG_RF, tc);
-                    return tc.persistent();
+                    return restoreMeta(am, tc.persistent());
                 }
                 ISeq s = RT.seq(from);
                 if (s instanceof IReduceInit ri) {
                     tc = (ITransientCollection) ri.reduce(CONJ_BANG_RF, tc);
-                    return tc.persistent();
+                    return restoreMeta(am, tc.persistent());
                 }
                 for (; s != null; s = s.next()) tc = (ITransientCollection) RT.conjBang(tc, s.first());
-                return tc.persistent();
+                return restoreMeta(am, tc.persistent());
             }
             if (to instanceof PersistentHashSet ps) {
                 PersistentHashSet.TransientHashSet ts = ps.asTransient();
                 if (from instanceof IReduceInit ri) {
                     ts = (PersistentHashSet.TransientHashSet) ri.reduce(CONJ_BANG_RF, ts);
-                    return ts.persistent();
+                    return restoreMeta(ps, ts.persistent());
                 }
                 ISeq s = RT.seq(from);
                 if (s instanceof IReduceInit ri) {
                     ts = (PersistentHashSet.TransientHashSet) ri.reduce(CONJ_BANG_RF, ts);
-                    return ts.persistent();
+                    return restoreMeta(ps, ts.persistent());
                 }
                 for (; s != null; s = s.next()) ts = ts.conj(s.first());
-                return ts.persistent();
+                return restoreMeta(ps, ts.persistent());
             }
             return reduce3(CONJ_RF, to, from);
         }
@@ -1745,13 +1755,13 @@ public final class Core {
             Fn rf = (Fn) xform.invoke(CONJ_BANG_RF);
             Object acc = reduce3(rf, pv.asTransient(), from);
             acc = rf.invoke(acc);
-            return ((PersistentVector.TransientVector) acc).persistent();
+            return restoreMeta(pv, ((PersistentVector.TransientVector) acc).persistent());
         }
         if (to instanceof IEditableCollection ec) {
             Fn rf = (Fn) xform.invoke(CONJ_BANG_RF);
             Object acc = reduce3(rf, ec.asTransient(), from);
             acc = rf.invoke(acc);
-            return ((ITransientCollection) acc).persistent();
+            return restoreMeta(to, ((ITransientCollection) acc).persistent());
         }
         Fn rf = (Fn) xform.invoke(CONJ_RF);
         Object acc = reduce3(rf, to, from);
@@ -2776,22 +2786,42 @@ public final class Core {
         if (Keyword.intern("let").equals(k)) {
             return PersistentList.createFromArray(Symbol.intern("let*"), Compiler.destructure((PersistentVector) v), expandDoseq(seqExprs, idx + 2, body));
         }
-        if (Keyword.intern("when").equals(k)) {
+        if (Keyword.intern("when").equals(k) || Keyword.intern("while").equals(k)) {
             return PersistentList.createFromArray(Symbol.intern("when"), v, expandDoseq(seqExprs, idx + 2, body));
         }
-        if (Keyword.intern("while").equals(k)) {
-            return PersistentList.createFromArray(Symbol.intern("when"), v, expandDoseq(seqExprs, idx + 2, body));
+        // Collect all trailing :let / :when / :while modifiers belonging to this sequence binding
+        int modEnd = idx + 2;
+        while (modEnd < seqExprs.count()) {
+            Object mk = seqExprs.nth(modEnd);
+            if (Keyword.intern("let").equals(mk) || Keyword.intern("when").equals(mk) || Keyword.intern("while").equals(mk)) {
+                modEnd += 2;
+            } else {
+                break;
+            }
         }
         Symbol s = Symbol.intern("seq__" + RT.nextID());
-        Object inner = expandDoseq(seqExprs, idx + 2, body);
+        Object recurForm = PersistentList.createFromArray(Symbol.intern("recur"),
+                PersistentList.createFromArray(Symbol.intern("clojure.core", "next"), s));
+        Object inner = expandDoseq(seqExprs, modEnd, body);
+        Object step = PersistentList.createFromArray(Symbol.intern("do"), inner, recurForm);
+        // Wrap modifiers from innermost to outermost
+        for (int m = modEnd - 2; m >= idx + 2; m -= 2) {
+            Object mk = seqExprs.nth(m);
+            Object mv = seqExprs.nth(m + 1);
+            if (Keyword.intern("let").equals(mk)) {
+                step = PersistentList.createFromArray(Symbol.intern("let*"), Compiler.destructure((PersistentVector) mv), step);
+            } else if (Keyword.intern("when").equals(mk)) {
+                step = PersistentList.createFromArray(Symbol.intern("if"), mv, step, recurForm);
+            } else if (Keyword.intern("while").equals(mk)) {
+                step = PersistentList.createFromArray(Symbol.intern("when"), mv, step);
+            }
+        }
         return PersistentList.createFromArray(Symbol.intern("loop*"),
                 PersistentVector.createOwning(s, PersistentList.createFromArray(Symbol.intern("clojure.core", "seq"), v)),
                 PersistentList.createFromArray(Symbol.intern("when"), s,
                         PersistentList.createFromArray(Symbol.intern("let*"),
                                 Compiler.destructure(PersistentVector.createOwning(k, PersistentList.createFromArray(Symbol.intern("clojure.core", "first"), s))),
-                                inner,
-                                PersistentList.createFromArray(Symbol.intern("recur"),
-                                        PersistentList.createFromArray(Symbol.intern("clojure.core", "next"), s)))));
+                                step)));
     }
 
     private static Object expandFor(PersistentVector seqExprs, int idx, Object body) {
@@ -3213,7 +3243,7 @@ public final class Core {
             case 41: { Object x = _a; return (x instanceof clojure.lang.Counted); }
             case 42: { Object x = _a; return (x instanceof clojure.lang.IFn); }
             case 43: { Object x = _a; return ((x instanceof clojure.lang.Fn || x instanceof Fn) && !(x instanceof Keyword || x instanceof Symbol
-                || x instanceof clojure.lang.IPersistentCollection || x instanceof clojure.lang.ITransientCollection || x instanceof PersistentColl)); }
+                || x instanceof Var || x instanceof clojure.lang.IPersistentCollection || x instanceof clojure.lang.ITransientCollection || x instanceof PersistentColl)); }
             case 44: { Object x = _a; return (x instanceof Var); }
             case 45: { Object x = _a; return (x instanceof Class<?>); }
             case 46: { Object x = _a; return (RT.seq(x) == null); }
@@ -3345,6 +3375,11 @@ public final class Core {
                 if (coll instanceof PersistentVector pv) return pv;
                 if (coll instanceof LongRange lr) return PersistentVector.createFromLongRange(lr);
                 if (coll instanceof LongArraySeq las) return PersistentVector.createFromLongArraySeq(las);
+                if (coll instanceof clojure.lang.IReduceInit ri) {
+                    PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
+                    tv = (PersistentVector.TransientVector) ri.reduce(CONJ_BANG_RF, tv);
+                    return tv.persistent();
+                }
                 return PersistentVector.createFromISeq(RT.seq(coll));
             }
             case 87: {
@@ -3573,7 +3608,11 @@ public final class Core {
             Symbol s = (Symbol) sym;
             Var v = Compiler.lookupVar(RT.currentNS(), s, false);
             if (v != null) return v;
-            return Interop.resolveClass(RT.currentNS(), s.toString());
+            Class<?> c = Interop.resolveClass(RT.currentNS(), s.toString());
+            if (c == null && s.ns != null && Interop.isArrayDimToken(s.name)) {
+                throw RT.sneakyThrow(new ClassNotFoundException(s.ns));
+            }
+            return c;
         
             }
             case 137: return Compiler.eval(_a);
@@ -3976,7 +4015,7 @@ public final class Core {
                     ret = ret.assoc(me.getKey(), me.getValue());
                 }
             }
-            return ret.persistent();
+            return restoreMeta(m, ret.persistent());
         
             }
             case 58: {
@@ -3997,6 +4036,7 @@ public final class Core {
                     int s = (int) Numbers.toLong(start);
                     if (v instanceof PersistentVector pv) return pv.subVec(s, pv.cnt);
                     if (v instanceof PersistentVector.SubVec sv) return sv.subVec(s, sv.count());
+                    if (v instanceof Vec gv) return gv.subVec(s, gv.cnt);
                     throw new ClassCastException("subvec expects a vector: " + v);
                 
             }
@@ -4162,6 +4202,7 @@ public final class Core {
                     int e = (int) Numbers.toLong(end);
                     if (v instanceof PersistentVector pv) return pv.subVec(s, e);
                     if (v instanceof PersistentVector.SubVec sv) return sv.subVec(s, e);
+                    if (v instanceof Vec gv) return gv.subVec(s, e);
                     throw new ClassCastException("subvec expects a vector: " + v);
                 
             }
@@ -4479,27 +4520,27 @@ public final class Core {
             case 32: {
                 Object[] args = _args;
             PersistentHashMap ret = PersistentHashMap.EMPTY;
-            boolean allNil = true;
+            Object firstNonNil = null;
             for (Object a : args) {
                 if (a != null) {
-                    allNil = false;
+                    if (firstNonNil == null) firstNonNil = a;
                     for (ISeq s = RT.seq(a); s != null; s = s.next()) {
                         Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
                         ret = ret.assoc(e.getKey(), e.getValue());
                     }
                 }
             }
-            return allNil ? null : ret;
+            return firstNonNil == null ? null : restoreMeta(firstNonNil, ret);
         
             }
             case 33: {
                 Object[] args = _args;
             Fn f = (Fn) args[0];
             PersistentHashMap ret = PersistentHashMap.EMPTY;
-            boolean allNil = true;
+            Object firstNonNil = null;
             for (int i = 1; i < args.length; i++) {
                 if (args[i] != null) {
-                    allNil = false;
+                    if (firstNonNil == null) firstNonNil = args[i];
                     for (ISeq s = RT.seq(args[i]); s != null; s = s.next()) {
                         Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
                         Object k = e.getKey();
@@ -4512,7 +4553,7 @@ public final class Core {
                     }
                 }
             }
-            return allNil ? null : ret;
+            return firstNonNil == null ? null : restoreMeta(firstNonNil, ret);
         
             }
             case 34: {
@@ -5145,7 +5186,7 @@ public final class Core {
             for (int i = 1; i < args.length; i++) {
                 Object form = args[i];
                 if (form instanceof ISeq s) {
-                    acc = RT.cons(s.first(), RT.cons(acc, s.next()));
+                    acc = restoreMeta(form, RT.cons(s.first(), RT.cons(acc, s.next())));
                 } else {
                     acc = PersistentList.createFromArray(form, acc);
                 }
@@ -5162,7 +5203,7 @@ public final class Core {
                     List<Object> items = new ArrayList<>();
                     for (ISeq p = s.seq(); p != null; p = p.next()) items.add(p.first());
                     items.add(acc);
-                    acc = PersistentList.create(items);
+                    acc = restoreMeta(form, PersistentList.create(items));
                 } else {
                     acc = PersistentList.createFromArray(form, acc);
                 }

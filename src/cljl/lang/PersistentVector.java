@@ -995,12 +995,8 @@ public final class PersistentVector extends clojure.lang.PersistentVector
         }
 
         private void ensureEditable() {
-            Thread owner = root.edit.get();
-            if (owner == null) {
+            if (root.edit.get() == null) {
                 throw new IllegalAccessError("Transient used after persistent! call");
-            }
-            if (owner != Thread.currentThread()) {
-                throw new IllegalAccessError("Transient used by non-owner thread");
             }
         }
 

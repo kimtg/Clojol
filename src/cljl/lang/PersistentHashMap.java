@@ -201,7 +201,7 @@ public final class PersistentHashMap extends clojure.lang.PersistentHashMap
     }
 
     public PersistentHashMap empty() {
-        return EMPTY;
+        return meta == null ? EMPTY : EMPTY.withMeta(meta);
     }
 
     public PersistentHashMap without(Object key) {
@@ -963,9 +963,7 @@ public final class PersistentHashMap extends clojure.lang.PersistentHashMap
         }
 
         private void ensureEditable() {
-            Thread owner = edit.get();
-            if (owner == null) throw new IllegalAccessError("Transient used after persistent! call");
-            if (owner != Thread.currentThread()) throw new IllegalAccessError("Transient used by non-owner thread");
+            if (edit.get() == null) throw new IllegalAccessError("Transient used after persistent! call");
         }
 
         public TransientHashMap assoc(Object key, Object val) {

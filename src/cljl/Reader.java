@@ -1269,6 +1269,19 @@ public final class Reader {
             throw readerError("arg literal must be %, %& or %integer: " + s);
         }
 
+        int slashIdx = s.indexOf('/');
+        if (s.endsWith(":") && !s.equals(":")) {
+            throw readerError("Invalid token: " + s);
+        }
+        if (slashIdx > 0 && slashIdx < s.length() - 1) {
+            String symName = s.substring(slashIdx + 1);
+            char c0 = symName.charAt(0);
+            if (c0 >= '0' && c0 <= '9') {
+                if (!(symName.length() == 1 && c0 >= '1' && c0 <= '9')) {
+                    throw readerError("Invalid token: " + s);
+                }
+            }
+        }
         return Symbol.intern(s);
     }
 

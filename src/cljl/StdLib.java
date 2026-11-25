@@ -82,7 +82,7 @@ public final class StdLib {
         ns.intern("lower-case", Fn.of1("lower-case", s -> s.toString().toLowerCase(Locale.ROOT)));
         ns.intern("upper-case", Fn.of1("upper-case", s -> s.toString().toUpperCase(Locale.ROOT)));
         ns.intern("reverse", Fn.of1("reverse", s -> new StringBuilder(s.toString()).reverse().toString()));
-        ns.intern("trim", Fn.of1("trim", s -> s.toString().trim()));
+        ns.intern("trim", Fn.of1("trim", s -> s.toString().strip()));
         ns.intern("triml", Fn.of1("triml", s -> s.toString().stripLeading()));
         ns.intern("trimr", Fn.of1("trimr", s -> s.toString().stripTrailing()));
         ns.intern("trim-newline", Fn.of1("trim-newline", s -> {
@@ -246,7 +246,7 @@ public final class StdLib {
             return t.persistent();
         }));
         ns.intern("intersection", Fn.ofVarargs("intersection", args -> {
-            if (args.length == 0) return PersistentHashSet.EMPTY;
+            if (args.length == 0) throw new clojure.lang.ArityException(0, "clojure.set/intersection");
             if (args.length == 1) return args[0];
             if (args[0] == null) return PersistentHashSet.EMPTY;
             for (int i = 1; i < args.length; i++) {
@@ -291,7 +291,9 @@ public final class StdLib {
                 Object elem = s.first();
                 if (RT.truthy(p.invoke(elem))) t = t.conj(elem);
             }
-            return t.persistent();
+            PersistentHashSet res = t.persistent();
+            if (xset instanceof IMeta im && im.meta() != null) res = res.withMeta(im.meta());
+            return res;
         }));
         ns.intern("subset?", Fn.of2("subset?", (s1, s2) -> {
             if (s1 == null) return Boolean.TRUE;
@@ -328,14 +330,18 @@ public final class StdLib {
             for (ISeq s = RT.seq(xrel); s != null; s = s.next()) {
                 t = t.conj(selectKeysSet(s.first(), keySet));
             }
-            return t.persistent();
+            PersistentHashSet res = t.persistent();
+            if (xrel instanceof IMeta im && im.meta() != null) res = res.withMeta(im.meta());
+            return res;
         }));
         ns.intern("rename", Fn.of2("rename", (xrel, kmap) -> {
             PersistentHashSet.TransientHashSet t = PersistentHashSet.EMPTY.asTransient();
             for (ISeq s = RT.seq(xrel); s != null; s = s.next()) {
                 t = t.conj(renameKeysImpl(s.first(), kmap));
             }
-            return t.persistent();
+            PersistentHashSet res = t.persistent();
+            if (xrel instanceof IMeta im && im.meta() != null) res = res.withMeta(im.meta());
+            return res;
         }));
         ns.intern("index", Fn.of2("index", (xrel, ks) -> {
             Set<Object> keySet = toKeySet(ks);
@@ -414,19 +420,28 @@ public final class StdLib {
         for (Object k : ks) {
             if (RT.contains(m, k)) t = t.assoc(k, RT.get(m, k));
         }
-        return t.persistent();
+        PersistentHashMap res = t.persistent();
+        if (m instanceof IMeta im && im.meta() != null) res = res.withMeta(im.meta());
+        return res;
     }
 
     private static Object renameKeysImpl(Object m, Object kmap) {
         Object ret = m;
+        List<Object[]> toAssoc = new ArrayList<>();
         for (ISeq s = RT.seq(kmap); s != null; s = s.next()) {
             Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
             Object oldk = e.getKey();
             Object newk = e.getValue();
-            if (RT.contains(ret, oldk)) {
-                Object val = RT.get(ret, oldk);
-                ret = RT.assoc(RT.dissoc(ret, oldk), newk, val);
+            if (RT.contains(m, oldk)) {
+                toAssoc.add(new Object[]{newk, RT.get(m, oldk)});
+                ret = RT.dissoc(ret, oldk);
             }
+        }
+        for (Object[] pair : toAssoc) {
+            ret = RT.assoc(ret, pair[0], pair[1]);
+        }
+        if (m instanceof IMeta im && im.meta() != null && ret instanceof IObj iobj) {
+            ret = iobj.withMeta(im.meta());
         }
         return ret;
     }
@@ -491,36 +506,40 @@ public final class StdLib {
         LOADED.add("clojure.walk");
     }
 
+    private static Object preserveMeta(Object orig, Object res) {
+        if (orig instanceof IMeta im && im.meta() != null && res instanceof IObj iobj) {
+            return iobj.withMeta(im.meta());
+        }
+        return res;
+    }
+
     private static Object walkImpl(Fn inner, Fn outer, Object form) {
-        if (form instanceof PersistentVector pv) {
-            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
-            for (int i = 0; i < pv.cnt; i++) tv = tv.conj(inner.invoke(pv.nth(i)));
-            return outer.invoke(tv.persistent());
+        if (form instanceof clojure.lang.IPersistentList || form instanceof PersistentList || form instanceof PersistentList.EmptyList) {
+            List<Object> list = new ArrayList<>();
+            for (ISeq s = RT.seq(form); s != null; s = s.next()) list.add(inner.invoke(s.first()));
+            return outer.invoke(preserveMeta(form, PersistentList.create(list)));
         }
-        if (form instanceof IPersistentMap pm) {
-            PersistentHashMap.TransientHashMap tm = PersistentHashMap.EMPTY.asTransient();
-            for (ISeq s = pm.seq(); s != null; s = s.next()) {
-                Object walkedEntry = inner.invoke(s.first());
-                if (walkedEntry instanceof Map.Entry<?, ?> e) {
-                    tm = tm.assoc(e.getKey(), e.getValue());
-                } else if (walkedEntry instanceof IPersistentVector pv && pv.count() == 2) {
-                    tm = tm.assoc(pv.nth(0), pv.nth(1));
-                }
-            }
-            return outer.invoke(tm.persistent());
-        }
-        if (form instanceof PersistentHashSet ps) {
-            PersistentHashSet.TransientHashSet ts = PersistentHashSet.EMPTY.asTransient();
-            for (ISeq s = ps.seq(); s != null; s = s.next()) ts = ts.conj(inner.invoke(s.first()));
-            return outer.invoke(ts.persistent());
-        }
-        if (form instanceof PersistentHashMap.MapEntry me) {
-            return outer.invoke(new PersistentHashMap.MapEntry(inner.invoke(me.key), inner.invoke(me.val)));
+        if (form instanceof clojure.lang.IMapEntry me) {
+            return outer.invoke(new PersistentHashMap.MapEntry(inner.invoke(me.key()), inner.invoke(me.val())));
         }
         if (form instanceof ISeq seq) {
             List<Object> list = new ArrayList<>();
             for (ISeq s = seq.seq(); s != null; s = s.next()) list.add(inner.invoke(s.first()));
-            return outer.invoke(PersistentList.create(list));
+            return outer.invoke(preserveMeta(form, PersistentList.create(list)));
+        }
+        if (form instanceof clojure.lang.IRecord) {
+            Object acc = form;
+            for (ISeq s = RT.seq(form); s != null; s = s.next()) {
+                acc = RT.conj(acc, inner.invoke(s.first()));
+            }
+            return outer.invoke(preserveMeta(form, acc));
+        }
+        if (form instanceof clojure.lang.IPersistentCollection pc) {
+            Object acc = pc.empty();
+            for (ISeq s = RT.seq(form); s != null; s = s.next()) {
+                acc = RT.conj(acc, inner.invoke(s.first()));
+            }
+            return outer.invoke(preserveMeta(form, acc));
         }
         return outer.invoke(form);
     }
@@ -1074,105 +1093,123 @@ public final class StdLib {
             return null;
         }));
 
-        ns.internMacro("is", Fn.ofVarargs("is", args -> {
-            Object form = args[0];
-            Object msg = args.length > 1 ? args[1] : null;
-            Object quotedForm = PersistentList.createFromArray(Symbol.intern("quote"), form);
-            if (form instanceof ISeq fseq && fseq.first() instanceof Symbol head
-                    && (head.ns == null || "clojure.test".equals(head.ns))) {
-                if ("thrown?".equals(head.name)) {
-                    ISeq rest = fseq.next();
-                    if (rest == null || rest.next() == null) {
-                        throw new IllegalArgumentException("thrown? requires an exception class and body expression");
-                    }
-                    Object exCls = rest.first();
-                    List<Object> tryBody = new ArrayList<>();
-                    tryBody.add(Symbol.intern("do"));
-                    for (ISeq b = rest.next(); b != null; b = b.next()) tryBody.add(b.first());
-                    Symbol errSym = Symbol.intern("e__" + RT.nextID());
-                    return PersistentList.createFromArray(
-                            Symbol.intern("try"),
-                            PersistentList.create(tryBody),
-                            PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
-                                    PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("fail"),
-                                            Keyword.intern("message"), msg,
-                                            Keyword.intern("expected"), quotedForm,
-                                            Keyword.intern("actual"), null)),
-                            null,
-                            PersistentList.createFromArray(
-                                    Symbol.intern("catch"), exCls, errSym,
-                                    PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
-                                            PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("pass"),
-                                                    Keyword.intern("message"), msg,
-                                                    Keyword.intern("expected"), quotedForm,
-                                                    Keyword.intern("actual"), errSym)),
-                                    errSym));
-                }
-                if ("thrown-with-msg?".equals(head.name)) {
-                    ISeq rest = fseq.next();
-                    ISeq afterCls = rest != null ? rest.next() : null;
-                    if (rest == null || afterCls == null || afterCls.next() == null) {
-                        throw new IllegalArgumentException("thrown-with-msg? requires an exception class, regex, and body expression");
-                    }
-                    Object exCls = rest.first();
-                    Object reForm = afterCls.first();
-                    List<Object> tryBody = new ArrayList<>();
-                    tryBody.add(Symbol.intern("do"));
-                    for (ISeq b = afterCls.next(); b != null; b = b.next()) tryBody.add(b.first());
-                    Symbol errSym = Symbol.intern("e__" + RT.nextID());
-                    Symbol msgSym = Symbol.intern("m__" + RT.nextID());
-                    return PersistentList.createFromArray(
-                            Symbol.intern("try"),
-                            PersistentList.create(tryBody),
-                            PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
-                                    PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("fail"),
-                                            Keyword.intern("message"), msg,
-                                            Keyword.intern("expected"), quotedForm,
-                                            Keyword.intern("actual"), null)),
-                            null,
-                            PersistentList.createFromArray(
-                                    Symbol.intern("catch"), exCls, errSym,
-                                    PersistentList.createFromArray(
-                                            Symbol.intern("let"),
-                                            PersistentVector.createOwning(msgSym,
-                                                    PersistentList.createFromArray(Symbol.intern("."), errSym, Symbol.intern("getMessage"))),
-                                            PersistentList.createFromArray(
-                                                    Symbol.intern("if"),
-                                                    PersistentList.createFromArray(Symbol.intern("clojure.core", "and"),
-                                                            msgSym,
-                                                            PersistentList.createFromArray(Symbol.intern("clojure.core", "re-find"), reForm, msgSym)),
-                                                    PersistentList.createFromArray(Symbol.intern("do"),
-                                                            PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
-                                                                    PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("pass"),
-                                                                            Keyword.intern("message"), msg,
-                                                                            Keyword.intern("expected"), quotedForm,
-                                                                            Keyword.intern("actual"), errSym)),
-                                                            errSym),
-                                                    PersistentList.createFromArray(Symbol.intern("do"),
-                                                            PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
-                                                                    PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("fail"),
-                                                                            Keyword.intern("message"), msg,
-                                                                            Keyword.intern("expected"), quotedForm,
-                                                                            Keyword.intern("actual"), errSym)),
-                                                            null)))));
-                }
+        ns.intern("file-and-line", Fn.of2("file-and-line", (exObj, depthObj) -> {
+            Throwable t = (Throwable) exObj;
+            int depth = toInt(depthObj);
+            StackTraceElement[] st = t.getStackTrace();
+            if (depth >= 0 && depth < st.length) {
+                StackTraceElement s = st[depth];
+                return PersistentHashMap.create(
+                        Keyword.intern("file"), s.getFileName(),
+                        Keyword.intern("line"), (long) s.getLineNumber());
             }
-            Symbol resSym = Symbol.intern("res__" + RT.nextID());
-            return PersistentList.createFromArray(
-                    Symbol.intern("let"),
-                    PersistentVector.createOwning(resSym, form),
-                    PersistentList.createFromArray(
-                            Symbol.intern("if"), resSym,
-                            PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
-                                    PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("pass"),
-                                            Keyword.intern("message"), msg)),
-                            PersistentList.createFromArray(Symbol.intern("clojure.test", "do-report"),
-                                    PersistentHashMap.create(Keyword.intern("type"), Keyword.intern("fail"),
-                                            Keyword.intern("message"), msg,
-                                            Keyword.intern("expected"), quotedForm,
-                                            Keyword.intern("actual"), resSym))),
-                    resSym);
+            return PersistentHashMap.create(Keyword.intern("file"), null, Keyword.intern("line"), null);
         }));
+
+        LOADED.add("clojure.test");
+        Var.pushThreadBindings(Map.of(RT.CURRENT_NS, ns));
+        try {
+            Compiler.load("""
+                (clojure.core/refer-clojure)
+
+                (defn function? [x]
+                  (if (symbol? x)
+                    (when-let [v (resolve x)]
+                      (and (var? v)
+                           (not (:macro (meta v)))
+                           (fn? @v)))
+                    (fn? x)))
+
+                (defn __report-any [value msg form]
+                  (if value
+                    (do-report {:type :pass, :message msg, :expected form, :actual value})
+                    (do-report {:type :fail, :message msg, :expected form, :actual value}))
+                  value)
+
+                (defn __report-pred [pred values msg form pred-sym]
+                  (let [result (apply pred values)]
+                    (if result
+                      (do-report {:type :pass, :message msg, :expected form, :actual (cons pred values)})
+                      (do-report {:type :fail, :message msg, :expected form, :actual (list 'not (cons pred-sym values))}))
+                    result))
+
+                (defn __report-err [msg form t]
+                  (do-report {:type :error, :message msg, :expected form, :actual t}))
+
+                (defn assert-any [msg form]
+                  `(__report-any ~form ~msg '~form))
+
+                (defn assert-predicate [msg form]
+                  (let [args (rest form)
+                        pred (first form)]
+                    `(__report-pred ~pred (list ~@args) ~msg '~form '~pred)))
+
+                (defmulti assert-expr (fn [msg form]
+                                        (cond
+                                          (nil? form) :always-fail
+                                          (seq? form) (first form)
+                                          :else :default)))
+
+                (defmethod assert-expr :always-fail [msg form]
+                  `(do-report {:type :fail, :message ~msg}))
+
+                (defmethod assert-expr :default [msg form]
+                  (if (and (sequential? form) (function? (first form)))
+                    (assert-predicate msg form)
+                    (assert-any msg form)))
+
+                (defmethod assert-expr 'instance? [msg form]
+                  `(let [klass# ~(nth form 1)
+                         object# ~(nth form 2)
+                         result# (instance? klass# object#)]
+                     (if result#
+                       (do-report {:type :pass, :message ~msg,
+                                   :expected '~form, :actual (class object#)})
+                       (do-report {:type :fail, :message ~msg,
+                                   :expected '~form, :actual (class object#)}))
+                     result#))
+
+                (defmethod assert-expr 'thrown? [msg form]
+                  (let [klass (second form)
+                        body (nthnext form 2)]
+                    `(try ~@body
+                          (do-report {:type :fail, :message ~msg,
+                                      :expected '~form, :actual nil})
+                          (catch ~klass e#
+                            (do-report {:type :pass, :message ~msg,
+                                        :expected '~form, :actual e#})
+                            e#))))
+
+                (defmethod assert-expr 'thrown-with-msg? [msg form]
+                  (let [klass (nth form 1)
+                        re (nth form 2)
+                        body (nthnext form 3)]
+                    `(try ~@body
+                          (do-report {:type :fail, :message ~msg, :expected '~form, :actual nil})
+                          (catch ~klass e#
+                            (let [m# (.getMessage e#)]
+                              (if (and m# (re-find ~re m#))
+                                (do-report {:type :pass, :message ~msg,
+                                            :expected '~form, :actual e#})
+                                (do-report {:type :fail, :message ~msg,
+                                            :expected '~form, :actual e#})))
+                            e#))))
+
+                (defmethod assert-expr 'do [msg form]
+                  `(do ~@(map (fn [f] `(is ~f ~msg)) (rest form))))
+
+                (defmacro try-expr [msg form]
+                  `(try ~(assert-expr msg form)
+                        (catch Throwable t#
+                          (__report-err ~msg '~form t#))))
+
+                (defmacro is
+                  ([form] `(is ~form nil))
+                  ([form msg] `(try-expr ~msg ~form)))
+                """, "clojure/test.clj");
+        } finally {
+            Var.popThreadBindings();
+        }
 
         ns.internMacro("are", Fn.ofVarargs("are", args -> {
             if (args.length < 2 || !(args[0] instanceof PersistentVector argv)) {

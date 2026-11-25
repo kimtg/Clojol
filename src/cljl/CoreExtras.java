@@ -2380,7 +2380,9 @@ public final class CoreExtras {
                 Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
                 tm = tm.assoc(fn.invoke(e.getKey()), e.getValue());
             }
-            return tm.persistent();
+            PersistentHashMap res = tm.persistent();
+            if (m instanceof IMeta im && im.meta() != null) res = res.withMeta(im.meta());
+            return res;
         
             }
             case 24: {
@@ -2391,6 +2393,9 @@ public final class CoreExtras {
             for (ISeq s = RT.seq(m); s != null; s = s.next()) {
                 Map.Entry<?, ?> e = (Map.Entry<?, ?>) s.first();
                 ret = ret.assoc(e.getKey(), fn.invoke(e.getValue()));
+            }
+            if (m instanceof IMeta im && im.meta() != null && ret instanceof IObj iobj) {
+                ret = (Associative) iobj.withMeta(im.meta());
             }
             return ret;
         
@@ -2430,9 +2435,12 @@ public final class CoreExtras {
                         Object v = RT.get(smap, x, REDUCED_NONE);
                         out.add(v == REDUCED_NONE ? x : v);
                     }
-                    return coll instanceof PersistentVector
-                            ? PersistentVector.create(out)
-                            : PersistentList.create(out);
+                    if (coll instanceof PersistentVector) {
+                        PersistentVector v = PersistentVector.create(out);
+                        if (coll instanceof IMeta im && im.meta() != null) v = v.withMeta(im.meta());
+                        return v;
+                    }
+                    return PersistentList.create(out);
                 
             }
             case 31: {
@@ -2464,7 +2472,11 @@ public final class CoreExtras {
             Symbol s = (Symbol) sym;
             Var v = Compiler.lookupVar(n, s, false);
             if (v != null) return v;
-            return Interop.resolveClass(n, s.toString());
+            Class<?> c = Interop.resolveClass(n, s.toString());
+            if (c == null && s.ns != null && Interop.isArrayDimToken(s.name)) {
+                throw RT.sneakyThrow(new ClassNotFoundException(s.ns));
+            }
+            return c;
         
             }
             case 38: {
@@ -2867,10 +2879,7 @@ public final class CoreExtras {
             case 11: { Object[] args = _args; return (subseqImpl((Sorted) args[0], false, args, 1)); }
             case 12: {
                 Object[] args = _args;
-            PersistentVector.TransientVector tv = PersistentVector.EMPTY.asTransient();
-            for (int i = 1; i < args.length; i++) tv = tv.conj(args[i]);
-            return tv.persistent();
-        
+                return Vec.createOf(args.length > 0 ? args[0] : null, args, 1);
             }
             case 13: { Object[] args = _args; return (PersistentStructMap.createSlotMap(PersistentList.createFromArray(args))); }
             case 14: {

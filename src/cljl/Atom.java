@@ -1526,7 +1526,7 @@ public final class Atom extends clojure.lang.Atom implements IRef, IMeta, IRefer
         @Override public boolean cancel(boolean mayInterruptIfRunning) { return fut.cancel(mayInterruptIfRunning); }
         @Override public boolean isCancelled() { return fut.isCancelled(); }
         @Override public boolean isDone() { return fut.isDone(); }
-        @Override public Object get() throws InterruptedException, ExecutionException { return fut.get(); }
+        @Override public Object get() { return deref(); }
         @Override public Object get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException { return fut.get(timeout, unit); }
 
         @Override

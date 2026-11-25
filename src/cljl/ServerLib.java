@@ -57,6 +57,25 @@ public final class ServerLib {
         Keyword kArgs = Keyword.intern("args");
         Keyword kDaemon = Keyword.intern("server-daemon");
 
+        ns.intern("validate-opts", Fn.of1("validate-opts", optsObj -> {
+            if (!(optsObj instanceof IPersistentMap m)) {
+                throw new IllegalArgumentException("Server options must be a map");
+            }
+            Object name = m.valAt(kName);
+            Object port = m.valAt(kPort);
+            Object accept = m.valAt(kAccept);
+            if (!(name instanceof String) || ((String) name).isEmpty()) {
+                throw new IllegalArgumentException("Missing or invalid :name in server opts: " + optsObj);
+            }
+            if (!(port instanceof Number) || ((Number) port).intValue() < 0 || ((Number) port).intValue() > 65535) {
+                throw new IllegalArgumentException("Missing or invalid :port in server opts: " + optsObj);
+            }
+            if (!(accept instanceof Symbol)) {
+                throw new IllegalArgumentException("Missing or invalid :accept symbol in server opts: " + optsObj);
+            }
+            return null;
+        }));
+
         ns.intern("resolve-fn", Fn.of1("resolve-fn", sym -> {
             if (!(sym instanceof Symbol s)) return sym;
             if (s.ns != null) Core.loadLib(s.ns);
