@@ -684,12 +684,17 @@
             (is (str/includes? out "60"))
             (is (str/includes? out "90"))))
 
-        ;; JIT flags -Dcljl.jit.automemo=false and -Dcljl.jit.cse=false
+        ;; JIT flags -Dcljl.jit.automemo=false, -Dcljl.jit.cse=false, and -Dcljl.jit.tco=false
         (let [r (run-cljl {:dir tmp :env env}
                           ["-J-Dcljl.jit.automemo=false" "-J-Dcljl.jit.cse=false" "-e"
-                           "(do (defn fib [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 25))"])]
+                           "(do (defn fib [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) [(fib 25) (fib -5)])"])]
           (is (= 0 (:exit r)) (:err r))
-          (is (= "75025" (str/trim (:out r)))))
+          (is (= "[75025 -5]" (str/trim (:out r)))))
+        (let [r (run-cljl {:dir tmp :env env}
+                          ["-J-Dcljl.jit.automemo=false" "-J-Dcljl.jit.cse=false" "-J-Dcljl.jit.tco=false" "-e"
+                           "(do (defn s [n] (if (<= n 0) 0 (+ n (s (- n 1))))) (s 100))"])]
+          (is (= 0 (:exit r)) (:err r))
+          (is (= "5050" (str/trim (:out r)))))
         (finally
           (delete-tree! tmp))))))
 

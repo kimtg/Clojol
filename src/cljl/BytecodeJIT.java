@@ -26,6 +26,7 @@ public final class BytecodeJIT {
     private static final boolean STRICT_JIT = Boolean.getBoolean("cljl.jit.strict");
     private static final boolean AUTO_MEMO = !"false".equals(System.getProperty("cljl.jit.automemo"));
     private static final boolean CSE = !"false".equals(System.getProperty("cljl.jit.cse"));
+    private static final boolean TCO = !"false".equals(System.getProperty("cljl.jit.tco"));
     private static final AtomicInteger CLASS_ID = new AtomicInteger(0);
     private static final ConcurrentHashMap<String, Object[]> PENDING_CONSTS = new ConcurrentHashMap<>();
 
@@ -1189,20 +1190,206 @@ public final class BytecodeJIT {
         cg.finish();
     }
 
-    private static void emitStaticFastPrimWorker(
-            ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName, boolean canSelfInline, int selfCallCount) {
-        if (canEmitPureMemoPrim(arity, ps, selfCallCount)) {
-            emitPureMemoPrimWorkers(ce, m, arity, ps, fastName);
-            return;
+    private static final class AssocTailLoopSpec {
+        final IfNode iff;
+        final boolean recIsElse;
+        final Node baseBranch;
+        final Node otherExpr;
+        final Node[] tailArgs;
+        final boolean isAdd;
+        final boolean unchecked;
+        final int nonNegSlot;
+        final int aboveMinSlot;
+        final int belowMaxSlot;
+
+        AssocTailLoopSpec(IfNode iff, boolean recIsElse, Node baseBranch, Node otherExpr, Node[] tailArgs,
+                          boolean isAdd, boolean unchecked, int nonNegSlot, int aboveMinSlot, int belowMaxSlot) {
+            this.iff = iff;
+            this.recIsElse = recIsElse;
+            this.baseBranch = baseBranch;
+            this.otherExpr = otherExpr;
+            this.tailArgs = tailArgs;
+            this.isAdd = isAdd;
+            this.unchecked = unchecked;
+            this.nonNegSlot = nonNegSlot;
+            this.aboveMinSlot = aboveMinSlot;
+            this.belowMaxSlot = belowMaxSlot;
         }
-        if (CSE) {
-            LinearRecOptimizer.LinearRecSpec linearSpec = LinearRecOptimizer.matchLinearDecrementRec(ce, m, arity, ps);
-            if (linearSpec != null) {
-                LinearRecOptimizer.emitLinearDecrementWorkers(ce, m, ps, fastName, linearSpec);
-                return;
+    }
+
+    private static Node[] matchDirectSelfCallArgs(Node n, Var ownerVar, int selfSlot, int arity) {
+        if (arity == 1) {
+            if (n instanceof VarCall1Node c && ownerVar != null && c.v == ownerVar) return new Node[]{c.a};
+            if (n instanceof Call1Node c && selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot) return new Node[]{c.a};
+        } else if (arity == 2) {
+            if (n instanceof VarCall2Node c && ownerVar != null && c.v == ownerVar) return new Node[]{c.a, c.b};
+            if (n instanceof Call2Node c && selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot) return new Node[]{c.a, c.b};
+        } else if (arity == 3) {
+            if (n instanceof VarCall3Node c && ownerVar != null && c.v == ownerVar) return new Node[]{c.a, c.b, c.c};
+            if (n instanceof Call3Node c && selfSlot != -1 && c.fn instanceof LocalNode ln && ln.slot == selfSlot) return new Node[]{c.a, c.b, c.c};
+        }
+        return null;
+    }
+
+    private static boolean isSimplePureLongExpr(Node n, AnalysisResult analysis) {
+        if (n instanceof ConstNode cn) return cn.isLong;
+        if (n instanceof LocalNode ln) return ln.slot >= 0 && ln.slot < analysis.slotTypes.length && analysis.slotTypes[ln.slot] == ValType.LONG;
+        if (n instanceof Add2Node a) return isSimplePureLongExpr(a.a, analysis) && isSimplePureLongExpr(a.b, analysis);
+        if (n instanceof Sub2Node a) return isSimplePureLongExpr(a.a, analysis) && isSimplePureLongExpr(a.b, analysis);
+        if (n instanceof Mul2Node a) return isSimplePureLongExpr(a.a, analysis) && isSimplePureLongExpr(a.b, analysis);
+        if (n instanceof UncheckedAdd2Node a) return isSimplePureLongExpr(a.a, analysis) && isSimplePureLongExpr(a.b, analysis);
+        if (n instanceof UncheckedSub2Node a) return isSimplePureLongExpr(a.a, analysis) && isSimplePureLongExpr(a.b, analysis);
+        if (n instanceof UncheckedMul2Node a) return isSimplePureLongExpr(a.a, analysis) && isSimplePureLongExpr(a.b, analysis);
+        if (n instanceof IncNode a) return isSimplePureLongExpr(a.a, analysis);
+        if (n instanceof DecNode a) return isSimplePureLongExpr(a.a, analysis);
+        return false;
+    }
+
+    private static boolean isArgProvenNonNeg(Node arg, int boundedSlot, long minBound) {
+        if (arg instanceof ConstNode cn) return cn.isLong && cn.longVal >= 0L;
+        if (boundedSlot == -1 || minBound < 0L) return false;
+        if (arg instanceof LocalNode ln) return ln.slot == boundedSlot;
+        if (arg instanceof DecNode d && d.a instanceof LocalNode ln && ln.slot == boundedSlot) return minBound >= 1L;
+        if (arg instanceof UncheckedDecNode d && d.a instanceof LocalNode ln && ln.slot == boundedSlot) return minBound >= 1L;
+        if (arg instanceof Sub2Node s && s.a instanceof LocalNode ln && ln.slot == boundedSlot
+                && s.b instanceof ConstNode cn && cn.isLong && cn.longVal >= 0L) {
+            return minBound >= cn.longVal;
+        }
+        if (arg instanceof UncheckedSub2Node s && s.a instanceof LocalNode ln && ln.slot == boundedSlot
+                && s.b instanceof ConstNode cn && cn.isLong && cn.longVal >= 0L) {
+            return minBound >= cn.longVal;
+        }
+        return false;
+    }
+
+    private static boolean isExprProvenAtLeast(
+            Node expr, long minReq, int boundedSlot, long recMinVal, Var ownerVar, int selfSlot, int arity) {
+        if (expr instanceof ConstNode cn) return cn.isLong && cn.longVal >= minReq;
+        if (expr instanceof LocalNode ln) return ln.slot == boundedSlot && boundedSlot != -1 && recMinVal >= minReq;
+        Node[] scArgs = matchDirectSelfCallArgs(expr, ownerVar, selfSlot, arity);
+        if (scArgs != null) {
+            // Only inductive if arity == 1 and recursive argument stays >= 0 (or boundedSlot stays >= 0)
+            return arity == 1 && isArgProvenNonNeg(scArgs[0], boundedSlot, recMinVal);
+        }
+        if (expr instanceof IncNode a) {
+            return isExprProvenAtLeast(a.a, Math.max(0L, minReq - 1L), boundedSlot, recMinVal, ownerVar, selfSlot, arity);
+        }
+        if (expr instanceof Add2Node a) {
+            return isExprProvenAtLeast(a.a, 0L, boundedSlot, recMinVal, ownerVar, selfSlot, arity)
+                    && isExprProvenAtLeast(a.b, minReq, boundedSlot, recMinVal, ownerVar, selfSlot, arity);
+        }
+        if (expr instanceof Mul2Node a) {
+            return isExprProvenAtLeast(a.a, minReq, boundedSlot, recMinVal, ownerVar, selfSlot, arity)
+                    && isExprProvenAtLeast(a.b, minReq, boundedSlot, recMinVal, ownerVar, selfSlot, arity);
+        }
+        return false;
+    }
+
+    private static AssocTailLoopSpec matchAssocTailLoop(ClassEmitter ce, FnMethod m, int arity, PrimSpec ps) {
+        if (!TCO || ps.analysis.returnType != ValType.LONG || arity < 1 || arity > 3) return null;
+        if (!(m.body instanceof IfNode iff)) return null;
+        if (containsSelfCall(iff.test, ce.ownerVar, m.selfSlot, arity)) return null;
+
+        boolean thenHasSelf = containsSelfCall(iff.thenNode, ce.ownerVar, m.selfSlot, arity);
+        boolean elseHasSelf = containsSelfCall(iff.elseNode, ce.ownerVar, m.selfSlot, arity);
+        if (thenHasSelf == elseHasSelf) return null;
+
+        boolean recIsElse = elseHasSelf;
+        Node baseBranch = recIsElse ? iff.thenNode : iff.elseNode;
+        Node recBranch = recIsElse ? iff.elseNode : iff.thenNode;
+
+        Node left, right;
+        boolean isAdd, unchecked;
+        if (recBranch instanceof Add2Node a) {
+            left = a.a; right = a.b; isAdd = true; unchecked = false;
+        } else if (recBranch instanceof UncheckedAdd2Node a) {
+            left = a.a; right = a.b; isAdd = true; unchecked = true;
+        } else if (recBranch instanceof Mul2Node a) {
+            left = a.a; right = a.b; isAdd = false; unchecked = false;
+        } else if (recBranch instanceof UncheckedMul2Node a) {
+            left = a.a; right = a.b; isAdd = false; unchecked = true;
+        } else {
+            return null;
+        }
+        if (ps.analysis.typeOf(left) != ValType.LONG || ps.analysis.typeOf(right) != ValType.LONG) return null;
+
+        Node[] leftSelf = matchDirectSelfCallArgs(left, ce.ownerVar, m.selfSlot, arity);
+        Node[] rightSelf = matchDirectSelfCallArgs(right, ce.ownerVar, m.selfSlot, arity);
+        Node[] tailArgs;
+        Node otherExpr;
+        if (rightSelf != null) {
+            tailArgs = rightSelf;
+            otherExpr = left;
+        } else if (leftSelf != null && isSimplePureLongExpr(right, ps.analysis)) {
+            tailArgs = leftSelf;
+            otherExpr = right;
+        } else {
+            return null;
+        }
+        for (Node ta : tailArgs) {
+            if (containsSelfCall(ta, ce.ownerVar, m.selfSlot, arity)) return null;
+        }
+
+        // Extract proven parameter bounds when entering recBranch
+        int nonNegSlot = -1, aboveMinSlot = -1, belowMaxSlot = -1;
+        long recMinVal = Long.MIN_VALUE;
+        if (iff.test instanceof Lt2Node lt && ps.analysis.typeOf(lt.a) == ValType.LONG && ps.analysis.typeOf(lt.b) == ValType.LONG) {
+            if (recIsElse && lt.a instanceof LocalNode ln && lt.b instanceof ConstNode cn && cn.isLong) {
+                if (cn.longVal >= 0L) nonNegSlot = ln.slot;
+                if (cn.longVal > Long.MIN_VALUE) aboveMinSlot = ln.slot;
+                recMinVal = cn.longVal;
+            } else if (!recIsElse && lt.a instanceof LocalNode ln) {
+                belowMaxSlot = ln.slot;
+            }
+        } else if (iff.test instanceof Lte2Node le && ps.analysis.typeOf(le.a) == ValType.LONG && ps.analysis.typeOf(le.b) == ValType.LONG) {
+            if (recIsElse && le.a instanceof LocalNode ln && le.b instanceof ConstNode cn && cn.isLong) {
+                aboveMinSlot = ln.slot;
+                if (cn.longVal >= -1L && cn.longVal < Long.MAX_VALUE) {
+                    nonNegSlot = ln.slot;
+                    recMinVal = cn.longVal + 1L;
+                }
+            }
+        } else if (iff.test instanceof Gt2Node gt && ps.analysis.typeOf(gt.a) == ValType.LONG && ps.analysis.typeOf(gt.b) == ValType.LONG) {
+            if (!recIsElse && gt.a instanceof LocalNode ln && gt.b instanceof ConstNode cn && cn.isLong) {
+                aboveMinSlot = ln.slot;
+                if (cn.longVal >= -1L && cn.longVal < Long.MAX_VALUE) {
+                    nonNegSlot = ln.slot;
+                    recMinVal = cn.longVal + 1L;
+                }
+            }
+        } else if (iff.test instanceof Gte2Node ge && ps.analysis.typeOf(ge.a) == ValType.LONG && ps.analysis.typeOf(ge.b) == ValType.LONG) {
+            if (!recIsElse && ge.a instanceof LocalNode ln && ge.b instanceof ConstNode cn && cn.isLong) {
+                if (cn.longVal >= 0L) nonNegSlot = ln.slot;
+                if (cn.longVal > Long.MIN_VALUE) aboveMinSlot = ln.slot;
+                recMinVal = cn.longVal;
             }
         }
 
+        // For checked + / *, prove monotonicity so left-reassociation has identical overflow semantics
+        if (!unchecked) {
+            long minReq = isAdd ? 0L : 1L;
+            boolean baseOk;
+            if (baseBranch instanceof ConstNode cn && cn.isLong && cn.longVal >= minReq) {
+                baseOk = true;
+            } else if (isAdd && arity == 1 && baseBranch instanceof LocalNode ln
+                    && ln.slot == nonNegSlot && nonNegSlot != -1 && recMinVal >= 0L
+                    && isArgProvenNonNeg(tailArgs[0], nonNegSlot, recMinVal)) {
+                baseOk = true;
+            } else {
+                baseOk = false;
+            }
+            if (!baseOk) return null;
+            if (!isExprProvenAtLeast(otherExpr, minReq, nonNegSlot, recMinVal, ce.ownerVar, m.selfSlot, arity)) {
+                return null;
+            }
+        }
+
+        return new AssocTailLoopSpec(iff, recIsElse, baseBranch, otherExpr, tailArgs,
+                isAdd, unchecked, nonNegSlot, aboveMinSlot, belowMaxSlot);
+    }
+
+    private static void emitAssocTailLoopWorker(
+            ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName, boolean canSelfInline, AssocTailLoopSpec spec) {
         int[] argJvmSlots = new int[arity];
         int nextArgSlot = 0;
         for (int i = 0; i < arity; i++) {
@@ -1212,7 +1399,6 @@ public final class BytecodeJIT {
         }
 
         SlotLayout layout = new SlotLayout(m, ps.analysis.slotTypes, nextArgSlot);
-        // Reuse incoming JVM argument slots directly for paramSlots when types match
         for (int i = 0; i < arity; i++) {
             int logicalSlot = m.paramSlots[i];
             if (ps.paramTypes[i] == layout.slotTypes[logicalSlot]) {
@@ -1238,12 +1424,166 @@ public final class BytecodeJIT {
             }
         }
 
+        // Fast-exit base case directly on entry (avoids acc init & final op on leaf calls)
+        Label loopInit = new Label();
+        if (spec.recIsElse) cg.emitBranchIfFalse(spec.iff.test, loopInit);
+        else cg.emitBranchIfTrue(spec.iff.test, loopInit);
+
+        boolean baseTerm = cg.emitReturnTyped(spec.baseBranch, ValType.LONG);
+        if (!baseTerm) {
+            cg.emitReturnInstruction(ValType.LONG);
+        }
+
+        cg.curStack = 0;
+        cg.markLabel(loopInit);
+        int accSlot = cg.allocTempLocal(2);
+        cg.ldcLong(spec.isAdd ? 0L : 1L);
+        cg.lstore(accSlot);
+
+        Label loopTop = new Label();
+        cg.markLabel(loopTop);
+
+        boolean addedNonNeg = spec.nonNegSlot != -1 && cg.nonNegativeLong.add(spec.nonNegSlot);
+        boolean addedAbove = spec.aboveMinSlot != -1 && cg.boundedAboveMinLong.add(spec.aboveMinSlot);
+        boolean addedBelow = spec.belowMaxSlot != -1 && cg.boundedBelowMaxLong.add(spec.belowMaxSlot);
+
+        // Evaluate otherExpr at stack depth 0, then combine into accSlot
+        cg.emitLong(spec.otherExpr);
+        cg.lload(accSlot);
+        if (spec.isAdd) {
+            if (spec.unchecked) cg.ladd();
+            else cg.invokestatic("java/lang/Math", "addExact", "(JJ)J", 4, 2);
+        } else {
+            if (spec.unchecked) cg.lmul();
+            else cg.invokestatic("java/lang/Math", "multiplyExact", "(JJ)J", 4, 2);
+        }
+        cg.lstore(accSlot);
+
+        // Compute next loop arguments and assign to param slots
+        for (int i = 0; i < arity; i++) {
+            ValType targetT = layout.slotTypes[m.paramSlots[i]];
+            cg.emitTyped(spec.tailArgs[i], targetT);
+        }
+        for (int i = arity - 1; i >= 0; i--) {
+            cg.storeLogicalSlot(m.paramSlots[i]);
+        }
+
+        if (addedNonNeg) cg.nonNegativeLong.remove(spec.nonNegSlot);
+        if (addedAbove) cg.boundedAboveMinLong.remove(spec.aboveMinSlot);
+        if (addedBelow) cg.boundedBelowMaxLong.remove(spec.belowMaxSlot);
+
+        if (spec.recIsElse) cg.emitBranchIfFalse(spec.iff.test, loopTop);
+        else cg.emitBranchIfTrue(spec.iff.test, loopTop);
+
+        cg.emitLong(spec.baseBranch);
+        cg.lload(accSlot);
+        if (spec.isAdd) {
+            if (spec.unchecked) cg.ladd();
+            else cg.invokestatic("java/lang/Math", "addExact", "(JJ)J", 4, 2);
+        } else {
+            if (spec.unchecked) cg.lmul();
+            else cg.invokestatic("java/lang/Math", "multiplyExact", "(JJ)J", 4, 2);
+        }
+        cg.lreturn();
+        cg.finish();
+    }
+
+    private static void emitStaticFastBody(
+            ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String methodName, boolean canSelfInline, boolean uncheckedLong) {
+        int[] argJvmSlots = new int[arity];
+        int nextArgSlot = 0;
+        for (int i = 0; i < arity; i++) {
+            argJvmSlots[i] = nextArgSlot;
+            ValType pt = ps.paramTypes[i];
+            nextArgSlot += (pt == ValType.LONG || pt == ValType.DOUBLE) ? 2 : 1;
+        }
+
+        SlotLayout layout = new SlotLayout(m, ps.analysis.slotTypes, nextArgSlot);
+        for (int i = 0; i < arity; i++) {
+            int logicalSlot = m.paramSlots[i];
+            if (ps.paramTypes[i] == layout.slotTypes[logicalSlot]) {
+                layout.jvmSlot[logicalSlot] = argJvmSlots[i];
+            }
+        }
+
+        CodeGen cg = ce.beginStaticMethod(methodName, ps.descriptor, layout.totalLocals);
+        cg.setContext(m, ps.analysis, layout);
+        cg.staticFastSelfSpec = ps;
+        cg.staticFastSelfMethodName = methodName;
+        cg.staticFastSelfCanInline = canSelfInline;
+        cg.staticFastSelfInlineDepth = 0;
+        cg.uncheckedLongArith = uncheckedLong;
+
+        for (int i = 0; i < arity; i++) {
+            ValType entryT = ps.paramTypes[i];
+            int logicalSlot = m.paramSlots[i];
+            ValType targetT = layout.slotTypes[logicalSlot];
+            if (entryT != targetT) {
+                cg.loadJvmLocal(argJvmSlots[i], entryT);
+                cg.convertValue(entryT, targetT);
+                cg.storeLogicalSlot(logicalSlot);
+            }
+        }
+
         ValType retT = ps.analysis.returnType;
         boolean terminated = cg.emitReturnTyped(m.body, retT);
         if (!terminated) {
             cg.emitReturnInstruction(retT);
         }
         cg.finish();
+    }
+
+    private static void emitStaticFastPrimWorker(
+            ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName, boolean canSelfInline, int selfCallCount) {
+        if (canEmitPureMemoPrim(arity, ps, selfCallCount)) {
+            emitPureMemoPrimWorkers(ce, m, arity, ps, fastName);
+            return;
+        }
+        LinearRecOptimizer.LinearRecSpec linearSpec = LinearRecOptimizer.matchLinearDecrementRec(ce, m, arity, ps);
+        if (CSE && linearSpec != null) {
+            LinearRecOptimizer.emitLinearDecrementWorkers(ce, m, ps, fastName, linearSpec);
+            return;
+        }
+        if (selfCallCount == 1) {
+            AssocTailLoopSpec tcoSpec = matchAssocTailLoop(ce, m, arity, ps);
+            if (tcoSpec != null) {
+                emitAssocTailLoopWorker(ce, m, arity, ps, fastName, false, tcoSpec);
+                return;
+            }
+        }
+        // When CSE is disabled, still hoist proven overflow-free range check once at entry
+        // while executing the full unoptimized O(phi^n) recursive call tree (zero CSE, zero memo).
+        if (!CSE && linearSpec != null && linearSpec.safeMaxInput >= linearSpec.baseThreshold
+                && arity == 1 && ps.paramTypes[0] == ValType.LONG && ps.analysis.returnType == ValType.LONG) {
+            String unchkName = fastName + "$u";
+            String chkName = fastName + "$c";
+            emitStaticFastBody(ce, m, arity, ps, unchkName, canSelfInline, true);
+            emitStaticFastBody(ce, m, arity, ps, chkName, canSelfInline, false);
+
+            CodeGen cg = ce.beginStaticMethod(fastName, ps.descriptor, 2);
+            Label fallback = new Label();
+            cg.lload(0);
+            cg.ldcLong(0L);
+            cg.lcmp();
+            cg.iflt(fallback);
+            cg.lload(0);
+            cg.ldcLong(linearSpec.safeMaxInput);
+            cg.lcmp();
+            cg.ifgt(fallback);
+            cg.lload(0);
+            cg.invokestatic(ce.className, unchkName, "(J)J", 2, 2);
+            cg.lreturn();
+
+            cg.curStack = 0;
+            cg.markLabel(fallback);
+            cg.lload(0);
+            cg.invokestatic(ce.className, chkName, "(J)J", 2, 2);
+            cg.lreturn();
+            cg.finish();
+            return;
+        }
+
+        emitStaticFastBody(ce, m, arity, ps, fastName, canSelfInline, false);
     }
 
     private static void emitFixedInvoke(
@@ -1814,6 +2154,7 @@ public final class BytecodeJIT {
         String staticFastSelfMethodName = null;
         boolean staticFastSelfCanInline = false;
         int staticFastSelfInlineDepth = 0;
+        boolean uncheckedLongArith = false;
         int curTempLocals = 0;
         int maxTempLocals = 0;
         int curStack = 0;
@@ -2949,11 +3290,12 @@ public final class BytecodeJIT {
             if (node instanceof Add2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
                 if (emitLong(a.a)) return true;
                 if (emitLong(a.b)) return true;
-                invokestatic("java/lang/Math", "addExact", "(JJ)J", 4, 2);
+                if (uncheckedLongArith) ladd();
+                else invokestatic("java/lang/Math", "addExact", "(JJ)J", 4, 2);
                 return false;
             }
             if (node instanceof Sub2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
-                if (a.a instanceof LocalNode ln && nonNegativeLong.contains(ln.slot)
+                if (!uncheckedLongArith && a.a instanceof LocalNode ln && nonNegativeLong.contains(ln.slot)
                         && a.b instanceof ConstNode cn && cn.isLong && cn.longVal >= 0L) {
                     loadLogicalSlot(ln.slot);
                     ldcLong(cn.longVal);
@@ -2962,16 +3304,24 @@ public final class BytecodeJIT {
                 }
                 if (emitLong(a.a)) return true;
                 if (emitLong(a.b)) return true;
-                invokestatic("java/lang/Math", "subtractExact", "(JJ)J", 4, 2);
+                if (uncheckedLongArith) lsub();
+                else invokestatic("java/lang/Math", "subtractExact", "(JJ)J", 4, 2);
                 return false;
             }
             if (node instanceof Mul2Node a && typeOf(a.a) == ValType.LONG && typeOf(a.b) == ValType.LONG) {
                 if (emitLong(a.a)) return true;
                 if (emitLong(a.b)) return true;
-                invokestatic("java/lang/Math", "multiplyExact", "(JJ)J", 4, 2);
+                if (uncheckedLongArith) lmul();
+                else invokestatic("java/lang/Math", "multiplyExact", "(JJ)J", 4, 2);
                 return false;
             }
             if (node instanceof IncNode a && typeOf(a.a) == ValType.LONG) {
+                if (uncheckedLongArith) {
+                    if (emitLong(a.a)) return true;
+                    ldcLong(1L);
+                    ladd();
+                    return false;
+                }
                 if (a.a instanceof LocalNode ln && boundedBelowMaxLong.contains(ln.slot)) {
                     loadLogicalSlot(ln.slot);
                     ldcLong(1L);
@@ -2990,6 +3340,12 @@ public final class BytecodeJIT {
                 return false;
             }
             if (node instanceof DecNode a && typeOf(a.a) == ValType.LONG) {
+                if (uncheckedLongArith) {
+                    if (emitLong(a.a)) return true;
+                    ldcLong(1L);
+                    lsub();
+                    return false;
+                }
                 if (a.a instanceof LocalNode ln && boundedAboveMinLong.contains(ln.slot)) {
                     loadLogicalSlot(ln.slot);
                     ldcLong(1L);

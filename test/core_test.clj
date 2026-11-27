@@ -3720,6 +3720,35 @@
     (is (thrown-with-msg? clojure.lang.ArityException #":kw" (:kw)))
     (is (thrown-with-msg? clojure.lang.ArityException #"> 20" (apply :kw (range 25))))))
 
+(defn t31-sum-rec [n]
+  (if (<= n 0) 0 (+ n (t31-sum-rec (- n 1)))))
+
+(defn t31-fact-rec [n]
+  (if (<= n 1) 1 (* n (t31-fact-rec (- n 1)))))
+
+(defn t31-unchecked-sum [n]
+  (if (<= n 0) 0 (unchecked-add n (t31-unchecked-sum (unchecked-dec n)))))
+
+(defn t31-mixed-sign [n]
+  (if (<= n 0)
+    Long/MAX_VALUE
+    (if (= n 1)
+      (+ 1 (t31-mixed-sign (- n 1)))
+      (+ -1 (t31-mixed-sign (- n 1))))))
+
+(deftest track-3-1-tco-test
+  (testing "Single-recursion associative TCO runs in O(1) stack with exact overflow semantics"
+    (is (= 0 (t31-sum-rec 0)))
+    (is (= 0 (t31-sum-rec -5)))
+    (is (= 500000500000 (t31-sum-rec 1000000)))
+    (is (= 500000500000 (t31-unchecked-sum 1000000)))
+    (is (= 1 (t31-fact-rec 0)))
+    (is (= 1 (t31-fact-rec 1)))
+    (is (= 2432902008176640000 (t31-fact-rec 20)))
+    (is (thrown? ArithmeticException (t31-fact-rec 21)))
+    ;; Non-monotonic mixed-sign checked + must preserve right-associated overflow
+    (is (thrown? ArithmeticException (t31-mixed-sign 2)))))
+
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))
   (System/exit 1))

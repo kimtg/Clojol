@@ -605,6 +605,10 @@ public final class Main {
             if (cseProp != null) {
                 cmd.add("-Dcljl.jit.cse=" + cseProp);
             }
+            String tcoProp = System.getProperty("cljl.jit.tco");
+            if (tcoProp != null) {
+                cmd.add("-Dcljl.jit.tco=" + tcoProp);
+            }
             cmd.addAll(jvmOpts);
             cmd.add("-cp");
             cmd.add(fullCp);

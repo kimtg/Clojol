@@ -23,7 +23,7 @@ Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measu
 | Total wall time (`fib(40)` × 3 + JVM startup) | **0.14 s** | 2.49 s | **17.9x faster** |
 | Cold startup + eval (`-e "(+ 1 2)"`) | **70.2 ms** | 445.0 ms | **6.3x faster** |
 
-With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), and applies **compiler-verified auto-memoization** (`PureMemo.java`, JMM-sound lock-free bounded `AtomicLongArray` / `SoftReference`-bounded caches; disable via `-Dcljl.jit.automemo=false` to fall back to 2-step frontier CSE, and disable frontier CSE via `-Dcljl.jit.cse=false`) to strictly pure multi-branch self-recursive functions (`fib(77)` in **0.009 ms** warm / **24 ms** cold, `fib(92)` in **0.02 ms**, `fib(93)` exact `ArithmeticException`, auto-promoting `+'` `fib-big(200)` in **2.4 ms**, `trib(60)` / `choose(60, 30)` / `tak(24, 16, 8)` in **1.5–2.2 ms**). Auto-memoization uses a strict allowlist of pure AST nodes, is guarded against core `with-redefs`, and never affects functions with side effects (e.g. [`test/fib_impure_bench.clj`](test/fib_impure_bench.clj)). Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.42 ms**.
+With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), transforms single-recursion associative `+`/`*` functions into `O(1)`-stack accumulator loops (disable via `-Dcljl.jit.tco=false`), and applies **compiler-verified auto-memoization** (`PureMemo.java`, JMM-sound lock-free bounded `AtomicLongArray` / `SoftReference`-bounded caches; disable via `-Dcljl.jit.automemo=false` to fall back to 2-step frontier CSE, and disable frontier CSE via `-Dcljl.jit.cse=false`) to strictly pure multi-branch self-recursive functions (`fib(77)` in **0.009 ms** warm / **24 ms** cold, `fib(92)` in **0.02 ms**, `fib(93)` exact `ArithmeticException`, auto-promoting `+'` `fib-big(200)` in **2.4 ms**, `trib(60)` / `choose(60, 30)` / `tak(24, 16, 8)` in **1.5–2.2 ms**). Auto-memoization uses a strict allowlist of pure AST nodes, is guarded against core `with-redefs`, and never affects functions with side effects (e.g. [`test/fib_impure_bench.clj`](test/fib_impure_bench.clj)). Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.42 ms**.
 
 ### `fib(40)` vs. C (`gcc -O3` / `clang -O3`)
 
@@ -31,14 +31,14 @@ Measured back-to-back against standard recursive `int64_t fib(int64_t n)` in C (
 
 | Implementation | Run 1 / 2 / 3 (Windows, JDK 25) | Rel. to `gcc -O3` (Win) | Run 1 / 2 / 3 (Linux, JDK 25) | Rel. to `gcc -O3` (Linux) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Clojol (`cljl`, Auto-Memo)** | **4.49 / 0.017 / 0.003 ms** | **~44,000x faster** | **13.47 / 0.041 / 0.006 ms** | **~62,000x faster** |
-| **Clojol (`cljl`, `-Dcljl.jit.automemo=false`, Frontier CSE)** | **4.41 / 0.016 / 0.014 ms** | **~9,000x faster** | **8.05 / 0.140 / 0.171 ms** | **~2,000x faster** |
-| C (`gcc -O3`) | 132.3 / 132.4 / 129.2 ms | 1.00x | 345.4 / 344.8 / 348.5 ms | 1.00x |
-| C (`clang -O3`) | 193.9 / 193.1 / 201.3 ms | 0.67x | 429.9 / 432.5 / 423.7 ms | 0.82x |
-| **Clojol (`cljl`, `-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`)** | — | — | **494.1 / 475.7 / 478.2 ms** | **0.73x** |
+| **Clojol (`cljl`, Auto-Memo)** | **4.49 / 0.017 / 0.003 ms** | **~44,000x faster** | **8.73 / 0.016 / 0.005 ms** | **~63,000x faster** |
+| **Clojol (`cljl`, `-Dcljl.jit.automemo=false`, Frontier CSE)** | **4.41 / 0.016 / 0.014 ms** | **~9,000x faster** | **7.29 / 0.077 / 0.071 ms** | **~4,800x faster** |
+| C (`gcc -O3`) | 132.3 / 132.4 / 129.2 ms | 1.00x | 341.4 / 344.1 / 342.0 ms | 1.00x |
+| **Clojol (`cljl`, `-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`)** | — | — | **395.4 / 412.6 / 394.8 ms** | **0.87x** |
+| C (`clang -O3`) | 193.9 / 193.1 / 201.3 ms | 0.67x | 445.9 / 430.2 / 438.5 ms | 0.78x |
 | Clojure 1.12.6 | 631.2 / 621.7 / 621.6 ms | 0.21x | — | — |
 
-Note that `gcc -O3` and `clang -O3` do not perform recursive auto-memoization or pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls). With both auto-memoization and frontier CSE turned off (`-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`), Clojol executes the full unboxed `O(φ^40)` recursive tree with overflow-checked `+` and zero user type hints at **0.73x** of `gcc -O3` (**0.89x** of `clang -O3`).
+Note that `gcc -O3` and `clang -O3` do not perform recursive auto-memoization or pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls). With both auto-memoization and frontier CSE turned off (`-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`), Clojol hoists its proven overflow-free range guard once at entry (falling back to exact `Math.addExact` outside the safe bound) and executes the full unboxed `O(φ^40)` recursive tree with zero user type hints at **0.87x** of `gcc -O3` (**1.11x faster** than `clang -O3`).
 
 ### `loop/recur`, `volatile!`, and `atom` (vs. Clojure 1.12.6)
 
@@ -208,7 +208,7 @@ Dependency resolution implements BFS nearest-then-newest Maven mediation, Maven 
 
 ## Building, Tests & Benchmarks
 
-The strict-JIT test suite runs **11,431 assertions** across `core_test.clj`, `cheatsheet_test.clj`, and `cli_test.clj` (0 failures, 0 errors), and Clojol passes **98.1%** (4,460 / 4,545 assertions) across 47 runnable namespaces from the official Clojure 1.12.0 test suite (`clojure.test-clojure.*`).
+The strict-JIT test suite runs **11,444 assertions** across `core_test.clj`, `cheatsheet_test.clj`, and `cli_test.clj` (0 failures, 0 errors), and Clojol passes **98.1%** (4,460 / 4,545 assertions) across 47 runnable namespaces from the official Clojure 1.12.0 test suite (`clojure.test-clojure.*`).
 
 ```bash
 # Windows
