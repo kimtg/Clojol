@@ -23,11 +23,11 @@ Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measu
 | Total wall time (`fib(40)` × 3 + JVM startup) | **0.14 s** | 2.49 s | **17.9x faster** |
 | Cold startup + eval (`-e "(+ 1 2)"`) | **70.2 ms** | 445.0 ms | **6.3x faster** |
 
-With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), and applies **compiler-verified auto-memoization** (`PureMemo.java`, JMM-sound lock-free bounded `AtomicLongArray` / `SoftReference`-bounded caches; disable via `-Dcljl.jit.automemo=false` to use 2-step frontier CSE) to strictly pure multi-branch self-recursive functions (`fib(77)` in **0.009 ms** warm / **24 ms** cold, `fib(92)` in **0.02 ms**, `fib(93)` exact `ArithmeticException`, auto-promoting `+'` `fib-big(200)` in **2.4 ms**, `trib(60)` / `choose(60, 30)` / `tak(24, 16, 8)` in **1.5–2.2 ms**). Auto-memoization uses a strict allowlist of pure AST nodes, is guarded against core `with-redefs`, and never affects functions with side effects (e.g. [`test/fib_impure_bench.clj`](test/fib_impure_bench.clj)). Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.42 ms**.
+With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), and applies **compiler-verified auto-memoization** (`PureMemo.java`, JMM-sound lock-free bounded `AtomicLongArray` / `SoftReference`-bounded caches; disable via `-Dcljl.jit.automemo=false` to fall back to 2-step frontier CSE, and disable frontier CSE via `-Dcljl.jit.cse=false`) to strictly pure multi-branch self-recursive functions (`fib(77)` in **0.009 ms** warm / **24 ms** cold, `fib(92)` in **0.02 ms**, `fib(93)` exact `ArithmeticException`, auto-promoting `+'` `fib-big(200)` in **2.4 ms**, `trib(60)` / `choose(60, 30)` / `tak(24, 16, 8)` in **1.5–2.2 ms**). Auto-memoization uses a strict allowlist of pure AST nodes, is guarded against core `with-redefs`, and never affects functions with side effects (e.g. [`test/fib_impure_bench.clj`](test/fib_impure_bench.clj)). Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.42 ms**.
 
 ### `fib(40)` vs. C (`gcc -O3` / `clang -O3`)
 
-Measured back-to-back on the same Windows machine against standard recursive `int64_t fib(int64_t n)` in C (with `volatile int64_t arg = 40` so C compilers cannot hoist `fib(40)` out of the timing loop):
+Measured back-to-back on the same Windows machine (OpenJDK 25.0.4.1) against standard recursive `int64_t fib(int64_t n)` in C (with `volatile int64_t arg = 40` so C compilers cannot hoist `fib(40)` out of the timing loop):
 
 | Implementation | Run 1 | Run 2 | Run 3 | Relative to `gcc -O3` |
 | :--- | :---: | :---: | :---: | :---: |
@@ -38,6 +38,16 @@ Measured back-to-back on the same Windows machine against standard recursive `in
 | Clojure 1.12.6 | 631.2 ms | 621.7 ms | 621.6 ms | 0.21x |
 
 Note that `gcc -O3` and `clang -O3` do not perform recursive auto-memoization or pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls).
+
+To compare raw unboxed recursive execution (`O(φ^40)` calls with overflow-checked `+` and zero user type hints) apples-to-apples against C with **both** auto-memoization and frontier CSE turned off (`-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`), measured back-to-back on Linux (median of 5 trials, OpenJDK 21.0.13, `gcc 13.3.0 -O3`, `clang 18.1.3 -O3`):
+
+| Implementation (Linux, OpenJDK 21) | Run 1 | Run 2 | Run 3 | Relative to `gcc -O3` |
+| :--- | :---: | :---: | :---: | :---: |
+| **Clojol (`cljl`, Auto-Memo)** | **7.20 ms** | **0.020 ms** | **0.004 ms** | **~78,000x faster** |
+| **Clojol (`cljl`, `-Dcljl.jit.automemo=false`, Frontier CSE)** | **6.16 ms** | **0.093 ms** | **0.037 ms** | **~8,800x faster** |
+| **C (`gcc 13.3 -O3`)** | 320.3 ms | 334.6 ms | 325.8 ms | 1.00x |
+| **C (`clang 18.1 -O3`)** | 396.2 ms | 399.8 ms | 391.3 ms | 0.83x |
+| **Clojol (`cljl`, `-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`)** | **530.8 ms** | **505.4 ms** | **510.3 ms** | **0.64x** |
 
 ### `loop/recur`, `volatile!`, and `atom` (vs. Clojure 1.12.6)
 

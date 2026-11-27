@@ -597,6 +597,14 @@ public final class Main {
             if (Boolean.getBoolean("cljl.jit.strict")) {
                 cmd.add("-Dcljl.jit.strict=true");
             }
+            String autoMemoProp = System.getProperty("cljl.jit.automemo");
+            if (autoMemoProp != null) {
+                cmd.add("-Dcljl.jit.automemo=" + autoMemoProp);
+            }
+            String cseProp = System.getProperty("cljl.jit.cse");
+            if (cseProp != null) {
+                cmd.add("-Dcljl.jit.cse=" + cseProp);
+            }
             cmd.addAll(jvmOpts);
             cmd.add("-cp");
             cmd.add(fullCp);

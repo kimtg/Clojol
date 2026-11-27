@@ -25,6 +25,7 @@ public final class BytecodeJIT {
 
     private static final boolean STRICT_JIT = Boolean.getBoolean("cljl.jit.strict");
     private static final boolean AUTO_MEMO = !"false".equals(System.getProperty("cljl.jit.automemo"));
+    private static final boolean CSE = !"false".equals(System.getProperty("cljl.jit.cse"));
     private static final AtomicInteger CLASS_ID = new AtomicInteger(0);
     private static final ConcurrentHashMap<String, Object[]> PENDING_CONSTS = new ConcurrentHashMap<>();
 
@@ -1194,10 +1195,12 @@ public final class BytecodeJIT {
             emitPureMemoPrimWorkers(ce, m, arity, ps, fastName);
             return;
         }
-        LinearRecOptimizer.LinearRecSpec linearSpec = LinearRecOptimizer.matchLinearDecrementRec(ce, m, arity, ps);
-        if (linearSpec != null) {
-            LinearRecOptimizer.emitLinearDecrementWorkers(ce, m, ps, fastName, linearSpec);
-            return;
+        if (CSE) {
+            LinearRecOptimizer.LinearRecSpec linearSpec = LinearRecOptimizer.matchLinearDecrementRec(ce, m, arity, ps);
+            if (linearSpec != null) {
+                LinearRecOptimizer.emitLinearDecrementWorkers(ce, m, ps, fastName, linearSpec);
+                return;
+            }
         }
 
         int[] argJvmSlots = new int[arity];

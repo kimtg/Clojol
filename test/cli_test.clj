@@ -683,6 +683,13 @@
             (is (str/includes? out "30"))
             (is (str/includes? out "60"))
             (is (str/includes? out "90"))))
+
+        ;; JIT flags -Dcljl.jit.automemo=false and -Dcljl.jit.cse=false
+        (let [r (run-cljl {:dir tmp :env env}
+                          ["-J-Dcljl.jit.automemo=false" "-J-Dcljl.jit.cse=false" "-e"
+                           "(do (defn fib [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 25))"])]
+          (is (= 0 (:exit r)) (:err r))
+          (is (= "75025" (str/trim (:out r)))))
         (finally
           (delete-tree! tmp))))))
 
