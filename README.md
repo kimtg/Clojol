@@ -27,27 +27,18 @@ With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytec
 
 ### `fib(40)` vs. C (`gcc -O3` / `clang -O3`)
 
-Measured back-to-back on the same Windows machine (OpenJDK 25.0.4.1) against standard recursive `int64_t fib(int64_t n)` in C (with `volatile int64_t arg = 40` so C compilers cannot hoist `fib(40)` out of the timing loop):
+Measured back-to-back against standard recursive `int64_t fib(int64_t n)` in C (with `volatile int64_t arg = 40` so C compilers cannot hoist `fib(40)` out of the timing loop) on Windows (OpenJDK 25.0.4.1) and Linux (median of 5 trials, OpenJDK 25.0.5.1, `gcc 13.3.0 -O3`, `clang 18.1.3 -O3`):
 
-| Implementation | Run 1 | Run 2 | Run 3 | Relative to `gcc -O3` |
+| Implementation | Run 1 / 2 / 3 (Windows, JDK 25) | Rel. to `gcc -O3` (Win) | Run 1 / 2 / 3 (Linux, JDK 25) | Rel. to `gcc -O3` (Linux) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Clojol (`cljl`, Auto-Memo)** | **4.49 ms** | **0.017 ms** | **0.003 ms** | **~44,000x faster** |
-| **Clojol (`cljl`, `-Dcljl.jit.automemo=false`, Frontier CSE)** | **4.41 ms** | **0.016 ms** | **0.014 ms** | **~9,000x faster** |
-| C (`gcc -O3`) | 132.3 ms | 132.4 ms | 129.2 ms | 1.0x |
-| C (`clang -O3`) | 193.9 ms | 193.1 ms | 201.3 ms | 0.67x |
-| Clojure 1.12.6 | 631.2 ms | 621.7 ms | 621.6 ms | 0.21x |
+| **Clojol (`cljl`, Auto-Memo)** | **4.49 / 0.017 / 0.003 ms** | **~44,000x faster** | **13.47 / 0.041 / 0.006 ms** | **~62,000x faster** |
+| **Clojol (`cljl`, `-Dcljl.jit.automemo=false`, Frontier CSE)** | **4.41 / 0.016 / 0.014 ms** | **~9,000x faster** | **8.05 / 0.140 / 0.171 ms** | **~2,000x faster** |
+| C (`gcc -O3`) | 132.3 / 132.4 / 129.2 ms | 1.00x | 345.4 / 344.8 / 348.5 ms | 1.00x |
+| C (`clang -O3`) | 193.9 / 193.1 / 201.3 ms | 0.67x | 429.9 / 432.5 / 423.7 ms | 0.82x |
+| **Clojol (`cljl`, `-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`)** | — | — | **494.1 / 475.7 / 478.2 ms** | **0.73x** |
+| Clojure 1.12.6 | 631.2 / 621.7 / 621.6 ms | 0.21x | — | — |
 
-Note that `gcc -O3` and `clang -O3` do not perform recursive auto-memoization or pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls).
-
-To compare raw unboxed recursive execution (`O(φ^40)` calls with overflow-checked `+` and zero user type hints) apples-to-apples against C with **both** auto-memoization and frontier CSE turned off (`-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`), measured back-to-back on Linux (median of 5 trials, OpenJDK 25.0.5.1, `gcc 13.3.0 -O3`, `clang 18.1.3 -O3`):
-
-| Implementation (Linux, OpenJDK 25) | Run 1 | Run 2 | Run 3 | Relative to `gcc -O3` |
-| :--- | :---: | :---: | :---: | :---: |
-| **Clojol (`cljl`, Auto-Memo)** | **13.47 ms** | **0.041 ms** | **0.006 ms** | **~62,000x faster** |
-| **Clojol (`cljl`, `-Dcljl.jit.automemo=false`, Frontier CSE)** | **8.05 ms** | **0.140 ms** | **0.171 ms** | **~2,000x faster** |
-| **C (`gcc 13.3 -O3`)** | 345.4 ms | 344.8 ms | 348.5 ms | 1.00x |
-| **C (`clang 18.1 -O3`)** | 429.9 ms | 432.5 ms | 423.7 ms | 0.82x |
-| **Clojol (`cljl`, `-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`)** | **494.1 ms** | **475.7 ms** | **478.2 ms** | **0.73x** |
+Note that `gcc -O3` and `clang -O3` do not perform recursive auto-memoization or pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls). With both auto-memoization and frontier CSE turned off (`-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`), Clojol executes the full unboxed `O(φ^40)` recursive tree with overflow-checked `+` and zero user type hints at **0.73x** of `gcc -O3` (**0.89x** of `clang -O3`).
 
 ### `loop/recur`, `volatile!`, and `atom` (vs. Clojure 1.12.6)
 
