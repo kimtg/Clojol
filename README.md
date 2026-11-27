@@ -39,15 +39,15 @@ Measured back-to-back on the same Windows machine (OpenJDK 25.0.4.1) against sta
 
 Note that `gcc -O3` and `clang -O3` do not perform recursive auto-memoization or pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls).
 
-To compare raw unboxed recursive execution (`O(φ^40)` calls with overflow-checked `+` and zero user type hints) apples-to-apples against C with **both** auto-memoization and frontier CSE turned off (`-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`), measured back-to-back on Linux (median of 5 trials, OpenJDK 21.0.13, `gcc 13.3.0 -O3`, `clang 18.1.3 -O3`):
+To compare raw unboxed recursive execution (`O(φ^40)` calls with overflow-checked `+` and zero user type hints) apples-to-apples against C with **both** auto-memoization and frontier CSE turned off (`-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`), measured back-to-back on Linux (median of 5 trials, OpenJDK 25.0.5.1, `gcc 13.3.0 -O3`, `clang 18.1.3 -O3`):
 
-| Implementation (Linux, OpenJDK 21) | Run 1 | Run 2 | Run 3 | Relative to `gcc -O3` |
+| Implementation (Linux, OpenJDK 25) | Run 1 | Run 2 | Run 3 | Relative to `gcc -O3` |
 | :--- | :---: | :---: | :---: | :---: |
-| **Clojol (`cljl`, Auto-Memo)** | **7.20 ms** | **0.020 ms** | **0.004 ms** | **~78,000x faster** |
-| **Clojol (`cljl`, `-Dcljl.jit.automemo=false`, Frontier CSE)** | **6.16 ms** | **0.093 ms** | **0.037 ms** | **~8,800x faster** |
-| **C (`gcc 13.3 -O3`)** | 320.3 ms | 334.6 ms | 325.8 ms | 1.00x |
-| **C (`clang 18.1 -O3`)** | 396.2 ms | 399.8 ms | 391.3 ms | 0.83x |
-| **Clojol (`cljl`, `-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`)** | **530.8 ms** | **505.4 ms** | **510.3 ms** | **0.64x** |
+| **Clojol (`cljl`, Auto-Memo)** | **13.47 ms** | **0.041 ms** | **0.006 ms** | **~62,000x faster** |
+| **Clojol (`cljl`, `-Dcljl.jit.automemo=false`, Frontier CSE)** | **8.05 ms** | **0.140 ms** | **0.171 ms** | **~2,000x faster** |
+| **C (`gcc 13.3 -O3`)** | 345.4 ms | 344.8 ms | 348.5 ms | 1.00x |
+| **C (`clang 18.1 -O3`)** | 429.9 ms | 432.5 ms | 423.7 ms | 0.82x |
+| **Clojol (`cljl`, `-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`)** | **494.1 ms** | **475.7 ms** | **478.2 ms** | **0.73x** |
 
 ### `loop/recur`, `volatile!`, and `atom` (vs. Clojure 1.12.6)
 
