@@ -1858,10 +1858,16 @@ public final class Deps {
         final List<String> licenses = new ArrayList<>();
     }
 
-    private static final HttpClient SHARED_HTTP_CLIENT = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NEVER)
-            .build();
+    private static final class HttpClientHolder {
+        static final HttpClient INSTANCE = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
+    }
+
+    private static HttpClient sharedHttpClient() {
+        return HttpClientHolder.INSTANCE;
+    }
 
     private static PomInfo parsePom(Path pomPath, Map<String, String> repos, Path m2) {
         return parsePom(pomPath, repos, m2, new HashSet<>());
@@ -2153,10 +2159,10 @@ public final class Deps {
             try {
                 tmp = Files.createTempFile(target.getParent(), ".cljl-dl-", ".tmp");
                 HttpResponse<Path> resp = sendNoDowngrade(
-                        SHARED_HTTP_CLIENT, URI.create(url), Duration.ofSeconds(30),
+                        sharedHttpClient(), URI.create(url), Duration.ofSeconds(30),
                         HttpResponse.BodyHandlers.ofFile(tmp), repoId);
                 if (resp.statusCode() == 200) {
-                    verifyDownloadChecksum(SHARED_HTTP_CLIENT, url, tmp);
+                    verifyDownloadChecksum(sharedHttpClient(), url, tmp);
                     try {
                         Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
                     } catch (AtomicMoveNotSupportedException e) {
@@ -2186,7 +2192,7 @@ public final class Deps {
             String url = baseUrl.endsWith("/") ? baseUrl + rel : baseUrl + "/" + rel;
             try {
                 HttpResponse<String> resp = sendNoDowngrade(
-                        SHARED_HTTP_CLIENT, URI.create(url), Duration.ofSeconds(15),
+                        sharedHttpClient(), URI.create(url), Duration.ofSeconds(15),
                         HttpResponse.BodyHandlers.ofString(), repoId);
                 if (resp.statusCode() == 200) {
                     Matcher m = Pattern.compile("<version>([^<]+)</version>").matcher(resp.body());

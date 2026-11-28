@@ -10,35 +10,22 @@ Clojol is an independent, clean-room implementation of the Clojure language and 
 - Faster Numeric Computation
 - Easier Build
 
-## Performance (`fib(40)` vs. Official Clojure)
+## Performance
 
-Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measured on OpenJDK 25.0.4.1 LTS (Temurin, Windows) comparing **Clojol** (`-XX:AOTCache=build/cljl.aot -jar build/cljl.jar test/fib_bench.clj`) against **Clojure 1.12.6** (`clojure.main test/fib_bench.clj`):
+### `fib(40)` vs. C (`gcc -O3` / `clang -O3`) & Clojure 1.12.6
 
-| Metric | Clojol (`cljl`) | Clojure 1.12.6 | Speedup |
-| :--- | :---: | :---: | :---: |
-| `fib(40)` Run 1 (first call) | **4.49 ms** | 631.2 ms | **141x faster** |
-| `fib(40)` Run 2 (warm) | **0.017 ms** | 621.7 ms | **37,000x faster** |
-| `fib(40)` Run 3 (warm) | **0.003 ms** | 621.6 ms | **214,000x faster** |
-| `fib(77)` (warm, `5527939700884757`) | **0.009 ms** | infeasible (`O(φ^77)`) | — |
-| Total wall time (`fib(40)` × 3 + JVM startup) | **0.14 s** | 2.49 s | **17.9x faster** |
-| Cold startup + eval (`-e "(+ 1 2)"`) | **70.2 ms** | 445.0 ms | **6.3x faster** |
+Recursive `fib(40)` benchmark ([`test/fib_bench.clj`](test/fib_bench.clj)) measured back-to-back on Windows (median of 5 trials, OpenJDK 25.0.4.1 LTS Temurin, `gcc 14.2.0 -O3`, `clang 19.1.7 -O3`, Clojure 1.12.6), comparing **Clojol** (`-XX:AOTCache=build/cljl.aot -jar build/cljl.jar test/fib_bench.clj`) against standard recursive `int64_t fib(int64_t n)` in C (with `volatile int64_t arg = 40` so C compilers cannot hoist `fib(40)` out of the timing loop) and **Clojure 1.12.6** (`clojure.main test/fib_bench.clj`):
 
-With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), transforms single-recursion associative `+`/`*` functions into `O(1)`-stack accumulator loops (disable via `-Dcljl.jit.tco=false`), and applies **compiler-verified auto-memoization** (`PureMemo.java`, JMM-sound lock-free bounded `AtomicLongArray` / `SoftReference`-bounded caches; disable via `-Dcljl.jit.automemo=false` to fall back to 2-step frontier CSE, and disable frontier CSE via `-Dcljl.jit.cse=false`) to strictly pure multi-branch self-recursive functions (`fib(77)` in **0.009 ms** warm / **24 ms** cold, `fib(92)` in **0.02 ms**, `fib(93)` exact `ArithmeticException`, auto-promoting `+'` `fib-big(200)` in **2.4 ms**, `trib(60)` / `choose(60, 30)` / `tak(24, 16, 8)` in **1.5–2.2 ms**). Auto-memoization uses a strict allowlist of pure AST nodes, is guarded against core `with-redefs`, and never affects functions with side effects (e.g. [`test/fib_impure_bench.clj`](test/fib_impure_bench.clj)). Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.42 ms**.
+| Implementation | Run 1 | Run 2 | Run 3 | Total Wall Time (`×3` + startup) | vs. `gcc -O3` (Run 3) | vs. Clojure 1.12.6 (Run 3) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Clojol (`cljl`, Auto-Memo)** | **4.72 ms** | **0.009 ms** | **0.003 ms** | **0.13 s** | **~44,000x faster** | **~204,000x faster** |
+| **Clojol (`cljl`, `-Dcljl.jit.automemo=false`, Frontier CSE)** | **4.28 ms** | **0.042 ms** | **0.019 ms** | **0.13 s** | **~6,900x faster** | **~32,000x faster** |
+| C (`gcc 14.2.0 -O3`) | 140.3 ms | 142.0 ms | 131.9 ms | 0.41 s | 1.00x | 4.6x faster |
+| C (`clang 19.1.7 -O3`) | 190.7 ms | 191.5 ms | 191.7 ms | 0.58 s | 0.69x | 3.2x faster |
+| **Clojol (`cljl`, `-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`)** | **204.3 ms** | **195.6 ms** | **194.7 ms** | **0.72 s** | **0.68x** | **3.1x faster** |
+| Clojure 1.12.6 | 627.4 ms | 612.4 ms | 611.8 ms | 2.45 s | 0.22x | 1.00x |
 
-### `fib(40)` vs. C (`gcc -O3` / `clang -O3`)
-
-Measured back-to-back against standard recursive `int64_t fib(int64_t n)` in C (with `volatile int64_t arg = 40` so C compilers cannot hoist `fib(40)` out of the timing loop) on Windows (OpenJDK 25.0.4.1) and Linux (median of 5 trials, OpenJDK 25.0.5.1, `gcc 13.3.0 -O3`, `clang 18.1.3 -O3`):
-
-| Implementation | Run 1 / 2 / 3 (Windows, JDK 25) | Rel. to `gcc -O3` (Win) | Run 1 / 2 / 3 (Linux, JDK 25) | Rel. to `gcc -O3` (Linux) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Clojol (`cljl`, Auto-Memo)** | **4.49 / 0.017 / 0.003 ms** | **~44,000x faster** | **8.73 / 0.016 / 0.005 ms** | **~63,000x faster** |
-| **Clojol (`cljl`, `-Dcljl.jit.automemo=false`, Frontier CSE)** | **4.41 / 0.016 / 0.014 ms** | **~9,000x faster** | **7.29 / 0.077 / 0.071 ms** | **~4,800x faster** |
-| C (`gcc -O3`) | 132.3 / 132.4 / 129.2 ms | 1.00x | 341.4 / 344.1 / 342.0 ms | 1.00x |
-| **Clojol (`cljl`, `-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`)** | — | — | **395.4 / 412.6 / 394.8 ms** | **0.87x** |
-| C (`clang -O3`) | 193.9 / 193.1 / 201.3 ms | 0.67x | 445.9 / 430.2 / 438.5 ms | 0.78x |
-| Clojure 1.12.6 | 631.2 / 621.7 / 621.6 ms | 0.21x | — | — |
-
-Note that `gcc -O3` and `clang -O3` do not perform recursive auto-memoization or pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls). With both auto-memoization and frontier CSE turned off (`-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`), Clojol hoists its proven overflow-free range guard once at entry (falling back to exact `Math.addExact` outside the safe bound) and executes the full unboxed `O(φ^40)` recursive tree with zero user type hints at **0.87x** of `gcc -O3` (**1.11x faster** than `clang -O3`).
+With type inference (`TypeAnalyzer.java`) and primitive-specialized Tier-1 bytecode compilation (`BytecodeJIT.java`), Clojol infers unboxed `long` parameters/returns with no user type hints required, compiles pure zero-capture self-recursive functions into `private static` `invokestatic` workers with a hoisted entry `Var` guard (`with-redefs`-safe), transforms single-recursion associative `+`/`*` functions into `O(1)`-stack accumulator loops (disable via `-Dcljl.jit.tco=false`), and applies **compiler-verified auto-memoization** (`PureMemo.java`, JMM-sound lock-free bounded `AtomicLongArray` / `SoftReference`-bounded caches; disable via `-Dcljl.jit.automemo=false` to fall back to 2-step frontier CSE, and disable frontier CSE via `-Dcljl.jit.cse=false`) to strictly pure multi-branch self-recursive functions (`fib(77)` = `5527939700884757` in **0.005 ms** warm / **22.6 ms** cold, `fib(92)` in **0.005 ms**, `fib(93)` exact `ArithmeticException`, auto-promoting `+'` `fib-big(200)` in **2.7 ms**, `trib(60)` / `choose(60, 30)` / `tak(24, 16, 8)` in **2.0–3.8 ms**). Auto-memoization uses a strict allowlist of pure AST nodes, is guarded against core `with-redefs`, and never affects functions with side effects (e.g. [`test/fib_impure_bench.clj`](test/fib_impure_bench.clj)). End-to-end (`fib(40)` × 3 + JVM startup), Clojol finishes in **0.13 s** (**18.7x faster** than Clojure 1.12.6's **2.45 s**). Note that `gcc -O3` and `clang -O3` do not perform recursive auto-memoization or pure-call CSE (converting the right branch into an accumulator loop and still executing `O(φ^n)` calls); with both auto-memoization and frontier CSE disabled (`-Dcljl.jit.automemo=false -Dcljl.jit.cse=false`), Clojol hoists its proven overflow-free range guard once at entry (falling back to exact `Math.addExact` outside the safe bound) and executes the full unboxed `O(φ^40)` recursive tree with zero user type hints at **0.68x** of `gcc -O3`, matching `clang -O3` (**0.98x**), and **3.1x faster** than Clojure 1.12.6. Tight unboxed `loop`/`recur` microbenchmarks (`sum-loop(1,000,000)` in [`test/bench.clj`](test/bench.clj)) run in **~0.42 ms**.
 
 ### `loop/recur`, `volatile!`, and `atom` (vs. Clojure 1.12.6)
 
@@ -46,14 +33,14 @@ Note that `gcc -O3` and `clang -O3` do not perform recursive auto-memoization or
 
 | Benchmark (`N = 1,000,000`) | Clojol (`cljl`) | Clojure 1.12.6 | Speedup |
 | :--- | :---: | :---: | :---: |
-| `loop/recur` | **0.13 ms** | 0.18 ms | **1.35x faster** |
-| `volatile!` (local `vswap!`) | **0.13 ms** | 8.22 ms | **61.8x faster** |
-| `volatile!` (returned/tail-escaping `vswap!`) | **0.14 ms** | 6.39 ms | **46.6x faster** |
-| `volatile!` (escaping param `vswap!`) | **0.75 ms** | 6.50 ms | **8.6x faster** |
-| `atom` (local `while` / `loop` `swap!`) | **0.28 ms** | 14.05 ms | **50.2x faster** |
-| `atom` (returned/tail-escaping `swap!`) | **0.46 ms** | 11.80 ms | **25.7x faster** |
-| `atom` (escaping param `swap!`, lock-free atomic) | **8.41 ms** | 12.39 ms | **1.47x faster** |
-| `atom` (4-thread contended `4×250k` `swap!`) | **37.37 ms** | 105.55 ms | **2.82x faster** |
+| `loop/recur` | **0.13 ms** | 0.18 ms | **1.36x faster** |
+| `volatile!` (local `vswap!`) | **0.13 ms** | 8.00 ms | **59.7x faster** |
+| `volatile!` (returned/tail-escaping `vswap!`) | **0.13 ms** | 6.46 ms | **48.6x faster** |
+| `volatile!` (escaping param `vswap!`) | **0.55 ms** | 8.67 ms | **15.8x faster** |
+| `atom` (local `while` / `loop` `swap!`) | **0.35 ms** | 11.51 ms | **32.9x faster** |
+| `atom` (returned/tail-escaping `swap!`) | **0.30 ms** | 11.40 ms | **37.6x faster** |
+| `atom` (escaping param `swap!`, lock-free atomic) | **8.08 ms** | 13.55 ms | **1.68x faster** |
+| `atom` (4-thread contended `4×250k` `swap!`) | **33.91 ms** | 104.54 ms | **3.08x faster** |
 
 `BytecodeJIT.java` eliminates redundant overflow checks on range-bounded `long` loop counters (`(< i n)` -> `(inc i)`), scalar-replaces non-escaping and tail-escaping local `volatile!` and `atom` bindings into unboxed JVM locals (deferring allocation until return when needed), compiles escaping `vswap!`/`vreset!` into fused unboxed RMW ops backed by a single-field 63-bit fast-long `VarHandle` acquire/release path in `Atom.Volatile` (pass `-Dcljl.volatile.strict=true` for full `volatile` fence semantics), and uses a JMM-sound wait-free 63-bit `VarHandle.getAndAdd` (`lock xadd`) and CAS path in `Atom` that eliminates `Long` allocation and GC write barriers on numeric `swap!`/`reset!` across all threads.
 
@@ -63,19 +50,19 @@ Median of 5 runs after warmup on OpenJDK 25.0.4.1 (Windows):
 
 | Benchmark | Clojol (`cljl`) | Clojure 1.12.6 | Relative |
 | :--- | :---: | :---: | :---: |
-| `(Math/sin 0)` (`1M` iterations) | **0.004 ms** | 2.03 ms | **~500x faster** |
-| `sort-by :k` (`50k` maps) | **1.86 ms** | 14.11 ms | **7.6x faster** |
-| `into [] (comp (map inc) (filter even?)) (range 100k)` | **0.45 ms** | 1.19 ms | **2.6x faster** |
-| `defprotocol` dispatch (`500k`, `defrecord` var) | **0.72 ms** | 1.78 ms | **2.5x faster** |
-| `str/join "," (range 20k)` | **0.30 ms** | 0.73 ms | **2.4x faster** |
-| `sort` (`50k` reversed vec) | **0.79 ms** | 1.77 ms | **2.2x faster** |
-| `frequencies` (`50k`) | **1.21 ms** | 2.63 ms | **2.2x faster** |
-| `str/split` (`20k` CSV) | **0.89 ms** | 1.38 ms | **1.6x faster** |
-| `vec` transient `conj!` (`100k`) | **0.78 ms** | 1.15 ms | **1.5x faster** |
-| `map` `get` (`50k` keywords) | **1.28 ms** | 1.81 ms | **1.4x faster** |
-| `(->> (range 100k) (map inc) (filter even?) (reduce + 0))` | **1.25 ms** | 1.64 ms | **1.3x faster** |
-| `defprotocol` bimorphic dispatch (`500k`, 2 records) | **0.87 ms** | 1.09 ms | **1.25x faster** |
-| `transduce (comp (map inc) (filter even?)) + 0 (range 100k)` | **0.35 ms** | 0.42 ms | **1.2x faster** |
+| `(Math/sin 0)` (`1M` iterations) | **0.005 ms** | 2.09 ms | **~420x faster** |
+| `sort-by :k` (`50k` maps) | **1.31 ms** | 8.92 ms | **6.8x faster** |
+| `(->> (range 100k) (map inc) (filter even?) (reduce + 0))` | **0.38 ms** | 1.42 ms | **3.8x faster** |
+| `str/join "," (range 20k)` | **0.37 ms** | 1.11 ms | **3.0x faster** |
+| `sort` (`50k` reversed vec) | **0.69 ms** | 1.48 ms | **2.2x faster** |
+| `vec` transient `conj!` (`100k`) | **0.43 ms** | 0.87 ms | **2.0x faster** |
+| `into [] (comp (map inc) (filter even?)) (range 100k)` | **0.51 ms** | 0.95 ms | **1.9x faster** |
+| `str/split` (`20k` CSV) | **0.98 ms** | 1.79 ms | **1.8x faster** |
+| `transduce (comp (map inc) (filter even?)) + 0 (range 100k)` | **0.21 ms** | 0.34 ms | **1.6x faster** |
+| `defprotocol` bimorphic dispatch (`500k`, 2 records) | **1.35 ms** | 1.90 ms | **1.4x faster** |
+| `frequencies` (`50k`) | **2.01 ms** | 2.20 ms | **1.1x faster** |
+| `defprotocol` dispatch (`500k`, `defrecord` var) | **1.16 ms** | 1.24 ms | **1.1x faster** |
+| `map` `get` (`50k` keywords) | 2.24 ms | **1.85 ms** | 0.83x |
 
 Driven by compile-time pure `Math`/`StrictMath` constant folding, `LongRange` + `IReduceInit` + chunked lazy pipelines, unboxed `Fn` primitive dispatch hooks (`invokePrim_*`), adaptive radix/Schwartzian `FastSort` with `LongArraySeq`/`ArraySeq`, `private static final` JIT constant fields + single-load `Var.fastRoot`, direct `Keyword` HAMT/record lookup, primitive `defrecord` fields, and generated JVM protocol interfaces with out-of-line 2-entry PIC fallbacks.
 
@@ -85,12 +72,12 @@ Cold startup + eval (`java ... -jar build/cljl.jar -Srepro -Sdeps "{}" -e "(+ 1 
 
 | Mode | Min | Median | Average |
 | :--- | :---: | :---: | :---: |
-| **Clojol — AOT Cache (`-XX:AOTCache=build/cljl.aot`, JDK 24+)** | 68.9 ms | **70.2 ms** | 70.8 ms |
-| **Clojol — Default JDK CDS (`java -jar build/cljl.jar`)** | 108.2 ms | **109.8 ms** | 110.2 ms |
-| **Clojol — No CDS (`-Xshare:off`)** | 143.9 ms | **150.1 ms** | 150.4 ms |
-| **Clojure 1.12.6 (`clojure.main -e "(+ 1 2)"`)** | 438.6 ms | **445.0 ms** | 449.4 ms |
+| **Clojol — AOT Cache (`-XX:AOTCache=build/cljl.aot`, JDK 24+)** | 68.2 ms | **69.5 ms** | 69.4 ms |
+| **Clojol — Default JDK CDS (`java -jar build/cljl.jar`)** | 125.3 ms | **127.4 ms** | 127.4 ms |
+| **Clojol — No CDS (`-Xshare:off`)** | 161.6 ms | **164.5 ms** | 166.4 ms |
+| **Clojure 1.12.6 (`clojure.main -e "(+ 1 2)"`)** | 434.7 ms | **439.0 ms** | 441.6 ms |
 
-Through lazy on-demand `Core`/`CoreExtras` subsystem initialization, `tableswitch` dispatchers, zero-JCA inline SHA-256, and JDK 24+ AOT Cache (`build/cljl.aot`, with automatic `build/cljl.jsa` AppCDS fallback on JDK 21–23), Clojol achieves **~70 ms** cold startup (**6.3x faster** than Clojure 1.12.6 and **~36% faster** than default JDK CDS). Startup loads only **1,125** classes (**1,123** memory-mapped directly from `build/cljl.aot` and **0** loaded from `cljl.jar`). Note that `-J` / `:jvm-opts` relaunches and lazily loaded `StdLib` namespaces fall back to loading from `cljl.jar`.
+Through lazy on-demand `Core`/`CoreExtras` subsystem initialization, lazy `HttpClient` initialization in `Deps`, `tableswitch` dispatchers, zero-JCA inline SHA-256, and JDK 24+ AOT Cache (`build/cljl.aot`, with automatic `build/cljl.jsa` AppCDS fallback on JDK 21–23), Clojol achieves **~70 ms** cold startup (**6.3x faster** than Clojure 1.12.6 and **~45% faster** than default JDK CDS). Startup loads only **1,283** classes (**1,281** memory-mapped directly from `build/cljl.aot` and **0** loaded from `cljl.jar`). Note that `-J` / `:jvm-opts` relaunches and lazily loaded `StdLib` namespaces fall back to loading from `cljl.jar`.
 
 ## Requirements
 
