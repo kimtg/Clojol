@@ -3736,6 +3736,15 @@
       (+ 1 (t31-mixed-sign (- n 1)))
       (+ -1 (t31-mixed-sign (- n 1))))))
 
+(defn t31-fib-rev [n]
+  (if (< n 2) n (+ (t31-fib-rev (- n 2)) (t31-fib-rev (- n 1)))))
+
+(defn t31-f13 [n]
+  (if (< n 3) 1 (+ (t31-f13 (- n 1)) (t31-f13 (- n 3)))))
+
+(defn t31-choose [n k]
+  (if (or (= k 0) (= k n)) 1 (+ (t31-choose (- n 1) (- k 1)) (t31-choose (- n 1) k))))
+
 (deftest track-3-1-tco-test
   (testing "Single-recursion associative TCO runs in O(1) stack with exact overflow semantics"
     (is (= 0 (t31-sum-rec 0)))
@@ -3747,7 +3756,18 @@
     (is (= 2432902008176640000 (t31-fact-rec 20)))
     (is (thrown? ArithmeticException (t31-fact-rec 21)))
     ;; Non-monotonic mixed-sign checked + must preserve right-associated overflow
-    (is (thrown? ArithmeticException (t31-mixed-sign 2)))))
+    (is (thrown? ArithmeticException (t31-mixed-sign 2))))
+  (testing "Multi-branch nested associative TCO preserves exact semantics and with-redefs"
+    (is (= -5 (t31-fib-rev -5)))
+    (is (= 0 (t31-fib-rev 0)))
+    (is (= 1 (t31-fib-rev 1)))
+    (is (= 1 (t31-fib-rev 2)))
+    (is (= 2 (t31-fib-rev 3)))
+    (is (= 6765 (t31-fib-rev 20)))
+    (is (= 1278 (t31-f13 20)))
+    (is (= 184756 (t31-choose 20 10)))
+    (is (= 999 (with-redefs [t31-fib-rev (fn [_] 999)] (t31-fib-rev 10))))
+    (is (= 6765 (t31-fib-rev 20)))))
 
 (def summary (run-tests))
 (when (or (pos? (:fail summary)) (pos? (:error summary)))

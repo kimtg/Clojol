@@ -27,6 +27,7 @@ public final class BytecodeJIT {
     private static final boolean AUTO_MEMO = !"false".equals(System.getProperty("cljl.jit.automemo"));
     private static final boolean CSE = !"false".equals(System.getProperty("cljl.jit.cse"));
     private static final boolean TCO = !"false".equals(System.getProperty("cljl.jit.tco"));
+    private static final int TCO_NEST_DEPTH = Integer.getInteger("cljl.jit.tco.nest", 5);
     private static final AtomicInteger CLASS_ID = new AtomicInteger(0);
     private static final ConcurrentHashMap<String, Object[]> PENDING_CONSTS = new ConcurrentHashMap<>();
 
@@ -80,6 +81,7 @@ public final class BytecodeJIT {
     private static final int DUP2_X2 = 0x5e;
     private static final int LADD = 0x61;
     private static final int DADD = 0x63;
+    private static final int ISUB = 0x64;
     private static final int LSUB = 0x65;
     private static final int DSUB = 0x67;
     private static final int LMUL = 0x69;
@@ -97,6 +99,7 @@ public final class BytecodeJIT {
     private static final int LOR = 0x81;
     private static final int IXOR = 0x82;
     private static final int LXOR = 0x83;
+    private static final int IINC = 0x84;
     private static final int I2L = 0x85;
     private static final int L2I = 0x88;
     private static final int L2D = 0x8a;
@@ -1195,6 +1198,7 @@ public final class BytecodeJIT {
         final boolean recIsElse;
         final Node baseBranch;
         final Node otherExpr;
+        final Node[] otherSelfArgs;
         final Node[] tailArgs;
         final boolean isAdd;
         final boolean unchecked;
@@ -1202,12 +1206,13 @@ public final class BytecodeJIT {
         final int aboveMinSlot;
         final int belowMaxSlot;
 
-        AssocTailLoopSpec(IfNode iff, boolean recIsElse, Node baseBranch, Node otherExpr, Node[] tailArgs,
+        AssocTailLoopSpec(IfNode iff, boolean recIsElse, Node baseBranch, Node otherExpr, Node[] otherSelfArgs, Node[] tailArgs,
                           boolean isAdd, boolean unchecked, int nonNegSlot, int aboveMinSlot, int belowMaxSlot) {
             this.iff = iff;
             this.recIsElse = recIsElse;
             this.baseBranch = baseBranch;
             this.otherExpr = otherExpr;
+            this.otherSelfArgs = otherSelfArgs;
             this.tailArgs = tailArgs;
             this.isAdd = isAdd;
             this.unchecked = unchecked;
@@ -1215,6 +1220,24 @@ public final class BytecodeJIT {
             this.aboveMinSlot = aboveMinSlot;
             this.belowMaxSlot = belowMaxSlot;
         }
+    }
+
+    private static long extractConstDecrement(Node n, int paramSlot) {
+        if (n instanceof Sub2Node s && s.a instanceof LocalNode ln && ln.slot == paramSlot
+                && s.b instanceof ConstNode cn && cn.isLong && cn.longVal > 0L) {
+            return cn.longVal;
+        }
+        if (n instanceof UncheckedSub2Node s && s.a instanceof LocalNode ln && ln.slot == paramSlot
+                && s.b instanceof ConstNode cn && cn.isLong && cn.longVal > 0L) {
+            return cn.longVal;
+        }
+        if (n instanceof DecNode d && d.a instanceof LocalNode ln && ln.slot == paramSlot) {
+            return 1L;
+        }
+        if (n instanceof UncheckedDecNode d && d.a instanceof LocalNode ln && ln.slot == paramSlot) {
+            return 1L;
+        }
+        return -1L;
     }
 
     private static Node[] matchDirectSelfCallArgs(Node n, Var ownerVar, int selfSlot, int arity) {
@@ -1285,7 +1308,7 @@ public final class BytecodeJIT {
         return false;
     }
 
-    private static AssocTailLoopSpec matchAssocTailLoop(ClassEmitter ce, FnMethod m, int arity, PrimSpec ps) {
+    private static AssocTailLoopSpec matchAssocTailLoop(ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, boolean uncheckedLong) {
         if (!TCO || ps.analysis.returnType != ValType.LONG || arity < 1 || arity > 3) return null;
         if (!(m.body instanceof IfNode iff)) return null;
         if (containsSelfCall(iff.test, ce.ownerVar, m.selfSlot, arity)) return null;
@@ -1301,11 +1324,11 @@ public final class BytecodeJIT {
         Node left, right;
         boolean isAdd, unchecked;
         if (recBranch instanceof Add2Node a) {
-            left = a.a; right = a.b; isAdd = true; unchecked = false;
+            left = a.a; right = a.b; isAdd = true; unchecked = uncheckedLong;
         } else if (recBranch instanceof UncheckedAdd2Node a) {
             left = a.a; right = a.b; isAdd = true; unchecked = true;
         } else if (recBranch instanceof Mul2Node a) {
-            left = a.a; right = a.b; isAdd = false; unchecked = false;
+            left = a.a; right = a.b; isAdd = false; unchecked = uncheckedLong;
         } else if (recBranch instanceof UncheckedMul2Node a) {
             left = a.a; right = a.b; isAdd = false; unchecked = true;
         } else {
@@ -1317,7 +1340,28 @@ public final class BytecodeJIT {
         Node[] rightSelf = matchDirectSelfCallArgs(right, ce.ownerVar, m.selfSlot, arity);
         Node[] tailArgs;
         Node otherExpr;
-        if (rightSelf != null) {
+        Node[] otherSelfArgs = null;
+        if (leftSelf != null && rightSelf != null) {
+            // Both branches are direct self-calls (+ / * are commutative & associative, body is pure).
+            // Prefer stepping the loop by the larger decrement to halve loop iterations per level.
+            boolean swapToLeftTail = false;
+            if (arity == 1) {
+                long dLeft = extractConstDecrement(leftSelf[0], m.paramSlots[0]);
+                long dRight = extractConstDecrement(rightSelf[0], m.paramSlots[0]);
+                if (dLeft > 0L && dRight > 0L && dLeft > dRight) {
+                    swapToLeftTail = true;
+                }
+            }
+            if (swapToLeftTail) {
+                tailArgs = leftSelf;
+                otherExpr = right;
+                otherSelfArgs = rightSelf;
+            } else {
+                tailArgs = rightSelf;
+                otherExpr = left;
+                otherSelfArgs = leftSelf;
+            }
+        } else if (rightSelf != null) {
             tailArgs = rightSelf;
             otherExpr = left;
         } else if (leftSelf != null && isSimplePureLongExpr(right, ps.analysis)) {
@@ -1328,6 +1372,14 @@ public final class BytecodeJIT {
         }
         for (Node ta : tailArgs) {
             if (containsSelfCall(ta, ce.ownerVar, m.selfSlot, arity)) return null;
+        }
+        if (otherSelfArgs != null) {
+            for (Node oa : otherSelfArgs) {
+                if (containsSelfCall(oa, ce.ownerVar, m.selfSlot, arity)) {
+                    otherSelfArgs = null;
+                    break;
+                }
+            }
         }
 
         // Extract proven parameter bounds when entering recBranch
@@ -1384,12 +1436,146 @@ public final class BytecodeJIT {
             }
         }
 
-        return new AssocTailLoopSpec(iff, recIsElse, baseBranch, otherExpr, tailArgs,
+        return new AssocTailLoopSpec(iff, recIsElse, baseBranch, otherExpr, otherSelfArgs, tailArgs,
                 isAdd, unchecked, nonNegSlot, aboveMinSlot, belowMaxSlot);
     }
 
+    private static void emitCombineIntoAcc(CodeGen cg, int accSlot, boolean isAdd, boolean useUnchecked) {
+        cg.lload(accSlot);
+        if (isAdd) {
+            if (useUnchecked) cg.ladd();
+            else cg.invokestatic("java/lang/Math", "addExact", "(JJ)J", 4, 2);
+        } else {
+            if (useUnchecked) cg.lmul();
+            else cg.invokestatic("java/lang/Math", "multiplyExact", "(JJ)J", 4, 2);
+        }
+        cg.lstore(accSlot);
+    }
+
+    private static void emitNestedAssocLoopLevel(
+            CodeGen cg, ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName,
+            AssocTailLoopSpec spec, int accSlot, boolean useUnchecked, int depth, int maxDepth) {
+        SlotLayout layout = cg.layout;
+        Label baseLabel = new Label();
+        Label loopTop = new Label();
+
+        if (depth > 0) {
+            if (spec.recIsElse) cg.emitBranchIfTrue(spec.iff.test, baseLabel);
+            else cg.emitBranchIfFalse(spec.iff.test, baseLabel);
+        }
+
+        cg.curStack = 0;
+        cg.markLabel(loopTop);
+
+        boolean addedNonNeg = spec.nonNegSlot != -1 && cg.nonNegativeLong.add(spec.nonNegSlot);
+        boolean addedAbove = spec.aboveMinSlot != -1 && cg.boundedAboveMinLong.add(spec.aboveMinSlot);
+        boolean addedBelow = spec.belowMaxSlot != -1 && cg.boundedBelowMaxLong.add(spec.belowMaxSlot);
+
+        int[] savedJvmSlots = new int[arity];
+        int[] nextJvmSlots = new int[arity];
+        int savedTemp = cg.curTempLocals;
+        for (int i = 0; i < arity; i++) {
+            ValType targetT = layout.slotTypes[m.paramSlots[i]];
+            cg.emitTyped(spec.otherSelfArgs[i], targetT);
+        }
+        for (int i = 0; i < arity; i++) {
+            int logSlot = m.paramSlots[i];
+            savedJvmSlots[i] = layout.jvmSlot[logSlot];
+            ValType targetT = layout.slotTypes[logSlot];
+            int words = (targetT == ValType.LONG || targetT == ValType.DOUBLE) ? 2 : 1;
+            nextJvmSlots[i] = cg.allocTempLocal(words);
+        }
+        for (int i = arity - 1; i >= 0; i--) {
+            ValType targetT = layout.slotTypes[m.paramSlots[i]];
+            cg.storeJvmLocal(nextJvmSlots[i], targetT);
+        }
+
+        for (int i = 0; i < arity; i++) {
+            layout.jvmSlot[m.paramSlots[i]] = nextJvmSlots[i];
+        }
+        Set<Integer> savedNonNeg = new HashSet<>(cg.nonNegativeLong);
+        Set<Integer> savedAbove = new HashSet<>(cg.boundedAboveMinLong);
+        Set<Integer> savedBelow = new HashSet<>(cg.boundedBelowMaxLong);
+        cg.nonNegativeLong.clear();
+        cg.boundedAboveMinLong.clear();
+        cg.boundedBelowMaxLong.clear();
+
+        if (depth < maxDepth) {
+            emitNestedAssocLoopLevel(cg, ce, m, arity, ps, fastName, spec, accSlot, useUnchecked, depth + 1, maxDepth);
+        } else {
+            Label callLabel = new Label();
+            Label afterLeaf = new Label();
+            if (spec.recIsElse) cg.emitBranchIfFalse(spec.iff.test, callLabel);
+            else cg.emitBranchIfTrue(spec.iff.test, callLabel);
+
+            cg.emitLong(spec.baseBranch);
+            emitCombineIntoAcc(cg, accSlot, spec.isAdd, useUnchecked);
+            cg.gotoLabel(afterLeaf);
+
+            cg.curStack = 0;
+            cg.markLabel(callLabel);
+            int argWords = 0;
+            for (int i = 0; i < arity; i++) {
+                ValType paramT = ps.paramTypes[i];
+                ValType slotT = layout.slotTypes[m.paramSlots[i]];
+                cg.loadJvmLocal(nextJvmSlots[i], slotT);
+                cg.convertValue(slotT, paramT);
+                argWords += (paramT == ValType.LONG || paramT == ValType.DOUBLE) ? 2 : 1;
+            }
+            cg.invokestatic(ce.className, fastName, ps.descriptor, argWords, 2);
+            emitCombineIntoAcc(cg, accSlot, spec.isAdd, useUnchecked);
+
+            cg.curStack = 0;
+            cg.markLabel(afterLeaf);
+        }
+
+        for (int i = 0; i < arity; i++) {
+            layout.jvmSlot[m.paramSlots[i]] = savedJvmSlots[i];
+        }
+        cg.nonNegativeLong.clear();
+        cg.nonNegativeLong.addAll(savedNonNeg);
+        cg.boundedAboveMinLong.clear();
+        cg.boundedAboveMinLong.addAll(savedAbove);
+        cg.boundedBelowMaxLong.clear();
+        cg.boundedBelowMaxLong.addAll(savedBelow);
+        cg.curTempLocals = savedTemp;
+
+        for (int i = 0; i < arity; i++) {
+            ValType targetT = layout.slotTypes[m.paramSlots[i]];
+            cg.emitTyped(spec.tailArgs[i], targetT);
+        }
+        for (int i = arity - 1; i >= 0; i--) {
+            cg.storeLogicalSlot(m.paramSlots[i]);
+        }
+
+        if (addedNonNeg) cg.nonNegativeLong.remove(spec.nonNegSlot);
+        if (addedAbove) cg.boundedAboveMinLong.remove(spec.aboveMinSlot);
+        if (addedBelow) cg.boundedBelowMaxLong.remove(spec.belowMaxSlot);
+
+        if (spec.recIsElse) cg.emitBranchIfFalse(spec.iff.test, loopTop);
+        else cg.emitBranchIfTrue(spec.iff.test, loopTop);
+
+        cg.curStack = 0;
+        if (depth > 0) {
+            cg.markLabel(baseLabel);
+            cg.emitLong(spec.baseBranch);
+            emitCombineIntoAcc(cg, accSlot, spec.isAdd, useUnchecked);
+        } else {
+            cg.emitLong(spec.baseBranch);
+            cg.lload(accSlot);
+            if (spec.isAdd) {
+                if (useUnchecked) cg.ladd();
+                else cg.invokestatic("java/lang/Math", "addExact", "(JJ)J", 4, 2);
+            } else {
+                if (useUnchecked) cg.lmul();
+                else cg.invokestatic("java/lang/Math", "multiplyExact", "(JJ)J", 4, 2);
+            }
+            cg.lreturn();
+        }
+    }
+
     private static void emitAssocTailLoopWorker(
-            ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName, boolean canSelfInline, AssocTailLoopSpec spec) {
+            ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName, boolean canSelfInline, boolean uncheckedLong, AssocTailLoopSpec spec) {
         int[] argJvmSlots = new int[arity];
         int nextArgSlot = 0;
         for (int i = 0; i < arity; i++) {
@@ -1412,6 +1598,7 @@ public final class BytecodeJIT {
         cg.staticFastSelfMethodName = fastName;
         cg.staticFastSelfCanInline = canSelfInline;
         cg.staticFastSelfInlineDepth = 0;
+        cg.uncheckedLongArith = uncheckedLong;
 
         for (int i = 0; i < arity; i++) {
             ValType entryT = ps.paramTypes[i];
@@ -1440,6 +1627,15 @@ public final class BytecodeJIT {
         cg.ldcLong(spec.isAdd ? 0L : 1L);
         cg.lstore(accSlot);
 
+        boolean useUnchecked = spec.unchecked || uncheckedLong;
+        if (spec.otherSelfArgs != null && TCO_NEST_DEPTH > 0) {
+            int maxDepth = arity == 1 ? Math.min(TCO_NEST_DEPTH, 8)
+                    : (arity == 2 ? Math.min(TCO_NEST_DEPTH, 3) : Math.min(TCO_NEST_DEPTH, 2));
+            emitNestedAssocLoopLevel(cg, ce, m, arity, ps, fastName, spec, accSlot, useUnchecked, 0, maxDepth);
+            cg.finish();
+            return;
+        }
+
         Label loopTop = new Label();
         cg.markLabel(loopTop);
 
@@ -1449,15 +1645,7 @@ public final class BytecodeJIT {
 
         // Evaluate otherExpr at stack depth 0, then combine into accSlot
         cg.emitLong(spec.otherExpr);
-        cg.lload(accSlot);
-        if (spec.isAdd) {
-            if (spec.unchecked) cg.ladd();
-            else cg.invokestatic("java/lang/Math", "addExact", "(JJ)J", 4, 2);
-        } else {
-            if (spec.unchecked) cg.lmul();
-            else cg.invokestatic("java/lang/Math", "multiplyExact", "(JJ)J", 4, 2);
-        }
-        cg.lstore(accSlot);
+        emitCombineIntoAcc(cg, accSlot, spec.isAdd, useUnchecked);
 
         // Compute next loop arguments and assign to param slots
         for (int i = 0; i < arity; i++) {
@@ -1478,10 +1666,10 @@ public final class BytecodeJIT {
         cg.emitLong(spec.baseBranch);
         cg.lload(accSlot);
         if (spec.isAdd) {
-            if (spec.unchecked) cg.ladd();
+            if (useUnchecked) cg.ladd();
             else cg.invokestatic("java/lang/Math", "addExact", "(JJ)J", 4, 2);
         } else {
-            if (spec.unchecked) cg.lmul();
+            if (useUnchecked) cg.lmul();
             else cg.invokestatic("java/lang/Math", "multiplyExact", "(JJ)J", 4, 2);
         }
         cg.lreturn();
@@ -1490,6 +1678,11 @@ public final class BytecodeJIT {
 
     private static void emitStaticFastBody(
             ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String methodName, boolean canSelfInline, boolean uncheckedLong) {
+        AssocTailLoopSpec tcoSpec = matchAssocTailLoop(ce, m, arity, ps, uncheckedLong);
+        if (tcoSpec != null) {
+            emitAssocTailLoopWorker(ce, m, arity, ps, methodName, canSelfInline, uncheckedLong, tcoSpec);
+            return;
+        }
         int[] argJvmSlots = new int[arity];
         int nextArgSlot = 0;
         for (int i = 0; i < arity; i++) {
@@ -1533,6 +1726,184 @@ public final class BytecodeJIT {
         cg.finish();
     }
 
+    private static void emitIntBaseValToLong(CodeGen cg, int pSlot, int tableSlot, boolean baseIsParam, long baseConstVal) {
+        if (tableSlot >= 0) {
+            cg.aload(tableSlot);
+            cg.iload(pSlot);
+            cg.laload();
+        } else if (baseIsParam) {
+            cg.iload(pSlot);
+            cg.i2l();
+        } else {
+            cg.ldcLong(baseConstVal);
+        }
+    }
+
+    private static void emitIntNestedAssocLevel(
+            CodeGen cg, String className, String methodName, int baseThresh, int dOther, int dTail,
+            int tableSlot, int firstChildSlot, boolean baseIsParam, long baseConstVal, boolean isAdd, int depth, int maxDepth) {
+        int pSlot = (depth == 0) ? 0 : (firstChildSlot + depth - 1);
+        int childSlot = firstChildSlot + depth;
+        Label baseLabel = new Label();
+        Label loopTop = new Label();
+
+        if (depth > 0) {
+            cg.iload(pSlot);
+            cg.iconst(baseThresh);
+            cg.ifIcmpLt(baseLabel);
+        }
+
+        cg.curStack = 0;
+        cg.markLabel(loopTop);
+
+        cg.iload(pSlot);
+        cg.iconst(dOther);
+        cg.isub();
+        cg.istore(childSlot);
+
+        if (depth + 1 < maxDepth) {
+            emitIntNestedAssocLevel(cg, className, methodName, baseThresh, dOther, dTail,
+                    tableSlot, firstChildSlot, baseIsParam, baseConstVal, isAdd, depth + 1, maxDepth);
+        } else {
+            Label callLabel = new Label();
+            Label mergeLabel = new Label();
+            cg.lload(1);
+            cg.iload(childSlot);
+            cg.iconst(baseThresh);
+            cg.ifIcmpGe(callLabel);
+
+            emitIntBaseValToLong(cg, childSlot, tableSlot, baseIsParam, baseConstVal);
+            cg.gotoLabel(mergeLabel);
+
+            cg.curStack = 2;
+            cg.markLabel(callLabel);
+            cg.iload(childSlot);
+            cg.invokestatic(className, methodName, "(I)J", 1, 2);
+
+            cg.curStack = 4;
+            cg.markLabel(mergeLabel);
+            if (isAdd) cg.ladd();
+            else cg.lmul();
+            cg.lstore(1);
+        }
+
+        cg.iinc(pSlot, -dTail);
+        cg.iload(pSlot);
+        cg.iconst(baseThresh);
+        cg.ifIcmpGe(loopTop);
+
+        cg.curStack = 0;
+        if (depth > 0) {
+            cg.markLabel(baseLabel);
+            emitIntBaseValToLong(cg, pSlot, tableSlot, baseIsParam, baseConstVal);
+            emitCombineIntoAcc(cg, 1, isAdd, true);
+        } else {
+            emitIntBaseValToLong(cg, 0, tableSlot, baseIsParam, baseConstVal);
+            cg.lload(1);
+            if (isAdd) cg.ladd();
+            else cg.lmul();
+            cg.lreturn();
+        }
+    }
+
+    private static boolean tryEmitIntNarrowedNestedAssocWorker(
+            ClassEmitter ce, FnMethod m, PrimSpec ps, String methodName, long safeMaxInput) {
+        if (!TCO || TCO_NEST_DEPTH <= 0 || safeMaxInput > Integer.MAX_VALUE) return false;
+        AssocTailLoopSpec spec = matchAssocTailLoop(ce, m, 1, ps, true);
+        if (spec == null || spec.otherSelfArgs == null) return false;
+        int paramSlot = m.paramSlots[0];
+
+        // Extract base threshold such that loop runs iff p >= baseThresh
+        long threshLong = Long.MIN_VALUE;
+        Node test = spec.iff.test;
+        if (spec.recIsElse) {
+            if (test instanceof Lt2Node lt && lt.a instanceof LocalNode ln && ln.slot == paramSlot
+                    && lt.b instanceof ConstNode cn && cn.isLong) {
+                threshLong = cn.longVal;
+            } else if (test instanceof Lte2Node le && le.a instanceof LocalNode ln && ln.slot == paramSlot
+                    && le.b instanceof ConstNode cn && cn.isLong && cn.longVal < Integer.MAX_VALUE) {
+                threshLong = cn.longVal + 1L;
+            }
+        } else {
+            if (test instanceof Gte2Node ge && ge.a instanceof LocalNode ln && ln.slot == paramSlot
+                    && ge.b instanceof ConstNode cn && cn.isLong) {
+                threshLong = cn.longVal;
+            } else if (test instanceof Gt2Node gt && gt.a instanceof LocalNode ln && ln.slot == paramSlot
+                    && gt.b instanceof ConstNode cn && cn.isLong && cn.longVal < Integer.MAX_VALUE) {
+                threshLong = cn.longVal + 1L;
+            }
+        }
+        if (threshLong < -1000000L || threshLong > 1000000L) return false;
+        int baseThresh = (int) threshLong;
+
+        long dTail = extractConstDecrement(spec.tailArgs[0], paramSlot);
+        long dOther = extractConstDecrement(spec.otherSelfArgs[0], paramSlot);
+        if (dTail < 1L || dTail > 127L || dOther < 1L || dOther > 127L) return false;
+
+        boolean baseIsParam = spec.baseBranch instanceof LocalNode ln && ln.slot == paramSlot;
+        boolean baseIsConst = spec.baseBranch instanceof ConstNode cn && cn.isLong;
+        if (!baseIsParam && !baseIsConst) return false;
+        long baseConstVal = baseIsConst ? ((ConstNode) spec.baseBranch).longVal : 0L;
+
+        // 2-step compile-time base-case peeling (constant-folding the bottom 2 recursion levels
+        // into a tiny immutable long[] table; asymptotic complexity remains strictly exponential).
+        int effectiveThresh = baseThresh;
+        long[] baseTable = null;
+        int peelCandidate = baseThresh + 2;
+        if (baseThresh >= 0 && peelCandidate <= safeMaxInput && peelCandidate <= 16
+                && peelCandidate >= Math.max((int) dTail, (int) dOther)) {
+            long[] tbl = new long[peelCandidate];
+            boolean ok = true;
+            for (int k = 0; k < baseThresh; k++) {
+                tbl[k] = baseIsParam ? (long) k : baseConstVal;
+            }
+            for (int k = baseThresh; k < peelCandidate; k++) {
+                int i1 = k - (int) dOther;
+                int i2 = k - (int) dTail;
+                long v1 = i1 < 0 ? (baseIsParam ? (long) i1 : baseConstVal) : tbl[i1];
+                long v2 = i2 < 0 ? (baseIsParam ? (long) i2 : baseConstVal) : tbl[i2];
+                try {
+                    tbl[k] = spec.isAdd ? Math.addExact(v1, v2) : Math.multiplyExact(v1, v2);
+                } catch (ArithmeticException ex) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) {
+                baseTable = tbl;
+                effectiveThresh = peelCandidate;
+            }
+        }
+
+        int maxDepth = Math.max(1, Math.min(TCO_NEST_DEPTH, 8));
+        int tableSlot = baseTable != null ? 3 : -1;
+        int firstChildSlot = baseTable != null ? 4 : 3;
+        CodeGen cg = ce.beginStaticMethod(methodName, "(I)J", firstChildSlot + maxDepth);
+
+        if (baseTable != null) {
+            cg.loadConstObj(baseTable);
+            cg.checkcast("[J");
+            cg.astore(tableSlot);
+        }
+
+        Label loopInit = new Label();
+        cg.iload(0);
+        cg.iconst(effectiveThresh);
+        cg.ifIcmpGe(loopInit);
+        emitIntBaseValToLong(cg, 0, tableSlot, baseIsParam, baseConstVal);
+        cg.lreturn();
+
+        cg.curStack = 0;
+        cg.markLabel(loopInit);
+        cg.ldcLong(spec.isAdd ? 0L : 1L);
+        cg.lstore(1);
+
+        emitIntNestedAssocLevel(cg, ce.className, methodName, effectiveThresh, (int) dOther, (int) dTail,
+                tableSlot, firstChildSlot, baseIsParam, baseConstVal, spec.isAdd, 0, maxDepth);
+        cg.finish();
+        return true;
+    }
+
     private static void emitStaticFastPrimWorker(
             ClassEmitter ce, FnMethod m, int arity, PrimSpec ps, String fastName, boolean canSelfInline, int selfCallCount) {
         if (canEmitPureMemoPrim(arity, ps, selfCallCount)) {
@@ -1545,9 +1916,9 @@ public final class BytecodeJIT {
             return;
         }
         if (selfCallCount == 1) {
-            AssocTailLoopSpec tcoSpec = matchAssocTailLoop(ce, m, arity, ps);
+            AssocTailLoopSpec tcoSpec = matchAssocTailLoop(ce, m, arity, ps, false);
             if (tcoSpec != null) {
-                emitAssocTailLoopWorker(ce, m, arity, ps, fastName, false, tcoSpec);
+                emitAssocTailLoopWorker(ce, m, arity, ps, fastName, false, false, tcoSpec);
                 return;
             }
         }
@@ -1557,7 +1928,10 @@ public final class BytecodeJIT {
                 && arity == 1 && ps.paramTypes[0] == ValType.LONG && ps.analysis.returnType == ValType.LONG) {
             String unchkName = fastName + "$u";
             String chkName = fastName + "$c";
-            emitStaticFastBody(ce, m, arity, ps, unchkName, canSelfInline, true);
+            boolean intNarrowed = tryEmitIntNarrowedNestedAssocWorker(ce, m, ps, unchkName, linearSpec.safeMaxInput);
+            if (!intNarrowed) {
+                emitStaticFastBody(ce, m, arity, ps, unchkName, canSelfInline, true);
+            }
             emitStaticFastBody(ce, m, arity, ps, chkName, canSelfInline, false);
 
             CodeGen cg = ce.beginStaticMethod(fastName, ps.descriptor, 2);
@@ -1571,7 +1945,12 @@ public final class BytecodeJIT {
             cg.lcmp();
             cg.ifgt(fallback);
             cg.lload(0);
-            cg.invokestatic(ce.className, unchkName, "(J)J", 2, 2);
+            if (intNarrowed) {
+                cg.l2i();
+                cg.invokestatic(ce.className, unchkName, "(I)J", 1, 2);
+            } else {
+                cg.invokestatic(ce.className, unchkName, "(J)J", 2, 2);
+            }
             cg.lreturn();
 
             cg.curStack = 0;
@@ -2276,7 +2655,9 @@ public final class BytecodeJIT {
         void ifle(Label l) { emitJump(IFLE, l); }
         void ifIcmpNe(Label l) { emitJump(IF_ICMPNE, l); }
         void ifIcmpLt(Label l) { emitJump(IF_ICMPLT, l); }
+        void ifIcmpGe(Label l) { emitJump(IF_ICMPGE, l); }
         void ifIcmpGt(Label l) { emitJump(IF_ICMPGT, l); }
+        void ifIcmpLe(Label l) { emitJump(IF_ICMPLE, l); }
         void ifnull(Label l) { emitJump(IFNULL, l); }
         void ifnonnull(Label l) { emitJump(IFNONNULL, l); }
         void ifAcmpNe(Label l) { emitJump(IF_ACMPNE, l); }
@@ -2433,6 +2814,12 @@ public final class BytecodeJIT {
         void dup2() { code.write(DUP2); adjStack(2); }
         void dup2X2() { code.write(DUP2_X2); adjStack(2); }
         void ixor() { code.write(IXOR); adjStack(-1); }
+        void isub() { code.write(ISUB); adjStack(-1); }
+        void iinc(int idx, int delta) {
+            code.write(IINC);
+            code.write(idx & 0xff);
+            code.write(delta & 0xff);
+        }
         void ladd() { code.write(LADD); adjStack(-2); }
         void lsub() { code.write(LSUB); adjStack(-2); }
         void lmul() { code.write(LMUL); adjStack(-2); }
