@@ -144,7 +144,7 @@ public final class Main {
         try {
             runMain(combinedMainArgs.toArray(new String[0]));
         } catch (Throwable t) {
-            printError(t, "file");
+            printError(t, "stderr");
             System.exit(1);
         }
     }
@@ -154,7 +154,7 @@ public final class Main {
     // ========================================================================
 
     public static void runMain(String[] args) {
-        String reportTarget = "file";
+        String reportTarget = "stderr";
         boolean hadInit = false;
         int i = 0;
 
@@ -714,7 +714,7 @@ public final class Main {
     }
 
     // ========================================================================
-    // Error Reporting (`file`, `stderr`, `none`)
+    // Error Reporting (`stderr`, `none`; `file` prints directly to stderr)
     // ========================================================================
 
     public static void printError(Throwable t, String reportTarget) {
@@ -723,40 +723,9 @@ public final class Main {
             System.err.println("Execution error (" + t.getClass().getSimpleName() + "): " + msg);
             return;
         }
-        if ("stderr".equals(reportTarget)) {
-            System.err.println("Execution error (" + t.getClass().getSimpleName() + "): " + msg);
-            if (t.getCause() != null) {
-                System.err.println("  Caused by: " + t.getCause());
-            }
-            t.printStackTrace(System.err);
-            return;
-        }
-
-        // "file" target (clojure.main default)
         System.err.println("Execution error (" + t.getClass().getSimpleName() + "): " + msg);
         if (t.getCause() != null) {
             System.err.println("  Caused by: " + t.getCause());
-        }
-        try {
-            Path reportPath = Files.createTempFile("clojure-", ".edn");
-            StringWriter sw = new StringWriter();
-            t.printStackTrace(new PrintWriter(sw));
-            List<Object> traceVec = new ArrayList<>();
-            for (StackTraceElement ste : t.getStackTrace()) {
-                traceVec.add(PersistentVector.create(Arrays.asList(
-                        Symbol.intern(ste.getClassName()),
-                        Symbol.intern(ste.getMethodName()),
-                        ste.getFileName(),
-                        (long) ste.getLineNumber())));
-            }
-            PersistentHashMap reportMap = PersistentHashMap.create(
-                    Keyword.intern("clojure.main/error"), msg,
-                    Keyword.intern("clojure.main/type"), Symbol.intern(t.getClass().getName()),
-                    Keyword.intern("clojure.main/trace"), PersistentVector.create(traceVec));
-            Files.writeString(reportPath, RT.printString(reportMap, true) + "\n", StandardCharsets.UTF_8);
-            System.err.println("Full report at:\n" + reportPath);
-        } catch (IOException ignored) {
-            // Non-fatal if temp directory is unavailable
         }
     }
 
@@ -802,7 +771,7 @@ public final class Main {
         System.out.println("init-opt:");
         System.out.println(" -i, --init path     Load a file or resource");
         System.out.println(" -e, --eval string   Eval exprs in string; print non-nil values");
-        System.out.println(" --report target     Report uncaught exception to \"file\" (default), \"stderr\", or \"none\"");
+        System.out.println(" --report target     Report uncaught exception to \"stderr\" (default) or \"none\" (\"file\" also reports to stderr)");
         System.out.println();
         System.out.println("main-opt:");
         System.out.println(" -m, --main ns-name  Call the -main function from namespace w/args");

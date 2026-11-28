@@ -154,7 +154,7 @@ Script arguments are bound to `*command-line-args*`. Pass `-` to read and execut
 | | `-version`, `--version` | Print Clojol & Clojure CLI version and exit |
 | **Init (`clojure.main`)** | `-i`, `--init PATH` | Load a Clojure file or classpath resource |
 | | `-e`, `--eval EXPR` | Evaluate exprs in string and print non-nil values |
-| | `--report TARGET` | Report uncaught exceptions to `"file"` (default), `"stderr"`, or `"none"` |
+| | `--report TARGET` | Report uncaught exceptions to `"stderr"` (default) or `"none"` (`"file"` also reports to stderr) |
 | **Main (`clojure.main`)** | `-m`, `--main NS` | Call `-main` in namespace `NS` with remaining args |
 | | `-r`, `--repl` | Run an interactive REPL |
 | | `PATH` | Run a script from a file or classpath resource |

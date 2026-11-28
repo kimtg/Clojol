@@ -426,8 +426,8 @@ public final class StdLibMore {
             return strFn.invoke(triageFn.invoke(thFn.invoke(e)));
         }));
         ns.intern("report-error", Fn.of12("report-error",
-                t -> reportErrorImpl(t, Keyword.intern("target"), Keyword.intern("file")),
-                (t, opts) -> reportErrorImpl(t, opts, Keyword.intern("file"))));
+                t -> reportErrorImpl(t, null, Keyword.intern("stderr")),
+                (t, opts) -> reportErrorImpl(t, opts, Keyword.intern("stderr"))));
         ns.intern("repl-exception", Fn.of1("repl-exception", t -> t));
         ns.intern("repl-prompt", Fn.of0("repl-prompt", () -> {
             PrintWriter pw = StdLib.outWriter();

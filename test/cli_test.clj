@@ -174,7 +174,12 @@
           (let [res (run-cljl {:dir tmp} "(println (+ 10 20))\n" ["-"])]
             (is (= 0 (:exit res)))
             (is (= "30" (str/trim (:out res))))))
-        (testing "--report targets: none, stderr, file"
+        (testing "--report targets: default, none, stderr, file (all report to stderr directly, no external file)"
+          (let [res-def (run-cljl {:dir tmp} ["-e" "(throw (ex-info \"boom-default\" {}))"])]
+            (is (not= 0 (:exit res-def)))
+            (is (str/includes? (:err res-def) "boom-default"))
+            (is (str/includes? (:err res-def) "at "))
+            (is (not (str/includes? (:err res-def) "Full report at:"))))
           (let [res-none (run-cljl {:dir tmp} ["--report" "none" "-e" "(throw (ex-info \"boom-none\" {}))"])]
             (is (not= 0 (:exit res-none)))
             (is (not (str/includes? (:err res-none) "Full report at:")))
@@ -182,14 +187,13 @@
           (let [res-err (run-cljl {:dir tmp} ["--report" "stderr" "-e" "(throw (ex-info \"boom-err\" {}))"])]
             (is (not= 0 (:exit res-err)))
             (is (str/includes? (:err res-err) "boom-err"))
+            (is (str/includes? (:err res-err) "at "))
             (is (not (str/includes? (:err res-err) "Full report at:"))))
           (let [res-file (run-cljl {:dir tmp} ["--report" "file" "-e" "(throw (ex-info \"boom-file\" {}))"])]
             (is (not= 0 (:exit res-file)))
-            (is (str/includes? (:err res-file) "Full report at:"))
-            (when-let [[_ path-str] (re-find #"Full report at:\s*(\S+)" (:err res-file))]
-              (let [rp (path-of path-str)]
-                (is (Files/exists rp (into-array java.nio.file.LinkOption [])))
-                (Files/deleteIfExists rp)))))
+            (is (str/includes? (:err res-file) "boom-file"))
+            (is (str/includes? (:err res-file) "at "))
+            (is (not (str/includes? (:err res-file) "Full report at:")))))
         (testing "-- stops clj option parsing and passes remaining args to clojure.main"
           (let [res (run-cljl {:dir tmp} ["--report" "-not-consumed-as-clj"])]
             (is (not= 0 (:exit res))))
