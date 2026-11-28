@@ -249,8 +249,12 @@ public final class RT {
     public static int hash(Object o) {
         if (o == null) return 0;
         if (o instanceof IHashEq ih) return ih.hasheq();
-        if (o instanceof String s) return Murmur3.hashUnencodedChars(s);
-        if (o instanceof Long l) return Murmur3.hashLong(l);
+        if (o instanceof String s) return Murmur3.hashInt(s.hashCode());
+        if (o instanceof Long l) return Murmur3.hashLong(l.longValue());
+        return hashSlow(o);
+    }
+
+    private static int hashSlow(Object o) {
         if (o instanceof Integer || o instanceof Short || o instanceof Byte) {
             return Murmur3.hashLong(((Number) o).longValue());
         }
@@ -662,12 +666,31 @@ public final class RT {
     }
 
     public static Object get(Object coll, Object key) {
-        return get(coll, key, null);
+        if (coll instanceof PersistentHashMap m) return m.valAt(key, null);
+        if (coll instanceof PersistentArrayMap m) return m.valAt(key, null);
+        return getSlow(coll, key, null);
     }
 
     public static Object get(Object coll, Object key, Object notFound) {
-        if (coll == null) return notFound;
         if (coll instanceof PersistentHashMap m) return m.valAt(key, notFound);
+        if (coll instanceof PersistentArrayMap m) return m.valAt(key, notFound);
+        return getSlow(coll, key, notFound);
+    }
+
+    public static Object getKeyword(Object coll, Keyword key) {
+        if (coll instanceof PersistentHashMap m) return m.valAtKeyword(key, null);
+        if (coll instanceof PersistentArrayMap m) return m.valAtKeyword(key, null);
+        return getSlow(coll, key, null);
+    }
+
+    public static Object getKeyword(Object coll, Keyword key, Object notFound) {
+        if (coll instanceof PersistentHashMap m) return m.valAtKeyword(key, notFound);
+        if (coll instanceof PersistentArrayMap m) return m.valAtKeyword(key, notFound);
+        return getSlow(coll, key, notFound);
+    }
+
+    private static Object getSlow(Object coll, Object key, Object notFound) {
+        if (coll == null) return notFound;
         if (coll instanceof clojure.lang.ILookup lu) return lu.valAt(key, notFound);
         if (coll instanceof PersistentHashSet s) return s.get(key, notFound);
         if (coll instanceof PersistentTreeSet s) return s.get(key, notFound);
@@ -783,8 +806,12 @@ public final class RT {
     }
 
     public static Object nth(Object coll, int n) {
-        if (coll == null) return null;
         if (coll instanceof PersistentVector v) return v.nth(n);
+        return nthSlow(coll, n);
+    }
+
+    private static Object nthSlow(Object coll, int n) {
+        if (coll == null) return null;
         if (coll instanceof PersistentVector.SubVec sv) return sv.nth(n);
         if (coll instanceof clojure.lang.IPersistentVector v) return v.nth(n);
         if (coll instanceof CharSequence cs) return cs.charAt(n);
@@ -826,9 +853,13 @@ public final class RT {
     }
 
     public static Object nth(Object coll, int n, Object notFound) {
+        if (coll instanceof PersistentVector v) return v.nth(n, notFound);
+        return nthSlow(coll, n, notFound);
+    }
+
+    private static Object nthSlow(Object coll, int n, Object notFound) {
         if (coll == null) return notFound;
         if (n < 0) return notFound;
-        if (coll instanceof PersistentVector v) return v.nth(n, notFound);
         if (coll instanceof PersistentVector.SubVec sv) return sv.nth(n, notFound);
         if (coll instanceof clojure.lang.IPersistentVector v) return v.nth(n, notFound);
         if (coll instanceof CharSequence cs) return n < cs.length() ? cs.charAt(n) : notFound;

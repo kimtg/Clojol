@@ -122,8 +122,25 @@ public final class PersistentArrayMap extends clojure.lang.PersistentArrayMap
 
     @Override
     public Object valAt(Object key, Object notFound) {
-        int i = indexOf(key);
-        return i >= 0 ? array[i + 1] : notFound;
+        Object[] arr = this.array;
+        if (key instanceof cljl.Keyword) {
+            for (int i = 0, len = arr.length; i < len; i += 2) {
+                if (arr[i] == key) return arr[i + 1];
+            }
+            return notFound;
+        }
+        for (int i = 0, len = arr.length; i < len; i += 2) {
+            if (RT.equiv(arr[i], key)) return arr[i + 1];
+        }
+        return notFound;
+    }
+
+    public Object valAtKeyword(cljl.Keyword key, Object notFound) {
+        Object[] arr = this.array;
+        for (int i = 0, len = arr.length; i < len; i += 2) {
+            if (arr[i] == key) return arr[i + 1];
+        }
+        return notFound;
     }
 
     @Override

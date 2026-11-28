@@ -2,6 +2,7 @@ package cljl;
 
 import cljl.lang.IHashEq;
 import cljl.lang.ILookup;
+import cljl.lang.PersistentArrayMap;
 import cljl.lang.PersistentHashMap;
 import java.io.Serializable;
 import java.util.concurrent.ConcurrentHashMap;
@@ -74,10 +75,13 @@ public final class Keyword extends clojure.lang.Keyword implements cljl.lang.Nam
         if (coll instanceof PersistentHashMap phm) {
             return phm.valAtKeyword(this, null);
         }
+        if (coll instanceof PersistentArrayMap pam) {
+            return pam.valAtKeyword(this, null);
+        }
         if (coll instanceof clojure.lang.ILookup lu) {
             return lu.valAt(this, null);
         }
-        return RT.get(coll, this);
+        return RT.getKeyword(coll, this, null);
     }
 
     @Override
@@ -95,10 +99,13 @@ public final class Keyword extends clojure.lang.Keyword implements cljl.lang.Nam
         if (coll instanceof PersistentHashMap phm) {
             return phm.valAtKeyword(this, notFound);
         }
+        if (coll instanceof PersistentArrayMap pam) {
+            return pam.valAtKeyword(this, notFound);
+        }
         if (coll instanceof clojure.lang.ILookup lu) {
             return lu.valAt(this, notFound);
         }
-        return RT.get(coll, this, notFound);
+        return RT.getKeyword(coll, this, notFound);
     }
 
     @Override

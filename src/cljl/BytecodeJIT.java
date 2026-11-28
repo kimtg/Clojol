@@ -6030,15 +6030,41 @@ public final class BytecodeJIT {
             }
             if (node instanceof GetNode a) {
                 ValType ct = typeOf(a.coll);
+                ValType kt = typeOf(a.key);
+                boolean keyIsKw = (a.key instanceof ConstNode cn && cn.val instanceof Keyword)
+                        || (kt.isRef() && kt.nonNull && kt.refClass == Keyword.class);
                 if (ct.isRef() && ct.nonNull) {
                     if (ct.refClass == PersistentHashMap.class) {
                         emitRef(a.coll, PersistentHashMap.class);
-                        emitBoxed(a.key);
-                        if (a.notFound == null) {
-                            invokevirtual("cljl/lang/PersistentHashMap", "valAt", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                        if (keyIsKw) {
+                            emitRef(a.key, Keyword.class);
+                            if (a.notFound == null) aconstNull(); else emitBoxed(a.notFound);
+                            invokevirtual("cljl/lang/PersistentHashMap", "valAtKeyword", "(Lcljl/Keyword;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
                         } else {
-                            emitBoxed(a.notFound);
-                            invokevirtual("cljl/lang/PersistentHashMap", "valAt", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                            emitBoxed(a.key);
+                            if (a.notFound == null) {
+                                invokevirtual("cljl/lang/PersistentHashMap", "valAt", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                            } else {
+                                emitBoxed(a.notFound);
+                                invokevirtual("cljl/lang/PersistentHashMap", "valAt", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                            }
+                        }
+                        return false;
+                    }
+                    if (ct.refClass == PersistentArrayMap.class) {
+                        emitRef(a.coll, PersistentArrayMap.class);
+                        if (keyIsKw) {
+                            emitRef(a.key, Keyword.class);
+                            if (a.notFound == null) aconstNull(); else emitBoxed(a.notFound);
+                            invokevirtual("cljl/lang/PersistentArrayMap", "valAtKeyword", "(Lcljl/Keyword;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                        } else {
+                            emitBoxed(a.key);
+                            if (a.notFound == null) {
+                                invokevirtual("cljl/lang/PersistentArrayMap", "valAt", "(Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                            } else {
+                                emitBoxed(a.notFound);
+                                invokevirtual("cljl/lang/PersistentArrayMap", "valAt", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                            }
                         }
                         return false;
                     }
@@ -6055,12 +6081,22 @@ public final class BytecodeJIT {
                     }
                 }
                 emitBoxed(a.coll);
-                emitBoxed(a.key);
-                if (a.notFound == null) {
-                    invokestatic("cljl/RT", "get", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                if (keyIsKw) {
+                    emitRef(a.key, Keyword.class);
+                    if (a.notFound == null) {
+                        invokestatic("cljl/RT", "getKeyword", "(Ljava/lang/Object;Lcljl/Keyword;)Ljava/lang/Object;", 2, 1);
+                    } else {
+                        emitBoxed(a.notFound);
+                        invokestatic("cljl/RT", "getKeyword", "(Ljava/lang/Object;Lcljl/Keyword;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                    }
                 } else {
-                    emitBoxed(a.notFound);
-                    invokestatic("cljl/RT", "get", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                    emitBoxed(a.key);
+                    if (a.notFound == null) {
+                        invokestatic("cljl/RT", "get", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 2, 1);
+                    } else {
+                        emitBoxed(a.notFound);
+                        invokestatic("cljl/RT", "get", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 3, 1);
+                    }
                 }
                 return false;
             }

@@ -60,11 +60,11 @@ Median of 5 runs after warmup on OpenJDK 25.0.4.1 (Windows):
 | `str/split` (`20k` CSV) | **0.98 ms** | 1.79 ms | **1.8x faster** |
 | `transduce (comp (map inc) (filter even?)) + 0 (range 100k)` | **0.21 ms** | 0.34 ms | **1.6x faster** |
 | `defprotocol` bimorphic dispatch (`500k`, 2 records) | **1.35 ms** | 1.90 ms | **1.4x faster** |
-| `frequencies` (`50k`) | **2.01 ms** | 2.20 ms | **1.1x faster** |
+| `frequencies` (`50k`) | **1.83 ms** | 2.21 ms | **1.2x faster** |
+| `map` `get` (`50k` keywords) | **1.66 ms** | 1.97 ms | **1.2x faster** |
 | `defprotocol` dispatch (`500k`, `defrecord` var) | **1.16 ms** | 1.24 ms | **1.1x faster** |
-| `map` `get` (`50k` keywords) | 2.24 ms | **1.85 ms** | 0.83x |
 
-Driven by compile-time pure `Math`/`StrictMath` constant folding, `LongRange` + `IReduceInit` + chunked lazy pipelines, unboxed `Fn` primitive dispatch hooks (`invokePrim_*`), adaptive radix/Schwartzian `FastSort` with `LongArraySeq`/`ArraySeq`, `private static final` JIT constant fields + single-load `Var.fastRoot`, direct `Keyword` HAMT/record lookup, primitive `defrecord` fields, and generated JVM protocol interfaces with out-of-line 2-entry PIC fallbacks.
+Driven by compile-time pure `Math`/`StrictMath` constant folding, `LongRange` + `IReduceInit` + chunked lazy pipelines, unboxed `Fn` primitive dispatch hooks (`invokePrim_*`), adaptive radix/Schwartzian `FastSort` with `LongArraySeq`/`ArraySeq`, `private static final` JIT constant fields + single-load `Var.fastRoot`, 32-way `ArrayNode` + iterative HAMT traversal and C2-inlineable `RT.get`/`RT.getKeyword` + O(1) `String` hashing, primitive `defrecord` fields, and generated JVM protocol interfaces with out-of-line 2-entry PIC fallbacks.
 
 ### Cold Startup & AOT Cache Impact
 

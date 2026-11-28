@@ -129,15 +129,14 @@ public final class PersistentHashMap extends clojure.lang.PersistentHashMap
     @Override
     public boolean containsKey(Object key) {
         if (key == null) return hasNull;
-        return root != null && root.find(0, RT.hash(key), key, NOT_FOUND) != NOT_FOUND;
+        return valAt(key, NOT_FOUND) != NOT_FOUND;
     }
 
     public MapEntry entryAt(Object key) {
         if (key == null) {
             return hasNull ? new MapEntry(null, nullValue) : null;
         }
-        if (root == null) return null;
-        Object val = root.find(0, RT.hash(key), key, NOT_FOUND);
+        Object val = valAt(key, NOT_FOUND);
         return val != NOT_FOUND ? new MapEntry(key, val) : null;
     }
 
@@ -149,38 +148,87 @@ public final class PersistentHashMap extends clojure.lang.PersistentHashMap
     @Override
     public Object valAt(Object key, Object notFound) {
         if (key == null) return hasNull ? nullValue : notFound;
-        if (root == null) return notFound;
-        if (key instanceof Keyword kw) return valAtKeyword(kw, notFound);
-        return root.find(0, RT.hash(key), key, notFound);
+        INode r = root;
+        if (r == null) return notFound;
+        if (key instanceof Keyword kw) return valAtKeyword(r, kw, notFound);
+        return findIterative(r, RT.hash(key), key, notFound);
     }
 
     public Object valAtKeyword(Keyword key, Object notFound) {
         INode r = root;
         if (r == null) return notFound;
+        return valAtKeyword(r, key, notFound);
+    }
+
+    private static Object valAtKeyword(INode r, Keyword key, Object notFound) {
         int hash = key.hasheq;
+        int h = hash;
+        int shift = 0;
+        while (r instanceof ArrayNode an) {
+            r = an.array[h & 0x1f];
+            if (r == null) return notFound;
+            h >>>= 5;
+            shift += 5;
+        }
         if (r instanceof BitmapIndexedNode node) {
-            int shift = 0;
             while (true) {
-                int bit = 1 << ((hash >>> shift) & 0x1f);
+                int bit = 1 << (h & 0x1f);
                 int bitmap = node.bitmap;
                 if ((bitmap & bit) == 0) return notFound;
-                int idx = Integer.bitCount(bitmap & (bit - 1));
+                int idx = Integer.bitCount(bitmap & (bit - 1)) << 1;
                 Object[] arr = node.array;
-                Object keyOrNull = arr[2 * idx];
-                Object valOrNode = arr[2 * idx + 1];
-                if (keyOrNull == key) return valOrNode;
+                Object keyOrNull = arr[idx];
+                if (keyOrNull == key) return arr[idx + 1];
                 if (keyOrNull == null) {
+                    Object valOrNode = arr[idx + 1];
+                    h >>>= 5;
+                    shift += 5;
                     if (valOrNode instanceof BitmapIndexedNode nextNode) {
                         node = nextNode;
-                        shift += 5;
                         continue;
                     }
-                    return ((INode) valOrNode).find(shift + 5, hash, key, notFound);
+                    return ((INode) valOrNode).find(shift, hash, key, notFound);
                 }
                 return notFound;
             }
         }
-        return r.find(0, hash, key, notFound);
+        return r.find(shift, hash, key, notFound);
+    }
+
+    private static Object findIterative(INode r, int hash, Object key, Object notFound) {
+        int h = hash;
+        int shift = 0;
+        while (r instanceof ArrayNode an) {
+            r = an.array[h & 0x1f];
+            if (r == null) return notFound;
+            h >>>= 5;
+            shift += 5;
+        }
+        if (r instanceof BitmapIndexedNode node) {
+            while (true) {
+                int bit = 1 << (h & 0x1f);
+                int bitmap = node.bitmap;
+                if ((bitmap & bit) == 0) return notFound;
+                int idx = Integer.bitCount(bitmap & (bit - 1)) << 1;
+                Object[] arr = node.array;
+                Object keyOrNull = arr[idx];
+                if (keyOrNull == null) {
+                    Object valOrNode = arr[idx + 1];
+                    h >>>= 5;
+                    shift += 5;
+                    if (valOrNode instanceof BitmapIndexedNode nextNode) {
+                        node = nextNode;
+                        continue;
+                    }
+                    return ((INode) valOrNode).find(shift, hash, key, notFound);
+                }
+                if (key == keyOrNull || RT.equiv(key, keyOrNull)) {
+                    return arr[idx + 1];
+                }
+                return notFound;
+            }
+        }
+        return r.find(shift, hash, key, notFound);
     }
 
     @Override
@@ -439,6 +487,25 @@ public final class PersistentHashMap extends clojure.lang.PersistentHashMap
                 return new BitmapIndexedNode(bitmap, newArray);
             } else {
                 int n = Integer.bitCount(bitmap);
+                if (n >= 16) {
+                    INode[] nodes = new INode[32];
+                    int jdx = mask(hash, shift);
+                    nodes[jdx] = new BitmapIndexedNode(null, bitpos(hash, shift + 5), new Object[]{key, val});
+                    addedLeaf.val = addedLeaf;
+                    int j = 0;
+                    for (int i = 0; i < 32; i++) {
+                        if (((bitmap >>> i) & 1) != 0) {
+                            if (array[j] == null) {
+                                nodes[i] = (INode) array[j + 1];
+                            } else {
+                                Object k = array[j];
+                                nodes[i] = new BitmapIndexedNode(null, bitpos(RT.hash(k), shift + 5), new Object[]{k, array[j + 1]});
+                            }
+                            j += 2;
+                        }
+                    }
+                    return new ArrayNode(null, n + 1, nodes);
+                }
                 Object[] newArray = new Object[2 * (n + 1)];
                 System.arraycopy(array, 0, newArray, 0, 2 * idx);
                 newArray[2 * idx] = key;
@@ -476,6 +543,25 @@ public final class PersistentHashMap extends clojure.lang.PersistentHashMap
                 return editable;
             } else {
                 int n = Integer.bitCount(bitmap);
+                if (n >= 16) {
+                    INode[] nodes = new INode[32];
+                    int jdx = mask(hash, shift);
+                    nodes[jdx] = new BitmapIndexedNode(edit, bitpos(hash, shift + 5), new Object[]{key, val});
+                    addedLeaf.val = addedLeaf;
+                    int j = 0;
+                    for (int i = 0; i < 32; i++) {
+                        if (((bitmap >>> i) & 1) != 0) {
+                            if (array[j] == null) {
+                                nodes[i] = (INode) array[j + 1];
+                            } else {
+                                Object k = array[j];
+                                nodes[i] = new BitmapIndexedNode(edit, bitpos(RT.hash(k), shift + 5), new Object[]{k, array[j + 1]});
+                            }
+                            j += 2;
+                        }
+                    }
+                    return new ArrayNode(edit, n + 1, nodes);
+                }
                 BitmapIndexedNode editable = ensureEditable(edit);
                 Object[] newArray = new Object[2 * (n + 1)];
                 System.arraycopy(editable.array, 0, newArray, 0, 2 * idx);
@@ -604,26 +690,209 @@ public final class PersistentHashMap extends clojure.lang.PersistentHashMap
         }
     }
 
-    static INode createNode(int shift, Object key1, Object val1, int key2hash, Object key2, Object val2) {
-        int key1hash = RT.hash(key1);
-        if (key1hash == key2hash) {
-            return new HashCollisionNode(null, key1hash, 2, new Object[]{key1, val1, key2, val2});
+    static final class ArrayNode implements INode {
+        private static final long serialVersionUID = 1L;
+        final transient AtomicReference<Thread> edit;
+        int count;
+        final INode[] array;
+
+        ArrayNode(AtomicReference<Thread> edit, int count, INode[] array) {
+            this.edit = edit;
+            this.count = count;
+            this.array = array;
         }
-        Box addedLeaf = new Box(null);
-        return BitmapIndexedNode.EMPTY
-                .assoc(shift, key1hash, key1, val1, addedLeaf)
-                .assoc(shift, key2hash, key2, val2, addedLeaf);
+
+        private ArrayNode ensureEditable(AtomicReference<Thread> edit) {
+            if (this.edit == edit) return this;
+            return new ArrayNode(edit, count, array.clone());
+        }
+
+        private INode pack(AtomicReference<Thread> edit, int idx) {
+            Object[] newArray = new Object[2 * (count - 1)];
+            int j = 1;
+            int bitmap = 0;
+            for (int i = 0; i < idx; i++) {
+                if (array[i] != null) {
+                    newArray[j] = array[i];
+                    bitmap |= 1 << i;
+                    j += 2;
+                }
+            }
+            for (int i = idx + 1; i < array.length; i++) {
+                if (array[i] != null) {
+                    newArray[j] = array[i];
+                    bitmap |= 1 << i;
+                    j += 2;
+                }
+            }
+            return new BitmapIndexedNode(edit, bitmap, newArray);
+        }
+
+        @Override
+        public INode assoc(int shift, int hash, Object key, Object val, Box addedLeaf) {
+            int idx = mask(hash, shift);
+            INode node = array[idx];
+            if (node == null) {
+                INode[] newArray = array.clone();
+                newArray[idx] = new BitmapIndexedNode(null, bitpos(hash, shift + 5), new Object[]{key, val});
+                addedLeaf.val = addedLeaf;
+                return new ArrayNode(null, count + 1, newArray);
+            }
+            INode n = node.assoc(shift + 5, hash, key, val, addedLeaf);
+            if (n == node) return this;
+            INode[] newArray = array.clone();
+            newArray[idx] = n;
+            return new ArrayNode(null, count, newArray);
+        }
+
+        @Override
+        public INode assoc(AtomicReference<Thread> edit, int shift, int hash, Object key, Object val, Box addedLeaf) {
+            int idx = mask(hash, shift);
+            INode node = array[idx];
+            if (node == null) {
+                ArrayNode editable = ensureEditable(edit);
+                editable.array[idx] = new BitmapIndexedNode(edit, bitpos(hash, shift + 5), new Object[]{key, val});
+                editable.count++;
+                addedLeaf.val = addedLeaf;
+                return editable;
+            }
+            INode n = node.assoc(edit, shift + 5, hash, key, val, addedLeaf);
+            if (n == node) return this;
+            ArrayNode editable = ensureEditable(edit);
+            editable.array[idx] = n;
+            return editable;
+        }
+
+        @Override
+        public INode without(int shift, int hash, Object key) {
+            int idx = mask(hash, shift);
+            INode node = array[idx];
+            if (node == null) return this;
+            INode n = node.without(shift + 5, hash, key);
+            if (n == node) return this;
+            if (n == null) {
+                if (count <= 8) return pack(null, idx);
+                INode[] newArray = array.clone();
+                newArray[idx] = null;
+                return new ArrayNode(null, count - 1, newArray);
+            }
+            INode[] newArray = array.clone();
+            newArray[idx] = n;
+            return new ArrayNode(null, count, newArray);
+        }
+
+        @Override
+        public INode without(AtomicReference<Thread> edit, int shift, int hash, Object key, Box removedLeaf) {
+            int idx = mask(hash, shift);
+            INode node = array[idx];
+            if (node == null) return this;
+            INode n = node.without(edit, shift + 5, hash, key, removedLeaf);
+            if (n == node) return this;
+            if (n == null) {
+                if (count <= 8) return pack(edit, idx);
+                ArrayNode editable = ensureEditable(edit);
+                editable.array[idx] = null;
+                editable.count--;
+                return editable;
+            }
+            ArrayNode editable = ensureEditable(edit);
+            editable.array[idx] = n;
+            return editable;
+        }
+
+        @Override
+        public Object find(int shift, int hash, Object key, Object notFound) {
+            int idx = mask(hash, shift);
+            INode node = array[idx];
+            if (node == null) return notFound;
+            return node.find(shift + 5, hash, key, notFound);
+        }
+
+        @Override
+        public ISeq nodeSeq() {
+            return ArrayNodeSeq.create(array);
+        }
+
+        @Override
+        public Object kvreduce(Fn f, Object init) {
+            for (INode node : array) {
+                if (node != null) {
+                    init = node.kvreduce(f, init);
+                    if (init instanceof Reduced) return init;
+                }
+            }
+            return init;
+        }
     }
 
-    static INode createNode(AtomicReference<Thread> edit, int shift, Object key1, Object val1, int key2hash, Object key2, Object val2) {
-        int key1hash = RT.hash(key1);
+    static final class ArrayNodeSeq extends ASeq {
+        final INode[] nodes;
+        final int i;
+        final ISeq s;
+
+        ArrayNodeSeq(PersistentHashMap meta, INode[] nodes, int i, ISeq s) {
+            super(meta);
+            this.nodes = nodes;
+            this.i = i;
+            this.s = s;
+        }
+
+        static ISeq create(INode[] nodes) {
+            return create(nodes, 0, null);
+        }
+
+        private static ISeq create(INode[] nodes, int i, ISeq s) {
+            if (s != null) return new ArrayNodeSeq(null, nodes, i, s);
+            for (int j = i; j < nodes.length; j++) {
+                if (nodes[j] != null) {
+                    ISeq ns = nodes[j].nodeSeq();
+                    if (ns != null) return new ArrayNodeSeq(null, nodes, j + 1, ns);
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public Object first() {
+            return s.first();
+        }
+
+        @Override
+        public ISeq next() {
+            return create(nodes, i, s.next());
+        }
+
+        @Override
+        public ArrayNodeSeq withMeta(PersistentHashMap meta) {
+            if (this.meta == meta) return this;
+            return new ArrayNodeSeq(meta, nodes, i, s);
+        }
+    }
+
+    static INode createNodeWithHash(AtomicReference<Thread> edit, int shift,
+                                    int key1hash, Object key1, Object val1,
+                                    int key2hash, Object key2, Object val2) {
         if (key1hash == key2hash) {
             return new HashCollisionNode(edit, key1hash, 2, new Object[]{key1, val1, key2, val2});
         }
-        Box addedLeaf = new Box(null);
-        return BitmapIndexedNode.EMPTY
-                .assoc(edit, shift, key1hash, key1, val1, addedLeaf)
-                .assoc(edit, shift, key2hash, key2, val2, addedLeaf);
+        int b1 = bitpos(key1hash, shift);
+        int b2 = bitpos(key2hash, shift);
+        if (b1 != b2) {
+            Object[] arr = Integer.compareUnsigned(b1, b2) < 0
+                    ? new Object[]{key1, val1, key2, val2}
+                    : new Object[]{key2, val2, key1, val1};
+            return new BitmapIndexedNode(edit, b1 | b2, arr);
+        }
+        INode child = createNodeWithHash(edit, shift + 5, key1hash, key1, val1, key2hash, key2, val2);
+        return new BitmapIndexedNode(edit, b1, new Object[]{null, child});
+    }
+
+    static INode createNode(int shift, Object key1, Object val1, int key2hash, Object key2, Object val2) {
+        return createNodeWithHash(null, shift, RT.hash(key1), key1, val1, key2hash, key2, val2);
+    }
+
+    static INode createNode(AtomicReference<Thread> edit, int shift, Object key1, Object val1, int key2hash, Object key2, Object val2) {
+        return createNodeWithHash(edit, shift, RT.hash(key1), key1, val1, key2hash, key2, val2);
     }
 
     static final class HashCollisionNode implements INode {
@@ -1024,8 +1293,10 @@ public final class PersistentHashMap extends clojure.lang.PersistentHashMap
         public Object valAt(Object key, Object notFound) {
             ensureEditable();
             if (key == null) return hasNull ? nullValue : notFound;
-            if (root == null) return notFound;
-            return root.find(0, RT.hash(key), key, notFound);
+            INode r = root;
+            if (r == null) return notFound;
+            if (key instanceof Keyword kw) return valAtKeyword(r, kw, notFound);
+            return findIterative(r, RT.hash(key), key, notFound);
         }
 
         @Override
